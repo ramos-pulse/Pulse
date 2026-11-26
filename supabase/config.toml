@@ -1,0 +1,6 @@
+# Configuration Supabase de Pulse
+project_id = "pulse"
+
+[functions.pulse]
+# L'app et le cron ont leur propre authentification (DASHBOARD_TOKEN / secret du cron).
+verify_jwt = false

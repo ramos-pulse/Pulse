@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#08100c">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<title>Pulse · Poste de contrôle</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#08100c;--card:#0e1712;--card2:#142119;--line:#1e2d24;--text:#e8f0e9;--muted:#7f9386;--lime:#c8f560;--amber:#f2b54f;--red:#ef5350;--green:#4ade80;--blue:#7cb8ff;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,monospace;--sans:"Space Grotesk",-apple-system,Roboto,sans-serif;--sb:env(safe-area-inset-bottom)}
+*{box-sizing:border-box;min-width:0;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 var(--sans)}
+body{padding-bottom:calc(80px + var(--sb));overflow-x:clip}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+a{color:var(--blue)}
+.top{position:sticky;top:0;z-index:10;background:linear-gradient(var(--bg) 75%,transparent);padding:calc(14px + env(safe-area-inset-top)) 18px 10px;display:flex;justify-content:space-between;align-items:center}
+.brand{font:600 12px var(--mono);letter-spacing:.3em;color:var(--lime)}
+.live{display:flex;gap:7px;align-items:center;font:12px var(--mono);color:var(--muted)}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
+.dot.ok{background:var(--lime);box-shadow:0 0 10px var(--lime);animation:p 2s infinite}.dot.bad{background:var(--red)}.dot.warn{background:var(--amber)}
+@keyframes p{50%{opacity:.45}}
+main{max-width:560px;margin:0 auto;padding:4px 16px 20px}
+.page{display:none}.page.on{display:block}
+.eyebrow{font:600 12px var(--mono);letter-spacing:.3em;color:var(--amber);margin:24px 4px 12px;text-transform:uppercase}
+.card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:20px;margin-bottom:14px}
+.status{display:flex;align-items:center;gap:10px;font:600 14px var(--mono);letter-spacing:.2em;text-transform:uppercase}
+.status.run{color:var(--lime)}.status.pause{color:var(--amber)}.status.off{color:var(--muted)}.status.win{color:var(--green)}
+.big{font:700 clamp(40px,13vw,54px)/1 var(--mono);letter-spacing:-.03em;margin:18px 0 8px}
+.big small{font-size:.55em;margin-left:8px}
+.sub{color:var(--muted)}
+.bar{height:9px;border-radius:9px;background:#1b2a1f;overflow:hidden;margin:16px 0 2px}.bar i{display:block;height:100%;background:var(--lime);min-width:5px;border-radius:9px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px 14px;margin-top:18px}
+.k{font:12.5px var(--mono);color:var(--muted)}
+.v{font:600 16.5px var(--mono);margin-top:3px;overflow-wrap:anywhere}
+.v.txt{font:500 15px var(--sans)}
+.sep{height:1px;background:var(--line);margin:18px 0}
+.up{color:var(--green)}.down{color:var(--red)}.mut{color:var(--muted)}.amber{color:var(--amber)}
+.think{margin-top:18px;padding:14px;border-radius:14px;background:var(--card2);font-style:italic;color:#cfe0d3}
+.think b{font-style:normal;display:block;font:600 11px var(--mono);letter-spacing:.2em;color:var(--lime);margin-bottom:6px}
+.range{position:relative;height:30px;margin:16px 2px 2px}
+.range .t{position:absolute;top:12px;left:0;right:0;height:6px;border-radius:6px;background:linear-gradient(90deg,rgba(239,83,80,.6),#24352a 50%,rgba(74,222,128,.6))}
+.range .e{position:absolute;top:6px;width:2px;height:18px;background:var(--muted)}
+.range .n{position:absolute;top:5px;width:20px;height:20px;margin-left:-10px;border-radius:50%;background:var(--text);border:4px solid var(--bg)}
+.rl{display:flex;justify-content:space-between;font:11.5px var(--mono);color:var(--muted)}
+.btns{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:0 0 14px}
+.btn{min-height:54px;border-radius:16px;background:var(--card2);border:1px solid var(--line);font:600 16px var(--sans);padding:0 14px}
+.btn.go{background:var(--lime);color:#0b1405;border-color:var(--lime)}.btn.red{background:var(--red);color:#fff;border-color:var(--red)}
+.btn.sm{min-height:40px;font-size:14px;border-radius:12px}
+.btn:active{transform:scale(.98)}.btn:focus-visible{outline:3px solid var(--lime);outline-offset:2px}
+.addr{font:13.5px var(--mono);overflow-wrap:anywhere;margin:10px 0}
+.row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:13px 0;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.l1{font:600 14px var(--mono);letter-spacing:.05em}.l2{font:12px var(--mono);color:var(--muted);margin-top:3px}
+.r{text-align:right;font:600 14.5px var(--mono);white-space:nowrap}
+.pill{font:600 10.5px var(--mono);letter-spacing:.1em;padding:4px 9px;border-radius:99px;background:var(--card2);color:var(--muted)}
+.chips{display:flex;gap:8px;margin-bottom:14px;overflow-x:auto}
+.chip{padding:9px 15px;border-radius:99px;background:var(--card);border:1px solid var(--line);font:13px var(--mono);white-space:nowrap}
+.chip.on{background:var(--lime);color:#0b1405;border-color:var(--lime)}
+table{width:100%;border-collapse:collapse;font:12.5px var(--mono)}th,td{padding:8px 4px;border-bottom:1px solid var(--line);text-align:right}th:first-child,td:first-child{text-align:left}th{color:var(--muted);font-weight:400}
+.note{font-size:13px;color:var(--muted);text-align:center;margin:6px 10px 18px}
+.warnbox{border:1px solid rgba(242,181,79,.4);background:rgba(242,181,79,.08);color:#f6d79a;border-radius:16px;padding:12px 14px;font-size:14px;margin-bottom:14px}
+.field{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}.field:last-child{border-bottom:0}
+input{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:12px;padding:12px;font:16px var(--mono);width:130px;text-align:right}
+nav{position:fixed;left:0;right:0;bottom:0;z-index:20;background:rgba(8,16,12,.95);backdrop-filter:blur(14px);border-top:1px solid var(--line);display:grid;grid-template-columns:repeat(4,1fr);padding:8px 6px calc(8px + var(--sb))}
+nav button{display:flex;flex-direction:column;align-items:center;gap:3px;font:11px var(--mono);color:var(--muted);min-height:44px}
+nav svg{width:22px;height:22px}nav button.on{color:var(--lime)}
+.sheet-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:30;display:none;align-items:flex-end}.sheet-bg.on{display:flex}
+.sheet{width:100%;max-width:560px;margin:0 auto;background:var(--card);border-radius:24px 24px 0 0;padding:24px 20px calc(20px + var(--sb))}
+.sheet h3{margin:0 0 6px;font:600 20px var(--sans)}.sheet p{color:var(--muted);margin:0 0 14px}
+.toast{position:fixed;left:50%;bottom:calc(96px + var(--sb));transform:translateX(-50%);background:var(--card2);border:1px solid var(--line);padding:11px 18px;border-radius:14px;z-index:40;max-width:90vw}
+#login{display:none;min-height:100vh;align-items:center;justify-content:center;padding:24px}
+#login input{width:100%;text-align:left;margin:16px 0}
+@media (prefers-reduced-motion:reduce){.dot.ok{animation:none}}
+</style>
+</head>
+<body>
+<div id="login"><div class="card" style="width:100%;max-width:400px">
+  <div class="brand">PULSE</div>
+  <h2 style="margin:14px 0 4px;font:600 24px var(--sans)">Connexion</h2>
+  <div class="sub">Adresse de ton projet Supabase (ou juste son identifiant) et ton DASHBOARD_TOKEN.</div>
+  <input id="srv" type="url" autocomplete="off" placeholder="https://xxxx.supabase.co" style="margin-bottom:0">
+  <input id="tok" type="password" autocomplete="current-password" placeholder="DASHBOARD_TOKEN">
+  <button class="btn go" style="width:100%" id="loginBtn">Entrer</button>
+</div></div>
+
+<div id="app" style="display:none">
+  <div class="top"><div class="brand">POSTE DE CONTRÔLE</div><div class="live"><span class="dot" id="dot"></span><span id="fresh">connexion…</span></div></div>
+  <main>
+    <div id="alerts"></div>
+    <section class="page on" id="p-home"></section>
+    <section class="page" id="p-hist"></section>
+    <section class="page" id="p-bt"></section>
+    <section class="page" id="p-set"></section>
+  </main>
+  <nav id="nav">
+    <button data-p="home" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12l9-8 9 8M5 10v10h14V10"/></svg>Missions</button>
+    <button data-p="hist"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Historique</button>
+    <button data-p="bt"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 20h18M6 16l4-5 4 3 5-7"/></svg>Backtest</button>
+    <button data-p="set"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>Réglages</button>
+  </nav>
+</div>
+
+<div class="sheet-bg" id="sheet"><div class="sheet" id="sheetBody"></div></div>
+
+<script>
+{
+let TOKEN = "", BASE = "", S = null, PAGE = "home", HF = "all", BT = null, lastOk = 0, seen = 0;
+try { TOKEN = localStorage.getItem("pulse_token") || ""; BASE = localStorage.getItem("pulse_base") || ""; seen = Number(localStorage.getItem("pulse_seen") || 0); } catch (e) {}
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const nf = (n, d = 2) => n == null || !isFinite(n) ? "—" : Number(n).toLocaleString("fr-FR", {minimumFractionDigits: d, maximumFractionDigits: d});
+const px = n => { if (n == null || !isFinite(n)) return "—"; const a = Math.abs(n); return a >= 100 ? nf(n, 2) : a >= 1 ? nf(n, 4) : Number(n).toPrecision(5).replace(".", ","); };
+const sg = (n, d = 2) => n == null || !isFinite(n) ? "—" : (n > 0 ? "+" : "") + nf(n, d);
+const cl = n => n > 0 ? "up" : n < 0 ? "down" : "mut";
+const ago = iso => { if (!iso) return "—"; const s = Math.max(0, (Date.now() - new Date(iso)) / 1000); return s < 60 ? `${s|0} s` : s < 3600 ? `${(s/60)|0} min` : s < 86400 ? `${(s/3600)|0} h` : `${(s/86400)|0} j`; };
+const hhmm = iso => iso ? new Date(iso).toLocaleTimeString("fr-FR", {hour: "2-digit", minute: "2-digit"}) : "—";
+function left(iso) { if (!iso) return "—"; let s = (new Date(iso) - Date.now()) / 1000; if (s <= 0) return "dépassée";
+  const d = Math.floor(s / 86400); s -= d * 86400; const h = Math.floor(s / 3600); s -= h * 3600; const m = Math.floor(s / 60);
+  return `${d}j ${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`; }
+
+function toast(m) { const t = document.createElement("div"); t.className = "toast"; t.textContent = m; document.body.appendChild(t); setTimeout(() => t.remove(), 2600); }
+function sheet(htmlStr) { $("#sheetBody").innerHTML = htmlStr; $("#sheet").classList.add("on"); }
+function closeSheet() { $("#sheet").classList.remove("on"); }
+$("#sheet").addEventListener("click", e => { if (e.target.id === "sheet") closeSheet(); });
+
+async function api(path, opts = {}) {
+  const r = await fetch(BASE + path, {...opts, headers: {"x-token": TOKEN, "content-type": "application/json"}}).catch(() => { throw new Error("réseau"); });
+  if (r.status === 401) { showLogin(); throw new Error("auth"); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(j.error || "Erreur serveur"); throw new Error(j.error); }
+  return j;
+}
+function showLogin() { $("#login").style.display = "flex"; $("#app").style.display = "none"; if (BASE) $("#srv").value = BASE.replace(/\/functions\/v1\/pulse$/, ""); }
+/** Accepte « abcd1234 », « abcd1234.supabase.co » ou l'URL complète. */
+function serverUrl(v) { v = v.trim().replace(/\/+$/, ""); if (!v) return "";
+  if (!/^https?:\/\//.test(v)) v = "https://" + (v.includes(".") ? v : v + ".supabase.co");
+  return v.includes("/functions/v1/pulse") ? v : v + "/functions/v1/pulse"; }
+$("#loginBtn").onclick = () => { BASE = serverUrl($("#srv").value); TOKEN = $("#tok").value.trim();
+  if (!BASE || !TOKEN) return toast("Remplis les deux champs");
+  try { localStorage.setItem("pulse_token", TOKEN); localStorage.setItem("pulse_base", BASE); } catch (e) {} $("#login").style.display = "none"; refresh(); };
+
+$("#nav").onclick = e => { const b = e.target.closest("button"); if (b) go(b.dataset.p); };
+function go(p) { PAGE = p; document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
+  document.querySelectorAll(".page").forEach(x => x.classList.toggle("on", x.id === "p-" + p)); render(); scrollTo(0, 0); }
+
+async function refresh() {
+  try { S = await api("/api/state"); lastOk = Date.now(); $("#app").style.display = "block"; notifyNew(); render(); } catch (e) { fresh(); }
+}
+function fresh() { const s = lastOk ? (Date.now() - lastOk) / 1000 : 999, ok = s < 10;
+  $("#dot").className = "dot " + (ok ? "ok" : "bad"); $("#fresh").textContent = ok ? "en direct" : lastOk ? `hors ligne · ${s|0} s` : "connexion…"; }
+
+async function notifyNew() {
+  const all = ["spot", "perps"].flatMap(k => S.bots[k].trades).filter(t => new Date(t.created_at).getTime() > seen);
+  if (!all.length) return;
+  seen = Math.max(...all.map(t => new Date(t.created_at).getTime())); try { localStorage.setItem("pulse_seen", seen); } catch (e) {}
+  for (const t of all.slice(0, 3)) {
+    const msg = `${(t.side || t.action || "").toUpperCase()} ${t.symbol || t.asset || ""}${t.pnl_usd != null ? " · " + sg(t.pnl_usd) + " $" : ""}`;
+    if (document.hidden && "Notification" in window && Notification.permission === "granted") {
+      const reg = await navigator.serviceWorker?.getRegistration(); reg?.showNotification("Pulse", {body: msg, icon: "icon-192.png"});
+    } else toast(msg);
+  }
+}
+
+const STATUS = {running: ["run", "En mission"], paused: ["pause", "En pause"], stopped: ["off", "Arrêté"], success: ["win", "Mission réussie"], destroyed: ["off", "Terminée"]};
+
+function missionCard(kind, title) {
+  const b = S.bots[kind], m = b.memory, br = b.brain, [sc, st] = STATUS[b.status] || ["off", b.status];
+  const value = b.last_value_usd, start = b.start_value_usd, goal = b.goal_usd;
+  const gain = value != null && start ? value - start : null;
+  const prog = value != null && goal ? Math.min(100, value / goal * 100) : 0;
+  const inPos = kind === "spot" ? b.position_mint : b.position_side;
+  const sym = m.asset || b.position_asset || "";
+  const side = kind === "perps" ? b.position_side : "long";
+  let pos = "";
+  if (inPos) {
+    const cur = m.live?.price, entry = b.entry_price, stop = m.stop;
+    const lo = Math.min(stop ?? entry, entry, cur ?? entry), hi = Math.max(stop ?? entry, entry, cur ?? entry, m.best ?? entry);
+    const at = v => hi > lo ? ((v - lo) / (hi - lo) * 100).toFixed(1) : 50;
+    pos = `<div class="sep"></div>
+      <div class="grid" style="margin-top:0">
+        <div><div class="k">Position</div><div class="v">${kind === "perps" ? (side === "short" ? "SHORT ▼ " : "LONG ▲ ") : ""}${esc(sym)}</div></div>
+        <div><div class="k">Résultat ${kind === "perps" ? "(cours)" : "(frais inclus)"}</div><div class="v ${cl(m.live?.pnlPct)}">${sg(m.live?.pnlPct)} %</div></div>
+        <div><div class="k">Prix d'entrée</div><div class="v">${px(entry)} $</div></div>
+        <div><div class="k">Cours actuel</div><div class="v">${px(cur)} $</div></div>
+        <div><div class="k">Stop suiveur</div><div class="v amber">${px(stop)} $</div></div>
+        <div><div class="k">Ouverte depuis</div><div class="v">${m.openedAt ? ago(new Date(m.openedAt).toISOString()) : "—"}</div></div>
+      </div>
+      ${stop && cur ? `<div class="range"><div class="t" style="${side === "short" ? "transform:scaleX(-1)" : ""}"></div><div class="e" style="left:${at(entry)}%"></div><div class="n" style="left:${at(cur)}%"></div></div>
+      <div class="rl"><span>${side === "short" ? "meilleur" : "stop"} ${px(lo)}</span><span>${side === "short" ? "stop" : "meilleur"} ${px(hi)}</span></div>` : ""}`;
+  }
+  const running = b.status === "running", paused = b.status === "paused";
+  const wallet = S.wallets[kind];
+  return `<div class="eyebrow">${title}</div>
+  <div class="card">
+    <div class="status ${sc}"><span class="dot ${sc === "run" ? "ok" : sc === "pause" ? "warn" : ""}"></span>${st}${m.pending ? ' <span class="pill">tx en cours</span>' : ""}</div>
+    <div class="big">${nf(value)}<small>$</small></div>
+    <div class="sub">sur un objectif de ${nf(goal, 0)} $${start ? ` · départ ${nf(start)} $` : ""}</div>
+    <div class="bar"><i style="width:${prog}%"></i></div>
+    <div class="grid">
+      <div><div class="k">Date objectif dans</div><div class="v amber">${left(b.end_at)}</div></div>
+      <div><div class="k">Gain depuis le départ</div><div class="v ${cl(gain)}">${gain == null ? "—" : `${sg(gain)} $ (${sg(gain / start * 100)} %)`}</div></div>
+      <div><div class="k">Dernier contrôle</div><div class="v">${hhmm(b.last_tick_at)}</div></div>
+      <div><div class="k">Risque par trade</div><div class="v">${br ? nf(br.risk * 100, 1) + " %" : "—"}${br && br.streak ? ` <span class="${br.streak > 0 ? "up" : "down"}">${br.streak > 0 ? "▲" + br.streak : "▼" + -br.streak}</span>` : ""}</div></div>
+    </div>
+    <div class="sep"></div>
+    <div class="k">Dernière action</div><div class="v txt">${esc(b.last_message)}</div>
+    ${pos}
+    ${m.mindset ? `<div class="think"><b>CE QUE PENSE LE BOT</b>${esc(m.mindset)}</div>` : ""}
+    ${!inPos && m.signal ? `<div class="k" style="margin-top:14px">Dernière analyse</div><div class="l2" style="line-height:1.5">${esc(m.signal)}</div>` : ""}
+  </div>
+  <div class="btns">
+    ${running ? `<button class="btn" data-act="pause" data-k="${kind}">Pause</button>`
+      : `<button class="btn go" data-act="start" data-k="${kind}">${paused ? "Reprendre" : "Lancer la mission"}</button>`}
+    <button class="btn red" data-act="stop" data-k="${kind}">Arrêt d'urgence</button>
+  </div>
+  <div class="card">
+    <div class="v txt" style="font-weight:600">${kind === "spot" ? "Portefeuille du robot" : "Portefeuille perps"}</div>
+    ${wallet ? `<div class="addr">${esc(wallet)}</div><button class="btn sm" data-copy="${esc(wallet)}">Copier l'adresse</button>
+      <p class="sub" style="margin:12px 0 0">Dépose des USDC (Solana) + environ 0,03 SOL pour les frais. ${kind === "perps" ? "Minimum 10 $ d'USDC pour ouvrir une position." : ""}</p>`
+      : `<p class="sub" style="margin:8px 0 0">Secret ${kind === "spot" ? "BOT_WALLET_PRIVATE_KEY" : "PERPS_WALLET_PRIVATE_KEY"} absent dans Supabase (Edge Functions → Secrets).</p>`}
+  </div>`;
+}
+
+function render() {
+  fresh(); if (!S) return;
+  let a = "";
+  if (!S.secrets.customRpc) a += `<div class="warnbox">RPC Solana public utilisé : ajoute le secret SOLANA_RPC_URL (ton lien Helius) dans Supabase.</div>`;
+  if (!S.secrets.telegram && PAGE === "home") a += `<div class="warnbox">Ajoute les secrets TELEGRAM_BOT_TOKEN et TELEGRAM_CHAT_ID dans Supabase pour être prévenu même téléphone verrouillé.</div>`;
+  $("#alerts").innerHTML = a;
+  if (PAGE === "home") $("#p-home").innerHTML = missionCard("spot", "Bot 1 · Spot Solana") + missionCard("perps", `Bot 2 · Perps SOL x${S.rules.perps.maxLeverage} max`) + rulesNote();
+  if (PAGE === "hist") renderHist();
+  if (PAGE === "bt") renderBt();
+  if (PAGE === "set") renderSet();
+}
+
+function rulesNote() {
+  const st = S.rules.strategy, r = S.rules.risk;
+  return `<div class="note">Suivi de tendance en bougies 1 h · entrée sur cassure en tendance forte · stop initial ${st.stopAtr} ATR puis stop suiveur · risque ${nf(r.perTrade * 100, 1)} % du capital par trade · perte max ${r.dailyLoss * 100} % par jour</div>`;
+}
+
+function renderHist() {
+  const rows = ["spot", "perps"].flatMap(k => S.bots[k].trades.map(t => ({...t, k}))).filter(t => HF === "all" || t.k === HF)
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const closes = rows.filter(t => t.pnl_usd != null), wins = closes.filter(t => t.pnl_usd > 0);
+  const gw = wins.reduce((s, t) => s + t.pnl_usd, 0), gl = -closes.filter(t => t.pnl_usd <= 0).reduce((s, t) => s + t.pnl_usd, 0);
+  const net = gw - gl, pf = gl ? gw / gl : gw ? Infinity : 0;
+  $("#p-hist").innerHTML = `<div class="eyebrow">Historique</div>
+    <div class="chips">${[["all", "Tout"], ["spot", "Spot"], ["perps", "Perps"]].map(([k, l]) => `<button class="chip ${HF === k ? "on" : ""}" data-hf="${k}">${l}</button>`).join("")}</div>
+    <div class="card"><div class="grid" style="margin-top:0">
+      <div><div class="k">Trades clôturés</div><div class="v">${closes.length}</div></div>
+      <div><div class="k">Gagnants</div><div class="v">${closes.length ? nf(wins.length / closes.length * 100, 0) + " %" : "—"}</div></div>
+      <div><div class="k">Résultat net</div><div class="v ${cl(net)}">${sg(net)} $</div></div>
+      <div><div class="k">Profit factor</div><div class="v ${pf >= 1 ? "up" : "down"}">${closes.length ? (pf === Infinity ? "∞" : nf(pf)) : "—"}</div></div>
+    </div></div>
+    <div class="card">${rows.map(t => { const act = (t.side || t.action || "").toUpperCase(), sell = act === "SELL" || act === "CLOSE";
+      const label = {BUY: "ACHAT", SELL: "VENTE", OPEN: "OUVRE", CLOSE: "FERME"}[act] || act;
+      const amt = t.amount_usd ?? t.collateral_usd;
+      return `<div class="row"><div><div class="l1"><span class="${sell ? "amber" : "up"}">${label}</span> ${t.k === "perps" && t.side ? esc(t.side.toUpperCase()) + " " : ""}${esc(t.symbol || t.asset)}</div>
+        <div class="l2">${new Date(t.created_at).toLocaleString("fr-FR", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"})} · ${esc(t.reason || "")}</div></div>
+        <div class="r">${amt != null ? nf(amt) + " $" : ""}${t.pnl_usd != null ? `<div class="${cl(t.pnl_usd)}">${sg(t.pnl_usd)} $</div>` : ""}
+        ${t.signature ? `<div class="l2"><a href="https://solscan.io/tx/${esc(t.signature)}" target="_blank" rel="noopener">tx ↗</a></div>` : ""}</div></div>`; }).join("") || `<div class="sub">Aucun trade pour l'instant.</div>`}</div>`;
+}
+
+function renderBt() {
+  const el = $("#p-bt");
+  let body = `<div class="eyebrow">Backtest · 60 jours</div>
+    <div class="card"><p class="sub" style="margin-top:0">Rejoue la stratégie sur les vrais prix des 60 derniers jours, frais inclus, avec les 3 réglages que le bot choisit chaque jour. Simulation du passé : ça ne garantit pas le futur.</p>
+    <button class="btn go" style="width:100%" id="btRun">${BT === "loading" || BT?.partial ? "Calcul en cours…" : "Lancer le backtest"}</button></div>`;
+  if (BT && BT !== "loading") {
+    body += BT.results.map(r => r.error ? `<div class="card"><div class="l1">${esc(r.market)}</div><div class="l2">${esc(r.error)}</div></div>` :
+      `<div class="card"><div class="l1">${esc(r.market)} <span class="mut">· ${r.days} j</span></div>
+      <div style="overflow-x:auto"><table style="margin-top:10px"><tr><th>Réglage</th><th>Trades</th><th>Gagn.</th><th>PF</th><th>Rend.</th><th>DD</th></tr>
+      ${r.presets.map(p => `<tr><td>${esc(p.name)}</td><td>${p.trades}</td><td>${nf(p.winRate, 0)}%</td><td class="${(p.profitFactor ?? 9) >= 1.1 ? "up" : "down"}">${p.profitFactor == null ? "∞" : nf(p.profitFactor)}</td><td class="${cl(p.returnPct)}">${sg(p.returnPct, 1)}%</td><td>${nf(p.maxDrawdownPct, 1)}%</td></tr>`).join("")}</table></div></div>`).join("");
+    body += `<div class="note">PF = profit factor (gains ÷ pertes). Au-dessus de 1,1 : le réglage est rentable sur la période. Le bot n'utilise que ceux-là.</div>`;
+  }
+  // rapport d'apprentissage du bot
+  const reps = ["spot", "perps"].flatMap(k => Object.entries(S.bots[k].brain?.report || {}).map(([m, r]) => ({m, r, k})));
+  if (reps.length) body += `<div class="eyebrow">Ce que le bot a appris aujourd'hui</div><div class="card"><table><tr><th>Marché</th><th>Réglage</th><th>PF</th><th>Rend.</th><th>DD</th></tr>
+    ${reps.map(({m, r}) => `<tr><td>${esc(m)}</td><td>${esc(r.preset)}</td><td>${nf(r.pf)}</td><td class="${cl(r.ret)}">${sg(r.ret, 1)}%</td><td>${nf(r.dd, 1)}%</td></tr>`).join("")}</table></div>`;
+  el.innerHTML = body;
+}
+
+function renderSet() {
+  const s = S.secrets, ok = v => v ? '<span class="up">✓</span>' : '<span class="down">✗</span>';
+  const g = k => S.bots[k];
+  $("#p-set").innerHTML = `<div class="eyebrow">Objectifs</div>
+    ${["spot", "perps"].map(k => `<div class="card"><div class="v txt" style="font-weight:600">${k === "spot" ? "Bot 1 · Spot" : "Bot 2 · Perps"}</div>
+      <label class="field"><span>Objectif ($)</span><input type="number" inputmode="decimal" id="goal-${k}" value="${g(k).goal_usd}"></label>
+      <label class="field"><span>Échéance dans (jours)</span><input type="number" inputmode="numeric" id="days-${k}" placeholder="${g(k).end_at ? Math.max(0, Math.ceil((new Date(g(k).end_at) - Date.now()) / 86400000)) : 30}"></label>
+      <button class="btn sm" style="width:100%;margin-top:12px" data-goal="${k}">Enregistrer</button></div>`).join("")}
+    <div class="eyebrow">Connexions</div>
+    <div class="card" style="font:14px/2 var(--mono)">${ok(s.spotWallet)} Wallet spot<br>${ok(s.perpsWallet)} Wallet perps<br>${ok(s.customRpc)} RPC Solana privé<br>${ok(s.telegram)} Telegram<br>${ok(s.cron)} Tick automatique chaque minute</div>
+    <div class="eyebrow">Application</div>
+    <div class="card">
+      <div class="field"><span>Notifications sur ce téléphone</span><button class="btn sm" id="notif">${"Notification" in window && Notification.permission === "granted" ? "Activées ✓" : "Activer"}</button></div>
+      <div class="field"><span>Installer l'app</span><button class="btn sm" id="install">Installer</button></div>
+      <div class="field"><span>Se déconnecter</span><button class="btn sm" id="logout">Quitter</button></div>
+    </div>${rulesNote()}`;
+}
+
+// ---------------------------------------------------------------- actions
+document.addEventListener("click", async e => {
+  const t = e.target.closest("button"); if (!t) return;
+  if (t.dataset.copy) { try { await navigator.clipboard.writeText(t.dataset.copy); toast("Adresse copiée"); } catch (err) { toast("Copie impossible"); } return; }
+  if (t.dataset.hf) { HF = t.dataset.hf; renderHist(); return; }
+  if (t.id === "btRun") {
+    BT = "loading"; renderBt(); const results = [];
+    for (let i = 0; i < S.markets.length; i++) {
+      try { results.push(await api(`/api/backtest?market=${i}`)); } catch (err) { results.push({market: S.markets[i], error: "indisponible"}); }
+      BT = {results, partial: i < S.markets.length - 1}; renderBt();
+    }
+    return; }
+  if (t.id === "notif") { if (!("Notification" in window)) return toast("Non supporté ici"); await Notification.requestPermission(); renderSet(); return; }
+  if (t.id === "install") { if (window.__inst) { window.__inst.prompt(); window.__inst = null; } else toast("Menu ⋮ de Brave → « Ajouter à l'écran d'accueil »"); return; }
+  if (t.id === "logout") { try { localStorage.removeItem("pulse_token"); } catch (err) {} location.reload(); return; }
+  if (t.dataset.goal) { const k = t.dataset.goal;
+    await api(`/api/${k}/goal`, {method: "POST", body: JSON.stringify({goal_usd: Number($("#goal-" + k).value), days: Number($("#days-" + k).value)})}); toast("Enregistré"); refresh(); return; }
+  if (t.id === "sheetCancel") return closeSheet();
+  const k = t.dataset.k, act = t.dataset.act;
+  if (act === "pause") { await api(`/api/${k}/pause`, {method: "POST"}); toast("En pause (la position reste gérée)"); refresh(); }
+  if (act === "start") {
+    const b = S.bots[k];
+    if (b.status === "paused") { await api(`/api/${k}/start`, {method: "POST", body: "{}"}); toast("Mission reprise"); refresh(); return; }
+    sheet(`<h3>Lancer la mission</h3><p>Le bot va trader avec les fonds du portefeuille ${k === "spot" ? "spot" : "perps"}.</p>
+      <label class="field"><span>Objectif ($)</span><input type="number" id="sg" value="${b.goal_usd}"></label>
+      <label class="field"><span>Échéance (jours)</span><input type="number" id="sd" value="30"></label>
+      <div class="btns" style="margin-top:16px"><button class="btn" id="sheetCancel">Annuler</button><button class="btn go" data-act="go" data-k="${k}">Lancer</button></div>`);
+  }
+  if (act === "go") { await api(`/api/${k}/start`, {method: "POST", body: JSON.stringify({goal_usd: Number($("#sg").value), days: Number($("#sd").value)})}); closeSheet(); toast("Mission lancée"); refresh(); }
+  if (act === "stop") sheet(`<h3>Arrêt d'urgence</h3><p>${k === "spot" ? "Tous les jetons seront revendus en USDC" : "La position perps sera fermée"} et le bot mis en pause.</p>
+      <div class="btns"><button class="btn" id="sheetCancel">Annuler</button><button class="btn red" data-act="kill" data-k="${k}">Tout arrêter</button></div>`);
+  if (act === "kill") { closeSheet(); toast("Fermeture en cours… (jusqu'à 1 min)"); try { await api(`/api/${k}/stop`, {method: "POST"}); toast("Arrêté"); } catch (err) {} refresh(); }
+});
+
+addEventListener("beforeinstallprompt", e => { e.preventDefault(); window.__inst = e; });
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+if (!TOKEN || !BASE) showLogin(); else refresh();
+setInterval(() => { if (!document.hidden && !$("#sheet").classList.contains("on") && PAGE !== "set") refresh(); else fresh(); }, 5000);
+}
+</script>
+</body>
+</html>
