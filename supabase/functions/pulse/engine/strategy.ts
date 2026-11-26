@@ -207,9 +207,20 @@ export function spotSizeUsd(equity: number, usdc: number, entry: number, stop: n
 }
 
 /** Perps : collatéral et levier pour risquer `risk` du capital, levier plafonné à `maxLev`. */
-export function perpsSizing(equity: number, usdc: number, entry: number, stop: number, risk = RISK.perTrade, maxLev: number = PERPS_RULES.maxLeverage) {
+/**
+ * Levier maximum que permet un stop : le stop doit TOUJOURS être touché bien avant la liquidation.
+ * Sur Jupiter, liquidation quand le collatéral restant < 0,2 % de la taille, soit une perte ≈ 1/levier − 0,2 % (− frais).
+ * On garde une marge : distance du stop ≤ 70 % de la distance de liquidation.
+ */
+export const LIQ = { maintenance: 0.002, fees: 0.002, safety: 0.7 };
+export function stopSafeLeverage(dist: number): number {
+  return 1 / (dist / LIQ.safety + LIQ.maintenance + LIQ.fees);
+}
+
+export function perpsSizing(equity: number, usdc: number, entry: number, stop: number, risk = RISK.perTrade, maxLevWanted: number = PERPS_RULES.maxLeverage) {
   const dist = Math.abs(entry - stop) / entry;
   if (!(dist > 0)) return null;
+  const maxLev = Math.max(1.1, Math.min(maxLevWanted, stopSafeLeverage(dist))); // jamais de levier qui liquiderait avant le stop
   const notional = (equity * risk) / dist;
   let collateral = Math.max(PERPS_RULES.minCollateralUsd, notional / maxLev);
   if (collateral > usdc) return null;
@@ -223,15 +234,44 @@ export function perpsSizing(equity: number, usdc: number, entry: number, stop: n
 // Réglages du bot perps : mode agressif et biais longs / shorts
 // ---------------------------------------------------------------------------------------------------
 export type PerpsMode = "normal" | "agressif";
-export interface PerpsConfig { mode: PerpsMode; bias: number; trend: Params | null; source?: string; autopilot: boolean; plan: PerpsPlan | null } // bias : -100 = shorts seulement, 0 = équilibré, +100 = longs seulement
+export interface PerpsConfig { mode: PerpsMode; aggr: number; maxLev: number; pilotAggressive: boolean; bias: number; trend: Params | null; source?: string; autopilot: boolean; plan: PerpsPlan | null } // bias : -100 = shorts seulement, 0 = équilibré, +100 = longs seulement
 
 /** Mode agressif : risque doublé (plafond 3 %), levier jusqu'à x5, perte max 8 %/jour, trade même sans réglage validé. */
 export const AGGRESSIVE = { riskMult: 2, maxRisk: 0.03, maxLeverage: 5, dailyLoss: 0.08 };
 
+/** Leviers maximum proposés dans l'app (Jupiter : 250x maximum à l'ouverture). */
+export const LEVERAGES = [3, 5, 10, 100, 250] as const;
+/**
+ * Barre d'agressivité du bot perps, de la plus faible à la plus forte.
+ * riskMult : multiplie le risque par trade choisi par le cerveau ; maxRisk : plafond ; dailyLoss : perte max du jour.
+ * À partir de « Agressif », le bot trade aussi quand aucun réglage n'a été validé sur 60 jours.
+ */
+export const AGGR_LEVELS = [
+  { name: "Prudent", riskMult: 0.5, maxRisk: 0.01, dailyLoss: 0.03 },
+  { name: "Normal", riskMult: 1, maxRisk: 0.02, dailyLoss: RISK.dailyLoss },
+  { name: "Dynamique", riskMult: 1.5, maxRisk: 0.025, dailyLoss: 0.065 },
+  { name: "Agressif", riskMult: 2, maxRisk: 0.03, dailyLoss: 0.08 },
+  { name: "Très agressif", riskMult: 3, maxRisk: 0.045, dailyLoss: 0.12 },
+] as const;
+export const AGGR_NORMAL = 1, AGGR_AGGRESSIVE = 3;
+
+/**
+ * Niveau réellement appliqué. Prudence : en pilote automatique, le niveau est plafonné à « Normal »,
+ * sauf si le mode agressif du chercheur est activé.
+ */
+export function effectiveAggr(c: Pick<PerpsConfig, "aggr" | "autopilot" | "pilotAggressive">): number {
+  return c.autopilot && !c.pilotAggressive ? Math.min(c.aggr, AGGR_NORMAL) : c.aggr;
+}
+
 export function loadPerpsConfig(raw: unknown): PerpsConfig {
   const o = (raw && typeof raw === "object" ? raw : {}) as Partial<PerpsConfig>;
   const bias = Number(o.bias);
-  return { mode: o.mode === "agressif" ? "agressif" : "normal", bias: Number.isFinite(bias) ? Math.round(Math.min(100, Math.max(-100, bias))) : 0,
+  const a = Number(o.aggr);
+  const aggr = Number.isFinite(a) ? Math.round(Math.min(AGGR_LEVELS.length - 1, Math.max(0, a))) : o.mode === "agressif" ? AGGR_AGGRESSIVE : AGGR_NORMAL; // ancien réglage « agressif » conservé
+  const lev = Number(o.maxLev);
+  const maxLev = (LEVERAGES as readonly number[]).includes(lev) ? lev : PERPS_RULES.maxLeverage;
+  return { mode: aggr >= AGGR_AGGRESSIVE ? "agressif" : "normal", aggr, maxLev, pilotAggressive: o.pilotAggressive === true,
+    bias: Number.isFinite(bias) ? Math.round(Math.min(100, Math.max(-100, bias))) : 0,
     trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}),
     autopilot: o.autopilot === true, plan: sanitizePerpsPlan(o.plan) };
 }
@@ -411,7 +451,10 @@ export const RSI_DEFAULTS: RsiParams = { rsiPeriod: 14, entry: 30, exit: 50, sma
 export const NAIVE_EXIT = 70;
 
 export type SpotStrategy = "tendance" | "rsi";
-export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams; trend: Params | null; source?: string; autopilot: boolean; plans: SpotPlan[]; swapAuto: boolean }
+export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams; trend: Params | null; source?: string; autopilot: boolean; plans: SpotPlan[]; swapAuto: boolean; researchAggressive: boolean; nerve: number }
+
+/** Barre de nervosité des agents : 0 calme, 1 normal (tout est permis, comme avant), 2 nerveux, 3 très nerveux. */
+export const NERVE_LEVELS = ["Calme", "Normal", "Nerveux", "Très nerveux"] as const;
 
 /** Réglages de tendance personnalisés (appliqués depuis le chercheur) ; null = le cerveau choisit chaque jour. */
 export function sanitizeTrend(t: unknown): Params | null {
@@ -445,7 +488,8 @@ export function sanitizeRsi(p: Partial<RsiParams> | null | undefined): RsiParams
 export function loadConfig(raw: unknown): SpotConfig {
   const o = (raw && typeof raw === "object" ? raw : {}) as Partial<SpotConfig>;
   return { strategy: o.strategy === "rsi" ? "rsi" : "tendance", rsi: sanitizeRsi(o.rsi), trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}),
-    autopilot: o.autopilot === true, plans: sanitizeSpotPlans(o.plans), swapAuto: o.swapAuto !== false };
+    autopilot: o.autopilot === true, plans: sanitizeSpotPlans(o.plans), swapAuto: o.swapAuto !== false,
+    researchAggressive: o.researchAggressive === true, nerve: Number.isFinite(Number(o.nerve)) ? Math.round(Math.min(3, Math.max(0, Number(o.nerve)))) : 1 };
 }
 
 const SYMBOLS = new Set<string>(TOKENS.map((t) => t.symbol));

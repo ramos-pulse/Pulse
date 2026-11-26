@@ -32,29 +32,56 @@ export const SPACE = {
   rsi: { rsiPeriod: [7, 10, 14, 21], entry: [20, 25, 30, 35], exit: [45, 50, 55, 60, 65], smaPeriod: [50, 100, 150, 200], swingBars: [5, 10, 15, 20] },
 } as const;
 
-/** Une stratégie au hasard dans l'espace de recherche. Le RSI n'existe qu'en spot (achat uniquement). */
-export function randomCandidate(rnd: () => number, m: Market): Candidate {
-  const family: Family = m.kind === "spot" && rnd() < 0.5 ? "rsi" : "tendance";
-  return { market: m.name, product: m.product, symbol: m.symbol, kind: m.kind, interval: m.interval, family, params: randomParams(rnd, family) };
+/** Réglages supplémentaires explorés quand la nervosité est « Nerveux » ou plus : cassures très courtes, stops serrés, RSI rapide. */
+export const SPACE_FAST = {
+  tendance: { breakout: [6, 8], trailAtr: [1.5], minTrend: [0.3] },
+  rsi: { rsiPeriod: [5], entry: [40], exit: [] as number[], smaPeriod: [20], swingBars: [3] },
+} as const;
+type Space = { tendance: Record<keyof typeof SPACE.tendance, readonly number[]>; rsi: Record<keyof typeof SPACE.rsi, readonly number[]> };
+/** Espace de recherche : normal, ou élargi aux réglages nerveux. Les listes restent triées (les mutations bougent d'un cran). */
+export function space(fast = false): Space {
+  if (!fast) return SPACE;
+  const merge = <T extends Record<string, readonly number[]>>(a: T, b: Partial<Record<keyof T, readonly number[]>>) =>
+    Object.fromEntries(Object.entries(a).map(([k, v]) => [k, [...new Set([...(b[k as keyof T] ?? []), ...v])].sort((x, y) => x - y)])) as unknown as T;
+  return { tendance: merge(SPACE.tendance, SPACE_FAST.tendance), rsi: merge(SPACE.rsi, SPACE_FAST.rsi) };
 }
 
-function randomParams(rnd: () => number, family: Family): Params | RsiParams {
+/**
+ * Rythme d'une stratégie : 0 calme, 1 normal, 2 nerveux, 3 très nerveux.
+ * Bougies de 15 min, cassures courtes et RSI rapide la rendent plus nerveuse (plus de trades).
+ */
+export function tempo(c: { interval?: string | null; family: Family; params: unknown }): number {
+  const p = c.params as Record<string, number>;
+  let t = 1 + (c.interval === "15m" ? 1 : 0);
+  const b = Number(p.breakout), r = Number(p.rsiPeriod);
+  if (c.family === "tendance") t += b <= 12 ? 1 : b >= 48 ? -1 : 0;
+  else t += r <= 7 ? 1 : r >= 21 ? -1 : 0;
+  return Math.max(0, Math.min(3, t));
+}
+
+/** Une stratégie au hasard dans l'espace de recherche. Le RSI n'existe qu'en spot (achat uniquement). */
+export function randomCandidate(rnd: () => number, m: Market, fast = false): Candidate {
+  const family: Family = m.kind === "spot" && rnd() < 0.5 ? "rsi" : "tendance";
+  return { market: m.name, product: m.product, symbol: m.symbol, kind: m.kind, interval: m.interval, family, params: randomParams(rnd, family, space(fast)) };
+}
+
+function randomParams(rnd: () => number, family: Family, S: Space = SPACE): Params | RsiParams {
   if (family === "tendance") {
-    const t = SPACE.tendance;
+    const t = S.tendance;
     return { breakout: pick(rnd, t.breakout), trailAtr: pick(rnd, t.trailAtr), minTrend: pick(rnd, t.minTrend) };
   }
-  const r = SPACE.rsi;
+  const r = S.rsi;
   const entry = pick(rnd, r.entry);
   const exits = r.exit.filter((x) => x > entry + 10);
   return { rsiPeriod: pick(rnd, r.rsiPeriod), entry, exit: pick(rnd, exits.length ? exits : [entry + 20]), smaPeriod: pick(rnd, r.smaPeriod), swingBars: pick(rnd, r.swingBars), riskPct: 1, naive: false };
 }
 
 /** Petite variation d'une bonne stratégie : un seul réglage bouge d'un cran. */
-export function mutate(rnd: () => number, c: Candidate): Candidate {
-  const space = SPACE[c.family] as Record<string, readonly number[]>;
-  const keys = Object.keys(space);
+export function mutate(rnd: () => number, c: Candidate, fast = false): Candidate {
+  const grid = space(fast)[c.family] as Record<string, readonly number[]>;
+  const keys = Object.keys(grid);
   const k = pick(rnd, keys);
-  const list = space[k]!;
+  const list = grid[k]!;
   const cur = (c.params as unknown as Record<string, number>)[k]!;
   let i = list.indexOf(cur);
   if (i < 0) i = Math.floor(list.length / 2);

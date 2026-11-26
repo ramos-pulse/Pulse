@@ -27,20 +27,42 @@ jobs:
       PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # Le moteur des bots n'est redéployé que si son code (ou la base, ou ce fichier) a changé :
+      # une modif de l'app seule ne touche jamais aux bots en train de tourner.
+      - name: Le moteur des bots a-t-il changé ?
+        id: chg
+        run: |
+          BEFORE="${{ github.event.before }}"
+          if [ "${{ github.event_name }}" != "push" ] || [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git diff --name-only "$BEFORE" "${{ github.sha }}" | grep -qE '^(supabase/|\.github/)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Seule l'app a changé : le moteur des bots n'est pas redéployé."
+          fi
       - name: Vérifier les secrets
+        if: steps.chg.outputs.run == 'true'
         run: |
           for v in SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD PROJECT_REF; do
             if [ -z "${!v}" ]; then echo "::error::Secret GitHub manquant : $v (Settings → Secrets and variables → Actions)"; exit 1; fi
           done
       - uses: supabase/setup-cli@v1
+        if: steps.chg.outputs.run == 'true'
         with:
           version: latest
       - name: Relier le projet
+        if: steps.chg.outputs.run == 'true'
         run: supabase link --project-ref "$PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
       - name: Base de données (tables + cron)
+        if: steps.chg.outputs.run == 'true'
         # selon la version de l'outil Supabase, l'option s'appelle --remote ou --linked
         run: supabase db push --remote --password "$SUPABASE_DB_PASSWORD" --yes || supabase db push --linked --password "$SUPABASE_DB_PASSWORD" --yes
       - name: Fonction des bots
+        if: steps.chg.outputs.run == 'true'
         run: supabase functions deploy pulse --no-verify-jwt --yes
 
   app-build:

@@ -12,7 +12,7 @@
 //  - autocorrélation des rendements à 1 bougie ;
 //  - demi-vie du retour à la moyenne (processus d'Ornstein-Uhlenbeck, régression de l'écart à la moyenne) ;
 //  - quantiles empiriques : profondeur des replis pendant les tendances (stop suiveur), niveaux de RSI réellement extrêmes.
-import { SPACE, type Candidate, type Market } from "./research.ts";
+import { space, SPACE, type Candidate, type Market } from "./research.ts";
 import { atr, ema, rsiSeries, STRATEGY, type Candle, type Params, type RsiParams } from "./strategy.ts";
 
 export type Regime = "tendance" | "retour à la moyenne" | "hasard";
@@ -109,7 +109,7 @@ export function analyze(c: Candle[]): MathInsight {
 }
 
 /** Réglages de tendance déduits des données : stop suiveur = repli « normal » dans une tendance, force minimale = force typique des cassures. */
-function trendParams(c: Candle[], q: number): Params {
+function trendParams(c: Candle[], q: number, tight = false, fast = false): Params {
   const a = atr(c, STRATEGY.atrPeriod), closes = c.map((x) => x.c);
   const ef = ema(closes, STRATEGY.emaFast), es = ema(closes, STRATEGY.emaSlow);
   const pullbacks: number[] = [], strengths: number[] = [];
@@ -123,22 +123,25 @@ function trendParams(c: Candle[], q: number): Params {
   }
   return {
     breakout: q,
-    trailAtr: snap(Number.isFinite(quantile(pullbacks, 0.7)) ? quantile(pullbacks, 0.7) : 3, SPACE.tendance.trailAtr),
-    minTrend: snap(Number.isFinite(quantile(strengths, 0.4)) ? quantile(strengths, 0.4) : 1, SPACE.tendance.minTrend),
+    // agressif : stop au repli médian (plus serré) et force minimale plus basse ⇒ plus de trades, plus de faux signaux
+    trailAtr: snap(Number.isFinite(quantile(pullbacks, tight ? 0.5 : 0.7)) ? quantile(pullbacks, tight ? 0.5 : 0.7) : 3, space(fast).tendance.trailAtr),
+    minTrend: snap(Number.isFinite(quantile(strengths, tight ? 0.25 : 0.4)) ? quantile(strengths, tight ? 0.25 : 0.4) : 1, space(fast).tendance.minTrend),
   };
 }
 
 /** Réglages RSI déduits des données : période ≈ demi-vie, seuils = niveaux de RSI réellement rares sur ce marché. */
-function rsiParams(c: Candle[], hl: number | null): RsiParams {
-  const rsiPeriod = snap(hl ?? 14, SPACE.rsi.rsiPeriod);
+function rsiParams(c: Candle[], hl: number | null, o: ProposeOptions = {}): RsiParams {
+  const S = space(o.fast);
+  const rsiPeriod = snap(hl ?? 14, S.rsi.rsiPeriod);
   const rs = rsiSeries(c.map((x) => x.c), rsiPeriod);
-  const entry = snap(quantile(rs, 0.07), SPACE.rsi.entry);
+  const entry = snap(quantile(rs, o.aggressive ? 0.12 : 0.07), S.rsi.entry); // agressif : excès moins rares ⇒ plus de signaux
   const exits = SPACE.rsi.exit.filter((x) => x > entry + 10);
   return { rsiPeriod, entry, exit: snap(quantile(rs, 0.55), exits.length ? exits : [entry + 20]), smaPeriod: snap((hl ?? 20) * 8, SPACE.rsi.smaPeriod), swingBars: snap(hl ?? 10, SPACE.rsi.swingBars), riskPct: 1, naive: false };
 }
 
 /** Propositions du mathématicien pour un marché (3 à 4 stratégies, avec leur justification). */
-export function propose(trainCandles: Candle[], m: Market, ins = analyze(trainCandles)): Proposal[] {
+export interface ProposeOptions { aggressive?: boolean; fast?: boolean }
+export function propose(trainCandles: Candle[], m: Market, ins = analyze(trainCandles), o: ProposeOptions = {}): Proposal[] {
   const base = { market: m.name, product: m.product, symbol: m.symbol, kind: m.kind, interval: m.interval };
   const out: Proposal[] = [];
   const grid = SPACE.tendance.breakout;
@@ -150,10 +153,27 @@ export function propose(trainCandles: Candle[], m: Market, ins = analyze(trainCa
     out.push({ candidate: { ...base, family: "tendance", params: p },
       rationale: `${ins.note} ⇒ suivre la tendance sur ${q} bougies (horizon où l'effet est le plus fort) ; stop ${p.trailAtr} ATR = 70 % des replis observés pendant les tendances ; force ≥ ${p.minTrend} ATR = force typique des vraies cassures` });
   }
-  if (m.kind === "spot" && ins.regime !== "tendance") {
-    const p = rsiParams(trainCandles, ins.halfLife);
+  // NERVEUX : horizon court parmi les cassures rapides, si les rendements s'y prolongent encore (VR > 1)
+  if (o.fast && ins.regime !== "retour à la moyenne") {
+    const r = logReturns(trainCandles);
+    const fastQ = [6, 8, 12].map((q) => ({ q, ...varianceRatio(r, q) })).sort((a, b) => b.z - a.z)[0]!;
+    if (fastQ.vr > 1 && !out.some((x) => (x.candidate.params as Params).breakout === fastQ.q)) {
+      const p = trendParams(trainCandles, fastQ.q, o.aggressive, true);
+      out.push({ candidate: { ...base, family: "tendance", params: p },
+        rationale: `version nerveuse : cassure courte de ${fastQ.q} bougies (VR(${fastQ.q}) = ${fastQ.vr.toFixed(2)}, z = ${fastQ.z.toFixed(1)}) ⇒ beaucoup plus de trades ; stop ${p.trailAtr} ATR` });
+    }
+  }
+  // AGRESSIF : variante plus serrée de la meilleure idée de tendance, même quand le marché ressemble au hasard
+  if (o.aggressive && out[0]?.candidate.family === "tendance") {
+    const q = (out[0].candidate.params as Params).breakout;
+    const p = trendParams(trainCandles, q, true, o.fast);
+    if (p.trailAtr !== (out[0].candidate.params as Params).trailAtr || p.minTrend !== (out[0].candidate.params as Params).minTrend)
+      out.push({ candidate: { ...base, family: "tendance", params: p }, rationale: `variante agressive : stop au repli médian (${p.trailAtr} ATR) et force ≥ ${p.minTrend} ATR, plus de trades mais plus de faux départs` });
+  }
+  if (m.kind === "spot" && (ins.regime !== "tendance" || o.aggressive)) {
+    const p = rsiParams(trainCandles, ins.halfLife, o);
     out.push({ candidate: { ...base, family: "rsi", params: p },
-      rationale: `${ins.note} ⇒ acheter les excès de baisse : RSI(${p.rsiPeriod}) ≈ demi-vie, entrée sous ${p.entry} (atteint seulement ~7 % du temps sur ce marché), sortie au-dessus de ${p.exit}` });
+      rationale: `${ins.note} ⇒ acheter les excès de baisse : RSI(${p.rsiPeriod}) ≈ demi-vie, entrée sous ${p.entry} (atteint seulement ~${o.aggressive ? 12 : 7} % du temps sur ce marché), sortie au-dessus de ${p.exit}${ins.regime === "tendance" ? " (proposée en mode agressif malgré la tendance)" : ""}` });
     const p2 = { ...p, entry: snap(p.entry - 5, SPACE.rsi.entry) };
     if (p2.entry !== p.entry) out.push({ candidate: { ...base, family: "rsi", params: p2 }, rationale: `variante plus sélective de la précédente (entrée sous ${p2.entry}) : moins de trades, chaque signal plus extrême` });
   }

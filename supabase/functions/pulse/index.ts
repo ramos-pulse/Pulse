@@ -9,8 +9,8 @@ import { candles as getCandles, hourlyCandles } from "./engine/candles.ts";
 import { env } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { AGGRESSIVE, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
-import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, type Candidate, type Market } from "./engine/research.ts";
+import { AGGR_LEVELS, AGGRESSIVE, effectiveAggr, LEVERAGES, NERVE_LEVELS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
+import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, tempo, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, type BotKind, type BotState } from "./store.ts";
 import { cleanWallet, CLEANER } from "./engine/cleaner.ts";
 import { analyze, propose } from "./engine/math.ts";
@@ -141,7 +141,7 @@ async function state() {
   return {
     now: new Date().toISOString(), wallets: { spot: spotWallet, perps: perpsWallet }, bots: out, markets: MARKETS.map((m) => m.name),
     secrets: { anthropic: !!env("ANTHROPIC_API_KEY"), spotWallet: !!env("BOT_WALLET_PRIVATE_KEY"), perpsWallet: !!env("PERPS_WALLET_PRIVATE_KEY"), customRpc: !!env("SOLANA_RPC_URL"), telegram: !!(env("TELEGRAM_BOT_TOKEN") && env("TELEGRAM_CHAT_ID")), cron: cronReady },
-    rules: { strategy: STRATEGY, risk: RISK, perps: PERPS_RULES, rules: RULES, presets: PRESETS, aggressive: AGGRESSIVE },
+    rules: { strategy: STRATEGY, risk: RISK, perps: PERPS_RULES, rules: RULES, presets: PRESETS, aggressive: AGGRESSIVE, aggrLevels: AGGR_LEVELS, leverages: LEVERAGES },
   };
 }
 
@@ -223,7 +223,11 @@ const RESEARCH_MAX = 40;
 
 async function runResearch() {
   const cycle = Math.floor(Date.now() / 300_000);
-  const m = RESEARCH_MARKETS[cycle % RESEARCH_MARKETS.length]!;
+  const A = agentSettings((await readBots()).spot.config);
+  const fast = A.nerve >= 2;
+  // nerveux : 2 cycles sur 3 consacrés au scalping 15 min
+  const pool = fast && cycle % 3 !== 0 ? RESEARCH_MARKETS.filter((x) => x.interval === "15m") : RESEARCH_MARKETS;
+  const m = pool[cycle % pool.length]!;
   let candles;
   try { candles = await getCandles(m.product, m.interval, HISTORY[m.interval]); }
   catch (e) { return { market: m.name, tested: 0, note: `historique indisponible : ${(e as Error).message}` }; }
@@ -242,7 +246,7 @@ async function runResearch() {
   const train = candles.slice(0, Math.floor(candles.length * 2 / 3));
   const insight = analyze(train);
   let proposed = 0;
-  for (const pr of propose(train, m, insight)) {
+  for (const pr of propose(train, m, insight, { aggressive: A.aggressive, fast })) {
     const key = candidateKey(pr.candidate);
     if (seen.has(key)) continue;
     seen.add(key); proposed++;
@@ -255,7 +259,7 @@ async function runResearch() {
   while (rows.length < RESEARCH_MAX && performance.now() - t0 < RESEARCH_BUDGET_MS && tries < RESEARCH_MAX * 5) {
     tries++;
     // moitié améliorations des meilleures, moitié idées nouvelles
-    const c = parents.length && rnd() < 0.5 ? mutate(rnd, parents[Math.floor(rnd() * parents.length)]!) : randomCandidate(rnd, m);
+    const c = parents.length && rnd() < 0.5 ? mutate(rnd, parents[Math.floor(rnd() * parents.length)]!, fast) : randomCandidate(rnd, m, fast);
     const key = candidateKey(c);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -277,10 +281,27 @@ async function runResearch() {
 // ------------------------------------------------------------------ pilote automatique
 /** Critères stricts : seule une stratégie solide sur la période jamais vue peut piloter un bot. */
 const QUALIFY = { minTestTrades: 5, minTestPF: 1.3, maxTestDD: 10, maxAgeDays: 14 };
-function qualifies(r: ResearchRow): boolean {
-  return r.verdict === "prometteuse" && (r.test.trades ?? 0) >= QUALIFY.minTestTrades && (r.test.profitFactor ?? 0) >= QUALIFY.minTestPF
-    && (r.test.maxDrawdownPct ?? 99) <= QUALIFY.maxTestDD && Date.now() - Date.parse(r.created_at) < QUALIFY.maxAgeDays * 86_400_000;
+/** Mode agressif des agents : critères assouplis (« à surveiller » accepté), plus de stratégies retenues mais moins sûres. */
+const QUALIFY_AGGR = { minTestTrades: 4, minTestPF: 1.15, maxTestDD: 20, minTrainPF: 1.0, maxAgeDays: 14 };
+interface AgentSettings { aggressive: boolean; nerve: number }
+const agentSettings = (spotConfig: unknown): AgentSettings => { const c = loadConfig(spotConfig); return { aggressive: c.researchAggressive, nerve: c.nerve }; };
+function qualifies(r: ResearchRow, a: AgentSettings = { aggressive: false, nerve: 1 }): boolean {
+  const young = Date.now() - Date.parse(r.created_at) < QUALIFY.maxAgeDays * 86_400_000;
+  if (!young || r.verdict === "déçue en réel" || r.live?.failed) return false;
+  const t = tempo(r);
+  if (a.nerve === 0 && t > 1) return false;          // calme : pas de stratégie nerveuse
+  if (a.nerve === 3 && t < 2) return false;          // très nerveux : seulement des stratégies nerveuses
+  if (!a.aggressive) return r.verdict === "prometteuse" && (r.test.trades ?? 0) >= QUALIFY.minTestTrades && (r.test.profitFactor ?? 0) >= QUALIFY.minTestPF
+    && (r.test.maxDrawdownPct ?? 99) <= QUALIFY.maxTestDD;
+  const Q = QUALIFY_AGGR;
+  return (r.verdict === "prometteuse" || r.verdict === "à surveiller") && (r.test.trades ?? 0) >= Q.minTestTrades && (r.test.profitFactor ?? 0) >= Q.minTestPF
+    && (r.test.maxDrawdownPct ?? 99) <= Q.maxTestDD && (r.train.profitFactor ?? 0) >= Q.minTrainPF;
 }
+/** Classement du pilote : le réel d'abord, puis le score ; en mode nerveux, les stratégies rapides (plus de trades) passent devant. */
+const pilotRank = (a: AgentSettings) => (x: ResearchRow, y: ResearchRow) => {
+  const boost = (r: ResearchRow) => effScore(r) * (a.nerve >= 2 ? 1 + (a.nerve - 1) * 0.3 * tempo(r) : 1);
+  return tier(y) - tier(x) || boost(y) - boost(x);
+};
 const symbolOfRow = (r: ResearchRow) => r.symbol ?? r.market.replace(/^(Spot|Perps) /, "").split(" ")[0]!;
 const confidenceOf = (r: ResearchRow) => (r.live?.confirmed ? "confirmée" as const : "nouvelle" as const);
 const toSpotPlan = (r: ResearchRow): SpotPlan => ({ symbol: symbolOfRow(r), family: r.family, params: r.family === "rsi" ? sanitizeRsi({ ...(r.params as RsiParams), riskPct: 1, naive: false }) : sanitizeTrend(r.params)!,
@@ -288,17 +309,18 @@ const toSpotPlan = (r: ResearchRow): SpotPlan => ({ symbol: symbolOfRow(r), fami
 const toPerpsPlan = (r: ResearchRow): PerpsPlan => ({ asset: symbolOfRow(r), params: sanitizeTrend(r.params) as Params, interval: r.interval === "15m" ? "15m" : "1h", source: `chercheur #${r.id} · ${r.market}`, score: effScore(r), confidence: confidenceOf(r) });
 
 /** Choisit tout seul les tokens et stratégies des bots dont le pilote est activé. Renvoie un résumé des changements. */
-async function autopilot(): Promise<string> {
+async function autopilot(fresh = false): Promise<string> { // fresh : refaire le choix de zéro (après un changement de réglages)
   const bots = await readBots();
   const spotCfg = loadConfig(bots.spot.config), perpsCfg = loadPerpsConfig(bots.perps.config);
   if (!spotCfg.autopilot && !perpsCfg.autopilot) return "désactivé";
-  const { data } = await db.from("research").select("*").eq("verdict", "prometteuse").order("score", { ascending: false }).limit(200);
-  const good = ((data ?? []) as ResearchRow[]).filter(qualifies).sort(byRank);
+  const A = agentSettings(bots.spot.config);
+  const { data } = await db.from("research").select("*").neq("verdict", "rejetée").order("score", { ascending: false }).limit(300);
+  const good = ((data ?? []) as ResearchRow[]).filter((r) => qualifies(r, A)).sort(pilotRank(A));
   const changes: string[] = [];
   if (spotCfg.autopilot) {
     const spotRows = good.filter((r) => r.kind === "spot");
     // garde les plans actuels encore qualifiés (évite de changer d'avis toutes les 5 minutes), complète avec les meilleurs, 3 tokens max
-    const keep = spotRows.slice(0, 10).filter((r) => spotCfg.plans.some((p) => p.source === `chercheur #${r.id} · ${r.market}`)).map(toSpotPlan);
+    const keep = fresh ? [] : spotRows.slice(0, 10).filter((r) => spotCfg.plans.some((p) => p.source === `chercheur #${r.id} · ${r.market}`)).map(toSpotPlan);
     const plans = [...keep];
     for (const r of spotRows) { if (plans.length >= 3) break; const pl = toSpotPlan(r); if (!plans.some((x) => x.symbol === pl.symbol)) plans.push(pl); }
     const sig = (l: SpotPlan[]) => l.map((p) => `${p.source}:${p.confidence}`).join("|");
@@ -310,11 +332,11 @@ async function autopilot(): Promise<string> {
   }
   if (perpsCfg.autopilot) {
     const best = good.find((r) => r.kind === "perps");
-    const kept = good.slice(0, 20).find((r) => r.kind === "perps" && `chercheur #${r.id} · ${r.market}` === perpsCfg.plan?.source);
+    const kept = fresh ? undefined : good.slice(0, 20).find((r) => r.kind === "perps" && `chercheur #${r.id} · ${r.market}` === perpsCfg.plan?.source);
     const plan = kept ? toPerpsPlan(kept) : best ? toPerpsPlan(best) : null;
-    if (`${plan?.source}:${plan?.confidence}` !== `${perpsCfg.plan?.source}:${perpsCfg.plan?.confidence}` || perpsCfg.mode !== "normal") {
-      await setBot("perps", { config: { ...perpsCfg, plan, mode: "normal" } });
-      changes.push(plan ? `perps → ${plan.asset} (${plan.interval === "15m" ? "15 min" : "1 h"}), mode normal` : "perps → aucune stratégie validée, en attente");
+    if (`${plan?.source}:${plan?.confidence}` !== `${perpsCfg.plan?.source}:${perpsCfg.plan?.confidence}`) {
+      await setBot("perps", { config: { ...perpsCfg, plan } });
+      changes.push(plan ? `perps → ${plan.asset} (${plan.interval === "15m" ? "15 min" : "1 h"}), agressivité ${AGGR_LEVELS[effectiveAggr(perpsCfg)]!.name.toLowerCase()}` : "perps → aucune stratégie validée, en attente");
     }
   }
   if (changes.length) await notify(`Pilote automatique : ${changes.join(" ; ")}`);
@@ -324,14 +346,16 @@ async function autopilot(): Promise<string> {
 
 
 async function researchBoard() {
-  const [{ count }, { data: top }, { data: last }] = await Promise.all([
+  const [{ count }, { data: top }, { data: last }, bots] = await Promise.all([
     db.from("research").select("id", { count: "exact", head: true }),
     db.from("research").select("*").neq("verdict", "rejetée").order("score", { ascending: false }).limit(16),
     db.from("research").select("created_at").order("created_at", { ascending: false }).limit(1),
+    readBots(),
   ]);
+  const A = agentSettings(bots.spot.config);
   return {
-    tested: count ?? 0, lastAt: last?.[0]?.created_at ?? null,
-    best: ((top ?? []) as ResearchRow[]).sort(byRank).map((r) => ({ ...r, description: describe({ ...r, interval: r.interval === "15m" ? "15m" : "1h" }), qualifies: qualifies(r) })),
+    tested: count ?? 0, lastAt: last?.[0]?.created_at ?? null, settings: { ...A, levels: NERVE_LEVELS, qualify: A.aggressive ? QUALIFY_AGGR : QUALIFY },
+    best: ((top ?? []) as ResearchRow[]).sort(byRank).map((r) => ({ ...r, description: describe({ ...r, interval: r.interval === "15m" ? "15m" : "1h" }), qualifies: qualifies(r, A), tempo: tempo(r) })),
   };
 }
 
@@ -438,6 +462,7 @@ async function agentChat(messages: { role: string; content: string }[]) {
     date: new Date().toISOString(),
     bots: Object.fromEntries(Object.entries(bots).map(([k, b]) => [k, { statut: b.status, valeur_usd: b.last_value_usd, derniere_action: b.last_message, pensee: b.memory?.mindset, analyse: b.memory?.signal, reglages: b.config }])),
     recherche: { strategies_testees: board.tested, meilleures: board.best.slice(0, 8).map((r) => ({ id: r.id, marche: r.market, type: r.family, description: r.description, verdict: r.verdict, entrainement: r.train, validation_jamais_vue: r.test, resultats_reels: r.live ?? "pas encore tradée", score: r.score, origine: r.origin ?? "chercheur", justification_mathematique: r.rationale ?? undefined })) },
+    reglages_agents: { ...board.settings, nervosite: NERVE_LEVELS[board.settings.nerve] },
     mathematicien: await mathBoard().then((m) => ({ taux_de_reussite: m.stats, analyses: m.insights.slice(0, 16).map((x: Record<string, unknown>) => ({ marche: x.market, intervalle: x.interval, regime: x.regime, hurst: x.hurst, demi_vie: x.half_life, significatif: x.significant, conclusion: x.note })) })).catch(() => "indisponible"),
   };
   const key = env("ANTHROPIC_API_KEY");
@@ -459,6 +484,7 @@ Règles :
 - Le scalping est testé en bougies de 15 minutes, frais inclus ; dis-le clairement quand une stratégie 15 min est retenue ou rejetée.
 - Tu apprends des vrais trades des bots (resultats_reels) : une stratégie qui perd en réel après 4 trades est déclassée « déçue en réel », une qui gagne est « confirmée » et prioritaire. Une stratégie nouvelle est tradée avec 75 % du risque normal tant qu'elle n'est pas confirmée. Les résultats réels comptent plus que les simulations.
 - Tu travailles avec l'agent mathématicien (donnees.mathematicien) : sur la partie entraînement de l'historique seulement, il mesure le ratio de variance de Lo-MacKinlay (test z, significatif si |z| > 1,96), l'exposant de Hurst, l'autocorrélation et la demi-vie du retour à la moyenne, en déduit le régime du marché (tendance, retour à la moyenne, ou hasard) et des réglages, puis te les propose. Tu testes ses propositions comme les tiennes, sur la période jamais vue. Explique ses conclusions simplement quand on te le demande, et sois honnête : un marché « hasard » n'a pas d'avantage exploitable, et son taux de réussite comparé au tien dit si ses maths aident vraiment.
+- Réglages des agents (donnees.reglages_agents) : en mode agressif, le pilote accepte aussi les stratégies « à surveiller » (≥ 4 trades, PF ≥ 1,15, baisse ≤ 20 %, entraînement PF ≥ 1) et le bot perps applique son agressivité même en pilote automatique ; sinon il reste plafonné à « Normal ». La nervosité (Calme, Normal, Nerveux, Très nerveux) oriente la recherche vers des stratégies plus rapides (15 min, cassures courtes) et le pilote vers celles qui tradent plus souvent. Rappelle que plus nerveux ou plus agressif = plus de trades et plus de risque, pas forcément plus de gains.
 - Tu ne donnes pas de conseil d'investissement personnalisé ; rappelle de ne risquer que ce qu'on accepte de perdre si on te demande combien investir.
 - Le mode agressif du bot perps double le risque et monte le levier jusqu'à x5 : signale-le si c'est pertinent.
 Données actuelles (JSON) :
@@ -516,6 +542,17 @@ Deno.serve(async (req) => {
       await setBot("spot", { config: { ...sc, swapAuto: body.on !== false } });
       return json({ ok: true, auto: body.on !== false });
     }
+    if (req.method === "POST" && route === "/api/research/settings") {
+      const body = (await req.json().catch(() => ({}))) as { aggressive?: boolean; nerve?: number };
+      const bots = await readBots();
+      const sc = loadConfig(bots.spot.config), pc = loadPerpsConfig(bots.perps.config);
+      const spot = loadConfig({ ...sc, researchAggressive: body.aggressive ?? sc.researchAggressive, nerve: body.nerve ?? sc.nerve });
+      await setBot("spot", { config: spot });
+      await setBot("perps", { config: { ...pc, pilotAggressive: spot.researchAggressive } }); // le pilote perps suit le mode agressif des agents
+      await notify(`Agents : mode ${spot.researchAggressive ? "AGRESSIF" : "normal"}, nervosité ${NERVE_LEVELS[spot.nerve]}`);
+      const pilot = await autopilot(true).catch((e) => `pilote : ${(e as Error).message}`);
+      return json({ ok: true, aggressive: spot.researchAggressive, nerve: spot.nerve, pilot });
+    }
     if (req.method === "POST" && route === "/api/autopilot") {
       const body = (await req.json().catch(() => ({}))) as { spot?: boolean; perps?: boolean };
       const bots = await readBots();
@@ -540,12 +577,12 @@ Deno.serve(async (req) => {
       return json({ ok: true, config });
     }
     if (req.method === "POST" && route === "/api/perps/config") {
-      const body = (await req.json().catch(() => ({}))) as { mode?: string; bias?: number; trend?: null };
+      const body = (await req.json().catch(() => ({}))) as { aggr?: number; maxLev?: number; bias?: number; trend?: null };
       const current = loadPerpsConfig((await readBots()).perps.config);
-      const config = loadPerpsConfig({ ...current, mode: body.mode ?? current.mode, bias: body.bias ?? current.bias });
+      const config = loadPerpsConfig({ ...current, aggr: body.aggr ?? current.aggr, maxLev: body.maxLev ?? current.maxLev, bias: body.bias ?? current.bias });
       if (body.trend === null) { config.trend = null; config.plan = null; config.autopilot = false; delete config.source; }
       await setBot("perps", { config });
-      await notify(`Bot perps : mode ${config.mode}, ${config.bias === 0 ? "longs et shorts équilibrés" : config.bias > 0 ? `longs favorisés (shorts à ${100 - config.bias} %)` : `shorts favorisés (longs à ${100 + config.bias} %)`}`);
+      await notify(`Bot perps : agressivité ${AGGR_LEVELS[config.aggr]!.name.toLowerCase()}${effectiveAggr(config) !== config.aggr ? ` (plafonnée à ${AGGR_LEVELS[effectiveAggr(config)]!.name.toLowerCase()} en pilote automatique)` : ""}, levier max x${config.maxLev}, ${config.bias === 0 ? "longs et shorts équilibrés" : config.bias > 0 ? `longs favorisés (shorts à ${100 - config.bias} %)` : `shorts favorisés (longs à ${100 + config.bias} %)`}`);
       return json({ ok: true, config });
     }
     const m = route.match(/^\/api\/(spot|perps)\/(start|pause|stop|goal)$/);

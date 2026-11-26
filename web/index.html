@@ -58,6 +58,31 @@ main{max-width:560px;margin:0 auto;padding:4px 16px 20px}
 .row:last-child{border-bottom:0}
 .l1{font:600 14px var(--mono);letter-spacing:.05em}.l2{font:12px var(--mono);color:var(--muted);margin-top:3px}
 .r{text-align:right;font:600 14.5px var(--mono);white-space:nowrap}
+#p-home .eyebrow{margin:14px 4px 8px;font-size:11px;letter-spacing:.22em}
+#p-home .card{padding:14px 16px;border-radius:18px;margin-bottom:10px}
+#p-home .status{font-size:12px;letter-spacing:.14em}
+#p-home .big{font-size:clamp(28px,9vw,36px);margin:10px 0 4px}
+#p-home .bar{margin:8px 0 0;height:6px}
+#p-home .grid{grid-template-columns:repeat(4,1fr);gap:8px 10px;margin-top:10px}
+#p-home .grid.g3{grid-template-columns:repeat(3,1fr)}
+#p-home .k{font-size:10.5px}
+#p-home .v{font-size:13px}
+#p-home .v.txt{font-size:13.5px;line-height:1.4}
+#p-home .sep{margin:10px 0}
+#p-home .btns{gap:10px;margin:0 0 10px}
+#p-home .btns .btn{min-height:44px;font-size:14.5px}
+#p-home .think{margin-top:10px;padding:10px 12px;font-size:13px}
+#p-home details{margin-top:8px}
+#p-home summary{font:600 11px var(--mono);letter-spacing:.14em;color:var(--muted);cursor:pointer;list-style:none;padding:4px 0}
+#p-home summary::-webkit-details-marker{display:none}
+#p-home details[open] summary{color:var(--lime)}
+.sum{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0 2px}
+.sum a{display:block;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px 14px;color:inherit;text-decoration:none}
+.sum .n{font:700 22px/1.1 var(--mono);margin:6px 0 2px}
+.sum .t{font:600 10.5px var(--mono);letter-spacing:.14em;color:var(--muted);text-transform:uppercase;display:flex;align-items:center;gap:6px}
+[data-tip]{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;cursor:help}
+[data-tip] .k::after,.k[data-tip]::after{content:" ⓘ";opacity:.55}
+.tip{position:fixed;z-index:60;max-width:min(300px,86vw);background:#e9f5d8;color:#0c130e;border-radius:12px;padding:10px 12px;font:500 13px/1.4 var(--sans);box-shadow:0 10px 30px rgba(0,0,0,.5);pointer-events:none}
 .pill{font:600 10.5px var(--mono);letter-spacing:.1em;padding:4px 9px;border-radius:99px;background:var(--card2);color:var(--muted)}
 .chips{display:flex;gap:8px;margin-bottom:14px;overflow-x:auto}
 .chip{padding:9px 15px;border-radius:99px;background:var(--card);border:1px solid var(--line);font:13px var(--mono);white-space:nowrap}
@@ -122,6 +147,8 @@ nav svg{width:22px;height:22px}nav button.on{color:var(--lime)}
 
 <script>
 {
+const OPEN = new Set();
+document.addEventListener("toggle", e => { const d = e.target; if (d.dataset?.d) d.open ? OPEN.add(d.dataset.d) : OPEN.delete(d.dataset.d); }, true);
 let TOKEN = "", BASE = "", S = null, PAGE = "home", HF = "all", BT = null, lastOk = 0, seen = 0;
 try { TOKEN = localStorage.getItem("pulse_token") || ""; BASE = localStorage.getItem("pulse_base") || ""; if (BASE && !/\.[a-z]+\/functions/.test(BASE)) BASE = serverUrl(BASE); seen = Number(localStorage.getItem("pulse_seen") || 0); } catch (e) {}
 const $ = s => document.querySelector(s);
@@ -189,6 +216,16 @@ async function notifyNew() {
 
 const STATUS = {running: ["run", "En mission"], paused: ["pause", "En pause"], stopped: ["off", "Arrêté"], success: ["win", "Mission réussie"], destroyed: ["off", "Terminée"]};
 
+/** Les deux sommes en haut de l'écran, d'un coup d'œil. */
+function summary() {
+  const tile = (k, label) => { const b = S.bots[k], [sc, st] = STATUS[b.status] || ["off", b.status];
+    const v = b.last_value_usd, start = b.start_value_usd, g = v != null && start ? v - start : null;
+    const pos = k === "spot" ? (b.position_mint ? (b.memory.asset || "position") : "") : (b.position_side ? `${b.position_side === "short" ? "SHORT" : "LONG"} ${b.position_asset || ""}` : "");
+    return `<a href="#card-${k}"><div class="t"><span class="dot ${sc === "run" ? "ok" : sc === "pause" ? "warn" : ""}"></span>${label} · ${st}</div>
+      <div class="n">${nf(v)} $</div><div class="k ${g == null ? "" : cl(g)}">${g == null ? "—" : `${sg(g)} $ (${sg(g / start * 100)} %)`}${pos ? ` · ${esc(pos)}` : ""}</div></a>`; };
+  return `<div class="sum">${tile("spot", "Bot 1")}${tile("perps", "Bot 2")}</div>`;
+}
+
 function missionCard(kind, title) {
   const b = S.bots[kind], m = b.memory, br = b.brain, [sc, st] = STATUS[b.status] || ["off", b.status];
   const value = b.last_value_usd, start = b.start_value_usd, goal = b.goal_usd;
@@ -203,7 +240,7 @@ function missionCard(kind, title) {
     const lo = Math.min(stop ?? entry, entry, cur ?? entry), hi = Math.max(stop ?? entry, entry, cur ?? entry, m.best ?? entry);
     const at = v => hi > lo ? ((v - lo) / (hi - lo) * 100).toFixed(1) : 50;
     pos = `<div class="sep"></div>
-      <div class="grid" style="margin-top:0">
+      <div class="grid g3" style="margin-top:0">
         <div><div class="k">Position</div><div class="v">${kind === "perps" ? (side === "short" ? "SHORT ▼ " : "LONG ▲ ") : ""}${esc(sym)}</div></div>
         <div><div class="k">Résultat ${kind === "perps" ? "(cours)" : "(frais inclus)"}</div><div class="v ${cl(m.live?.pnlPct)}">${sg(m.live?.pnlPct)} %</div></div>
         <div><div class="k">Prix d'entrée</div><div class="v">${px(entry)} $</div></div>
@@ -216,35 +253,35 @@ function missionCard(kind, title) {
   }
   const running = b.status === "running", paused = b.status === "paused";
   const wallet = S.wallets[kind];
-  return `<div class="eyebrow">${title}</div>
+  return `<div class="eyebrow" id="card-${kind}">${title}</div>
   <div class="card">
     <div class="status ${sc}"><span class="dot ${sc === "run" ? "ok" : sc === "pause" ? "warn" : ""}"></span>${st}${m.pending ? ' <span class="pill">tx en cours</span>' : ""}</div>
     <div class="big">${nf(value)}<small>$</small></div>
     <div class="sub">sur un objectif de ${nf(goal, 0)} $${start ? ` · départ ${nf(start)} $` : ""}</div>
     <div class="bar"><i style="width:${prog}%"></i></div>
     <div class="grid">
-      <div><div class="k">Date objectif dans</div><div class="v amber">${left(b.end_at)}</div></div>
-      <div><div class="k">Gain depuis le départ</div><div class="v ${cl(gain)}">${gain == null ? "—" : `${sg(gain)} $ (${sg(gain / start * 100)} %)`}</div></div>
-      <div><div class="k">Dernier contrôle</div><div class="v">${hhmm(b.last_tick_at)}</div></div>
-      <div><div class="k">Risque par trade</div><div class="v">${br ? nf(br.risk * 100, 1) + " %" : "—"}${br && br.streak ? ` <span class="${br.streak > 0 ? "up" : "down"}">${br.streak > 0 ? "▲" + br.streak : "▼" + -br.streak}</span>` : ""}</div></div>
+      <div><div class="k">Gain</div><div class="v ${cl(gain)}">${gain == null ? "—" : `${sg(gain)} $<br>${sg(gain / start * 100)} %`}</div></div>
+      <div><div class="k">Échéance</div><div class="v amber">${left(b.end_at)}</div></div>
+      <div><div class="k">Contrôle</div><div class="v">${hhmm(b.last_tick_at)}</div></div>
+      <div><div class="k">Risque</div><div class="v">${br ? nf(br.risk * 100, 1) + " %" : "—"}${br && br.streak ? ` <span class="${br.streak > 0 ? "up" : "down"}">${br.streak > 0 ? "▲" + br.streak : "▼" + -br.streak}</span>` : ""}</div></div>
     </div>
     <div class="sep"></div>
     <div class="k">Dernière action</div><div class="v txt">${esc(b.last_message)}</div>
     ${pos}
-    ${m.mindset ? `<div class="think"><b>CE QUE PENSE LE BOT</b>${esc(m.mindset)}</div>` : ""}
-    ${!inPos && m.signal ? `<div class="k" style="margin-top:14px">Dernière analyse</div><div class="l2" style="line-height:1.5">${esc(m.signal)}</div>` : ""}
+    ${m.mindset || (!inPos && m.signal) ? `<details data-d="think-${kind}"><summary>▸ CE QUE PENSE LE BOT</summary>
+      ${m.mindset ? `<div class="think">${esc(m.mindset)}</div>` : ""}
+      ${!inPos && m.signal ? `<div class="k" style="margin-top:10px">Dernière analyse</div><div class="l2" style="line-height:1.5">${esc(m.signal)}</div>` : ""}</details>` : ""}
   </div>
   <div class="btns">
     ${running ? `<button class="btn" data-act="pause" data-k="${kind}">Pause</button>`
       : `<button class="btn go" data-act="start" data-k="${kind}">${paused ? "Reprendre" : "Lancer la mission"}</button>`}
     <button class="btn red" data-act="stop" data-k="${kind}">Arrêt d'urgence</button>
   </div>
-  <div class="card">
-    <div class="v txt" style="font-weight:600">${kind === "spot" ? "Portefeuille du robot" : "Portefeuille perps"}</div>
+  <div class="card" style="padding:10px 16px"><details data-d="wallet-${kind}" style="margin:0"><summary>▸ ${kind === "spot" ? "PORTEFEUILLE DU ROBOT" : "PORTEFEUILLE PERPS"}</summary>
     ${wallet ? `<div class="addr">${esc(wallet)}</div><button class="btn sm" data-copy="${esc(wallet)}">Copier l'adresse</button>
       <p class="sub" style="margin:12px 0 0">Dépose des USDC (Solana) + environ 0,03 SOL pour les frais. ${kind === "perps" ? "Minimum 10 $ d'USDC pour ouvrir une position." : ""}</p>`
       : `<p class="sub" style="margin:8px 0 0">Secret ${kind === "spot" ? "BOT_WALLET_PRIVATE_KEY" : "PERPS_WALLET_PRIVATE_KEY"} absent dans Supabase (Edge Functions → Secrets).</p>`}
-  </div>`;
+  </details></div>`;
 }
 
 function render() {
@@ -255,7 +292,8 @@ function render() {
   const sc = S.bots.spot.config || {};
   const spotStrat = sc.autopilot ? `Pilote auto${sc.plans?.length ? " · " + sc.plans.map(p => p.symbol + (p.interval === "15m" ? " 15m" : "")).join(", ") : " · en attente"}`
     : sc.plans?.length ? `Chercheur · ${sc.plans.map(p => p.symbol).join(", ")}` : sc.strategy === "rsi" ? (sc.rsi.naive ? "RSI naïf" : "RSI") : "Tendance";
-  if (PAGE === "home") $("#p-home").innerHTML = missionCard("spot", `Bot 1 · Spot Solana · ${spotStrat}`) + missionCard("perps", `Bot 2 · Perps SOL · ${perpsLabel()}`) + rulesNote();
+  if (PAGE === "home") { $("#p-home").innerHTML = summary() + missionCard("spot", `Bot 1 · Spot Solana · ${spotStrat}`) + missionCard("perps", `Bot 2 · Perps · ${perpsLabel()}`) + rulesNote();
+    document.querySelectorAll("#p-home details[data-d]").forEach(d => { d.open = OPEN.has(d.dataset.d); }); } // volets ouverts conservés au rafraîchissement
   if (PAGE === "hist") renderHist();
   if (PAGE === "bt") renderBt();
   if (PAGE === "ag" && !$("#p-ag").innerHTML) renderAg();
@@ -269,31 +307,40 @@ function biasText(b) {
   return b > 0 ? `Longs à 100 %, shorts à ${100 - b} %` : `Shorts à 100 %, longs à ${100 + b} %`;
 }
 function perpsLabel() {
-  const c = S.bots.perps.config || {mode: "normal", bias: 0}, ag = c.mode === "agressif" && !c.autopilot;
+  const c = S.bots.perps.config || {aggr: 1, maxLev: 3, bias: 0};
+  const lvl = c.autopilot && !c.pilotAggressive ? Math.min(c.aggr ?? 1, 1) : (c.aggr ?? 1);
   const plan = c.plan ? ` · ${c.plan.asset}${c.plan.interval === "15m" ? " 15m" : ""}` : "";
-  return `${c.autopilot ? "Pilote auto" + (plan || " · en attente") : (ag ? `Agressif x${S.rules.aggressive?.maxLeverage ?? 5}` : `x${S.rules.perps.maxLeverage} max`) + plan}${c.bias ? " · " + biasText(c.bias) : ""}`;
+  return `${c.autopilot ? "Pilote auto" + (plan || " · en attente") : plan.replace(/^ · /, "")}${c.autopilot || plan ? " · " : ""}${S.rules.aggrLevels?.[lvl]?.name || ""} · x${c.maxLev ?? 3} max${c.bias ? " · " + biasText(c.bias) : ""}`;
 }
 function perpsCard() {
-  const c = S.bots.perps.config || {mode: "normal", bias: 0}, ag = c.mode === "agressif", A = S.rules.aggressive || {};
-  return `<div class="eyebrow">Bot perps · mode et direction</div><div class="card">
-    <div class="chips" style="margin-bottom:6px">
-      <button class="chip ${!ag ? "on" : ""}" data-pmode="normal">Normal</button>
-      <button class="chip ${ag ? "on" : ""}" data-pmode="agressif">Agressif</button></div>
-    <p class="sub" id="pmodeTxt" style="margin:8px 0 4px">${modeText(ag ? "agressif" : "normal")}</p>
+  const c = S.bots.perps.config || {aggr: 1, maxLev: 3, bias: 0}, levs = S.rules.leverages || [3, 5, 10, 100, 250];
+  return `<div class="eyebrow">Bot perps · agressivité, levier et direction</div><div class="card">
+    <div class="k">Agressivité</div>
+    <input type="range" id="paggr" min="0" max="${(S.rules.aggrLevels || []).length - 1}" step="1" value="${c.aggr ?? 1}">
+    <div class="rl"><span>− Prudent</span><span>Très agressif +</span></div>
+    <div class="v txt" id="paggrName" style="margin-top:10px;text-align:center">${esc(S.rules.aggrLevels?.[c.aggr ?? 1]?.name || "")}</div>
+    <p class="sub" id="pmodeTxt" style="margin:6px 0 4px">${modeText(c.aggr ?? 1)}</p>
+    <div class="sep"></div>
+    <div class="k">Levier maximum</div>
+    <div class="chips" style="margin:8px 0 0">${levs.map(l => `<button class="chip ${c.maxLev === l ? "on" : ""}" data-lev="${l}">x${l}</button>`).join("")}</div>
+    <p class="sub" id="levTxt" style="margin:6px 0 4px">${levText(c.maxLev)}</p>
     <div class="sep"></div>
     <div class="k">Longs / shorts</div>
     <input type="range" id="pbias" min="-100" max="100" step="25" value="${c.bias}">
     <div class="rl"><span>Shorts</span><span>Équilibré</span><span>Longs</span></div>
     <div class="v txt" id="pbiasTxt" style="margin-top:10px;text-align:center">${biasText(c.bias)}</div>
     <p class="sub" style="margin:8px 0 0">Le côté favorisé garde sa taille normale, l'autre est réduit, ou coupé à fond de barre. Le bot n'entre toujours que sur un vrai signal.</p>
-    <button class="btn go sm" style="width:100%;margin-top:14px" id="savePerps" data-mode="${c.mode}">Enregistrer</button>
+    <button class="btn go sm" style="width:100%;margin-top:14px" id="savePerps" data-lev="${c.maxLev}">Enregistrer</button>
   </div>`;
 }
-function modeText(m) {
-  const A = S.rules.aggressive || {maxRisk: .03, maxLeverage: 5, dailyLoss: .08};
-  return m === "agressif"
-    ? `⚠ Risque doublé (jusqu'à ${A.maxRisk * 100} % par trade), levier jusqu'à x${A.maxLeverage}, perte max ${A.dailyLoss * 100} % par jour. Il trade même quand aucun réglage n'a fait ses preuves sur 60 jours. Gains et pertes plus gros et plus fréquents.`
-    : `Risque 0,5 à 2 % par trade selon la forme, levier x${S.rules.perps.maxLeverage} max, perte max ${S.rules.risk.dailyLoss * 100} % par jour. Il attend quand aucun réglage ne marche.`;
+function modeText(i) {
+  const L = S.rules.aggrLevels?.[i]; if (!L) return "";
+  const c = S.bots.perps.config || {};
+  const capped = c.autopilot && !c.pilotAggressive && i > 1;
+  return `${i >= 3 ? "⚠ " : ""}Risque ×${String(L.riskMult).replace(".", ",")} (jusqu'à ${nf(L.maxRisk * 100, 1)} % du capital perdu si le stop est touché), perte max ${nf(L.dailyLoss * 100, 1)} % par jour.${i >= 3 ? " Il trade même quand aucun réglage n'a fait ses preuves sur 60 jours." : ""}${capped ? " Pilote automatique actif : plafonné à « Normal » tant que le mode agressif du chercheur est coupé (Agents)." : ""}`;
+}
+function levText(l) {
+  return `Levier jusqu'à x${l}. La perte au stop dépend de l'agressivité, pas du levier : plus de levier = moins de collatéral bloqué. Le bot réduit toujours le levier pour que son stop soit touché bien avant la liquidation${l >= 100 ? " ; à x" + l + ", une variation d'environ " + nf(100 / l, 1) + " % contre toi suffirait à liquider, donc il ne l'atteindra qu'avec un stop très serré" : ""}.`;
 }
 function rulesNote() {
   const st = S.rules.strategy, r = S.rules.risk, c = S.bots.spot.config;
@@ -421,15 +468,53 @@ function swapCard() {
     ${w.runs[0] ? `<p class="sub" style="margin:10px 0 0;font-size:13px">Dernier passage : ${esc(w.runs[0].detail)}</p>` : ""}
   </div>`;
 }
+const TIPS = {
+  test: "Gain (ou perte) de la stratégie, frais inclus, sur la dernière partie de l'historique, qu'elle n'a jamais vue pendant son réglage : 30 jours en bougies 1 h, 10 jours en 15 min. C'est le test honnête.",
+  pf: "Profit factor : total des gains ÷ total des pertes sur la période jamais vue. Au-dessus de 1 on gagne, au-dessus de 1,3 c'est solide. Le 2e chiffre est le nombre de trades : plus il est grand, plus le résultat est fiable.",
+  train: "Profit factor sur la première partie de l'historique, celle qui a servi à régler la stratégie. S'il est bien plus faible que sur la période jamais vue, le bon résultat récent tient peut-être de la chance.",
+  dd: "Plus forte baisse du capital, d'un sommet au creux suivant, pendant la période jamais vue. Plus c'est bas, plus la stratégie est tranquille à vivre.",
+  conf: "Nouvelle : tradée avec 75 % du risque normal tant que les vrais trades ne l'ont pas confirmée. Confirmée : elle a gagné en réel (profit factor ≥ 1,2 sur au moins 4 trades), elle passe à 100 %.",
+};
+// Bulles explicatives : visibles tant qu'on appuie, disparaissent quand on relâche
+let TIP = null;
+const hideTip = () => { TIP?.remove(); TIP = null; };
+document.addEventListener("pointerdown", e => {
+  const el = e.target.closest("[data-tip]"); if (!el) return;
+  hideTip(); TIP = document.createElement("div"); TIP.className = "tip"; TIP.textContent = el.dataset.tip; document.body.appendChild(TIP);
+  const r = el.getBoundingClientRect(), h = TIP.offsetHeight, w = TIP.offsetWidth;
+  TIP.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.left + r.width / 2 - w / 2)) + "px";
+  TIP.style.top = (r.top - h - 10 > 8 ? r.top - h - 10 : r.bottom + 10) + "px";
+});
+for (const ev of ["pointerup", "pointercancel", "scroll"]) window.addEventListener(ev, hideTip, true);
+window.addEventListener("blur", hideTip); // seulement quand l'app perd le focus (pas quand un champ le perd)
+document.addEventListener("contextmenu", e => { if (e.target.closest("[data-tip]")) e.preventDefault(); });
+
 function renderAg() {
   const el = $("#p-ag"); if (!el) return;
   const keepDraft = $("#chatIn")?.value || "";
   const sc = S?.bots.spot.config || {}, pc = S?.bots.perps.config || {};
   const planLine = p => `<div class="row"><div><div class="l1">${esc(p.symbol || p.asset)} <span class="mut" style="font-weight:400">${p.interval === "15m" ? "scalping 15 min" : "1 h"}</span></div><div class="l2">${esc(p.source)}</div></div>
-    <div class="r"><span class="pill ${p.confidence === "confirmée" ? "ok" : "mid"}">${p.confidence === "confirmée" ? "confirmée · 100 %" : "nouvelle · 75 %"}</span></div></div>`;
+    <div class="r" data-tip="${TIPS.conf}"><span class="pill ${p.confidence === "confirmée" ? "ok" : "mid"}">${p.confidence === "confirmée" ? "confirmée · 100 %" : "nouvelle · 75 %"}</span></div></div>`;
   const manual = (!sc.autopilot && sc.plans?.length) || (!pc.autopilot && pc.plan) || sc.source || pc.source;
-  const pilot = `<div class="card"><div class="v txt" style="font-weight:600">Pilote automatique</div>
-      <p class="sub" style="margin:6px 0 4px">Il choisit lui-même tokens et stratégies parmi ses découvertes validées (≥ 5 trades, profit factor ≥ 1,3 et baisse ≤ 10 % sur la période jamais vue). En perps, toujours en mode normal. Il apprend des vrais trades : une stratégie nouvelle est tradée à 75 % du risque, puis à 100 % une fois confirmée en réel ; une stratégie qui perd en réel est abandonnée.</p>
+  const A = {...(AG?.settings || {aggressive: false, nerve: 1, levels: ["Calme", "Normal", "Nerveux", "Très nerveux"]}), ...(window.__agDraft || {})}; // brouillon non enregistré conservé
+  const nerveTxt = n => ["Calme : seulement des stratégies lentes et posées (bougies 1 h, cassures longues). Moins de trades.",
+    "Normal : toutes les stratégies validées, sans préférence de rythme.",
+    "Nerveux : le chercheur explore aussi le scalping 15 min et les cassures courtes, et le pilote préfère les stratégies qui tradent souvent.",
+    "Très nerveux : uniquement des stratégies rapides. Beaucoup plus de trades, plus de frais et de faux signaux."][n] || "";
+  const settings = `<div class="card"><div class="v txt" style="font-weight:600">Réglages des agents</div>
+      <label class="field"><span>Mode agressif (chercheur + mathématicien)</span><input type="checkbox" id="agAggr" ${A.aggressive ? "checked" : ""} style="width:26px;height:26px"></label>
+      <p class="sub" style="margin:0 0 6px">${A.aggressive ? "⚠ " : ""}Critères de validation assouplis (« à surveiller » accepté, PF ≥ 1,15, baisse ≤ 20 %), propositions plus serrées du mathématicien, et agressivité du bot perps appliquée même en pilote automatique. Plus de stratégies retenues, mais moins sûres.</p>
+      <div class="sep"></div>
+      <div class="k">Nervosité des stratégies</div>
+      <input type="range" id="agNerve" min="0" max="3" step="1" value="${A.nerve}">
+      <div class="rl"><span>− Calme</span><span>Très nerveux +</span></div>
+      <div class="v txt" id="agNerveName" style="margin-top:10px;text-align:center">${esc(A.levels[A.nerve])}</div>
+      <p class="sub" id="agNerveTxt" style="margin:6px 0 0">${nerveTxt(A.nerve)}</p>
+      <button class="btn go sm" style="width:100%;margin-top:12px" id="agSave">Enregistrer</button>
+    </div>`;
+  window.__nerveTxt = nerveTxt;
+  const pilot = `${settings}<div class="card"><div class="v txt" style="font-weight:600">Pilote automatique</div>
+      <p class="sub" style="margin:6px 0 4px">Il choisit lui-même tokens et stratégies parmi ses découvertes validées (${AG?.settings?.aggressive ? "mode agressif : « prometteuses » ou « à surveiller », ≥ 4 trades, profit factor ≥ 1,15 et baisse ≤ 20 %" : "≥ 5 trades, profit factor ≥ 1,3 et baisse ≤ 10 %"} sur la période jamais vue). En perps, agressivité ${AG?.settings?.aggressive ? "celle choisie dans Réglages" : "plafonnée à « Normal »"}. Il apprend des vrais trades : une stratégie nouvelle est tradée à 75 % du risque, puis à 100 % une fois confirmée en réel ; une stratégie qui perd en réel est abandonnée.</p>
       <label class="field"><span>Bot spot</span><input type="checkbox" data-pilot="spot" ${sc.autopilot ? "checked" : ""} style="width:26px;height:26px"></label>
       <label class="field"><span>Bot perps</span><input type="checkbox" data-pilot="perps" ${pc.autopilot ? "checked" : ""} style="width:26px;height:26px"></label>
       ${(sc.plans?.length || pc.plan) ? `<div class="k" style="margin-top:12px">Plans en cours</div>${(sc.plans || []).map(planLine).join("")}${pc.plan ? planLine(pc.plan) : ""}` : (sc.autopilot || pc.autopilot) ? `<p class="sub" style="margin:10px 0 0">Aucune stratégie ne passe encore les critères : les bots attendent.</p>` : ""}
@@ -441,10 +526,10 @@ function renderAg() {
       <div class="l2" style="margin-top:6px;line-height:1.5">${esc(r.description)}</div>
       ${r.origin === "mathématicien" ? `<p class="sub" style="margin:8px 0 0;font-size:13px"><b>∑ Proposée par le mathématicien :</b> ${esc(r.rationale || "")}</p>` : ""}
       <div class="grid" style="margin-top:14px">
-        <div><div class="k">Période jamais vue</div><div class="v ${cl(r.test.returnPct)}">${sg(r.test.returnPct, 1)} %</div></div>
-        <div><div class="k">PF jamais vue · trades</div><div class="v">${nf(r.test.profitFactor)} · ${r.test.trades}</div></div>
-        <div><div class="k">Entraînement (PF)</div><div class="v">${nf(r.train.profitFactor)}</div></div>
-        <div><div class="k">Pire baisse</div><div class="v">${nf(r.test.maxDrawdownPct, 1)} %</div></div>
+        <div data-tip="${TIPS.test}"><div class="k">Période jamais vue</div><div class="v ${cl(r.test.returnPct)}">${sg(r.test.returnPct, 1)} %</div></div>
+        <div data-tip="${TIPS.pf}"><div class="k">PF jamais vue · trades</div><div class="v">${nf(r.test.profitFactor)} · ${r.test.trades}</div></div>
+        <div data-tip="${TIPS.train}"><div class="k">Entraînement (PF)</div><div class="v">${nf(r.train.profitFactor)}</div></div>
+        <div data-tip="${TIPS.dd}"><div class="k">Pire baisse</div><div class="v">${nf(r.test.maxDrawdownPct, 1)} %</div></div>
       </div>
       ${r.live ? `<div class="sep"></div><div class="k">En réel (trades des bots)</div><div class="v ${cl(r.live.pnlUsd)}" style="font-size:15px">${r.live.trades} trades · ${sg(r.live.pnlUsd)} $ · PF ${nf(r.live.profitFactor)}</div>` : ""}
       ${r.verdict === "déçue en réel" ? `<p class="sub" style="margin:8px 0 0">${esc(r.why)}</p>` : ""}
@@ -481,6 +566,10 @@ document.addEventListener("click", async e => {
   if (t.dataset.copy) { try { await navigator.clipboard.writeText(t.dataset.copy); toast("Adresse copiée"); } catch (err) { toast("Copie impossible"); } return; }
   if (t.dataset.hf) { HF = t.dataset.hf; renderHist(); return; }
   if (t.id === "chatSend") return sendChat();
+  if (t.id === "agSave") { const aggressive = $("#agAggr").checked, nerve = +$("#agNerve").value; window.__agDraft = null;
+    try { const r = await api("/api/research/settings", {method: "POST", body: JSON.stringify({aggressive, nerve})});
+      toast(`Agents : ${r.aggressive ? "mode agressif" : "mode normal"} · ${AG?.settings?.levels?.[r.nerve] || ""}`); } catch (e) {}
+    await refresh(); await loadAg(); return; }
   if (t.id === "swapRun") { if (SW_BUSY) return; SW_BUSY = true; renderAg();
     try { const r = await api("/api/agents/swap/run", {method: "POST"});
       const txt = ["spot", "perps"].map(k => typeof r[k] === "string" ? `${k} : ${r[k]}` : `${k} : ${r[k].vendus} vente(s), ${r[k].comptesFermes} compte(s) fermé(s), +${nf(r[k].solRecupere, 4)} SOL`).join(" · ");
@@ -499,13 +588,12 @@ document.addEventListener("click", async e => {
     toast("Retour aux réglages automatiques"); await refresh(); loadAg(); return; }
   if (t.dataset.strat) { document.querySelectorAll("[data-strat]").forEach(x => x.classList.toggle("on", x === t));
     $("#rsiFields").style.display = t.dataset.strat === "rsi" ? "" : "none"; $("#saveStrat").dataset.sel = t.dataset.strat; return; }
-  if (t.dataset.pmode) {
-    if (t.dataset.pmode === "agressif" && $("#savePerps").dataset.mode !== "agressif") toast("Mode agressif : risque et levier plus élevés");
-    document.querySelectorAll("[data-pmode]").forEach(x => x.classList.toggle("on", x === t));
-    $("#savePerps").dataset.mode = t.dataset.pmode; $("#pmodeTxt").textContent = modeText(t.dataset.pmode); return; }
+  if (t.dataset.lev && t.id !== "savePerps") {
+    document.querySelectorAll(".chip[data-lev]").forEach(x => x.classList.toggle("on", x === t));
+    $("#savePerps").dataset.lev = t.dataset.lev; $("#levTxt").textContent = levText(+t.dataset.lev); return; }
   if (t.id === "savePerps") {
-    const r = await api("/api/perps/config", {method: "POST", body: JSON.stringify({mode: t.dataset.mode, bias: +$("#pbias").value})});
-    toast(`Perps : ${r.config.mode === "agressif" ? "mode agressif" : "mode normal"} · ${biasText(r.config.bias)}`); BT = null; await refresh(); renderSet(); return; }
+    const r = await api("/api/perps/config", {method: "POST", body: JSON.stringify({aggr: +$("#paggr").value, maxLev: +t.dataset.lev, bias: +$("#pbias").value})});
+    toast(`Perps : ${S.rules.aggrLevels[r.config.aggr].name} · levier max x${r.config.maxLev} · ${biasText(r.config.bias)}`); BT = null; await refresh(); renderSet(); return; }
   if (t.id === "saveStrat") {
     const body = {strategy: t.dataset.sel, rsi: {rsiPeriod: +$("#r-period").value, entry: +$("#r-entry").value, exit: +$("#r-exit").value,
       smaPeriod: +$("#r-sma").value, swingBars: +$("#r-swing").value, riskPct: +String($("#r-risk").value).replace(",", "."), naive: $("#r-naive").checked}};
@@ -541,6 +629,7 @@ document.addEventListener("click", async e => {
 });
 
 document.addEventListener("change", async e => {
+  if (e.target.id === "agAggr") { window.__agDraft = {aggressive: e.target.checked, nerve: +$("#agNerve").value}; if (e.target.checked) toast("Mode agressif : pense à enregistrer"); return; }
   if (e.target.dataset?.swapauto) { await api("/api/agents/swap/auto", {method: "POST", body: JSON.stringify({on: e.target.checked})}); toast(e.target.checked ? "Nettoyage automatique activé" : "Nettoyage automatique coupé"); return loadAg(); }
   const k = e.target.dataset?.pilot; if (!k) return;
   const on = e.target.checked;
@@ -548,7 +637,10 @@ document.addEventListener("change", async e => {
     toast(on ? `Pilote automatique activé (${k}) : ${r.pilot}` : `Pilote automatique coupé (${k})`); } catch (err) { e.target.checked = !on; }
   await refresh(); loadAg();
 });
-document.addEventListener("input", e => { if (e.target.id === "pbias") $("#pbiasTxt").textContent = biasText(+e.target.value); });
+document.addEventListener("input", e => { if (e.target.id === "pbias") $("#pbiasTxt").textContent = biasText(+e.target.value);
+  if (e.target.id === "agNerve" || e.target.id === "agAggr") window.__agDraft = {aggressive: $("#agAggr").checked, nerve: +$("#agNerve").value};
+  if (e.target.id === "agNerve") { $("#agNerveName").textContent = (AG?.settings?.levels || [])[+e.target.value] || ""; $("#agNerveTxt").textContent = window.__nerveTxt?.(+e.target.value) || ""; }
+  if (e.target.id === "paggr") { $("#paggrName").textContent = S.rules.aggrLevels[+e.target.value].name; $("#pmodeTxt").textContent = modeText(+e.target.value); } });
 setInterval(() => { if (PAGE === "ag" && !document.hidden && !AG_BUSY) loadAg(); }, 60000);
 document.addEventListener("keydown", e => { if (e.target.id === "chatIn" && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });
 addEventListener("beforeinstallprompt", e => { e.preventDefault(); window.__inst = e; });

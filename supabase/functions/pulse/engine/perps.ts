@@ -6,7 +6,7 @@ import { candles as getCandles, hourlyCandles, lastClosedCandle } from "./candle
 import { perpsClose, perpsOpen, perpsPositions, perpsPrice, type PerpPosition } from "./jupiter.ts";
 import { getBalances, loadKeyPairFrom, type Balances } from "./solana.ts";
 import {
-  AGGRESSIVE, atr, dayKey, exitCheck, loadMemory, loadPerpsConfig, missionEnd, PERPS_ASSETS, PERPS_RULES, perpsChange, perpsSizing, PRESETS, RISK, riskFactor, sideMult,
+  AGGR_AGGRESSIVE, AGGR_LEVELS, effectiveAggr, atr, dayKey, exitCheck, loadMemory, loadPerpsConfig, missionEnd, PERPS_ASSETS, PERPS_RULES, perpsChange, perpsSizing, PRESETS, RISK, riskFactor, sideMult,
   riskGate, RULES, trailStop, trendSignal, DEFAULT_PARAMS, type Interval, type Memory, type Params,
 } from "./strategy.ts";
 
@@ -42,8 +42,10 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
   const now = Date.now();
   const mem: Memory = loadMemory(bot.price_history);
   const cfg = loadPerpsConfig(bot.config);
-  const aggressive = cfg.mode === "agressif" && !cfg.autopilot; // prudence : le pilote automatique ne trade jamais en mode agressif
-  const maxLev = aggressive ? AGGRESSIVE.maxLeverage : PERPS_RULES.maxLeverage;
+  // Agressivité choisie dans l'app (plafonnée à « Normal » en pilote automatique, sauf mode agressif du chercheur)
+  const level = effectiveAggr(cfg), L = AGGR_LEVELS[level]!;
+  const aggressive = level >= AGGR_AGGRESSIVE;
+  const maxLev = cfg.maxLev; // levier maximum choisi ; le dimensionnement le réduit si le stop est trop loin pour lui
   const patch: Partial<PerpsRow> = {};
 
   // 1. Données : prix, soldes ET positions réelles. Sinon on ne touche à rien (le stop on-chain protège).
@@ -161,7 +163,7 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
     // Mode agressif : il trade même quand aucun réglage n'a été validé sur 60 jours, mais respecte toujours la perte max du jour
     // et la mise sur le banc après une série de pertes.
     const benched = aggressive || cfg.trend || plan ? (brain.benched[ASSET.asset] ?? 0) > now : isBenched(brain, ASSET.asset, now);
-    const blocked = riskGate(mem, value, now, aggressive ? AGGRESSIVE.dailyLoss : RISK.dailyLoss)
+    const blocked = riskGate(mem, value, now, L.dailyLoss)
       ?? (benched ? ((!aggressive && !plan && brain.disabled[ASSET.asset]) || `${ASSET.asset} sur le banc après une série difficile`) : null);
     if (blocked || mem.lastCandle === closed) {
       mem.mindset = mindset(brain, { inPosition: false, blocked, goalPct: (value / Number(bot.goal_usd)) * 100 });
@@ -185,7 +187,7 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
     // le stop reste à la même distance que sur la bougie, recalé sur le prix réel
     const dist = Math.abs(sig.price - sig.stop);
     const stop = sig.side === "long" ? price - dist : price + dist;
-    const baseRisk = aggressive ? Math.min(AGGRESSIVE.maxRisk, riskPerTrade(brain) * AGGRESSIVE.riskMult) : riskPerTrade(brain);
+    const baseRisk = Math.min(L.maxRisk, riskPerTrade(brain) * L.riskMult);
     const confidence = plan ? riskFactor(plan.confidence) : 1; // stratégie du chercheur pas encore confirmée en réel : 75 % du risque
     const size = perpsSizing(value, b.usdc, price, stop, baseRisk * mult * confidence, maxLev);
     if (!size) {
@@ -197,7 +199,7 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
     Object.assign(mem, { pending: { kind: "open", sig: txid, at: now }, stop, best: price, initialRisk: dist, openedAt: now, openValueUsd: value, side: sig.side, asset: ASSET.asset, stopCandle: closed,
       posParams: params, posInterval: iv, source: plan?.source ?? cfg.source ?? "réglages de l'app" });
     await save(admin, bot, mem, { ...patch, last_value_usd: value,
-      last_message: `${sig.side === "long" ? "Long" : "Short"} ${ASSET.asset} demandé${aggressive ? " (mode agressif)" : ""} : ${size.collateral.toFixed(2)} $ x${size.leverage.toFixed(1)}, risque ${(baseRisk * mult * confidence * 100).toFixed(1)} %, stop ${stop.toFixed(2)} $ (${sig.reason}).` });
+      last_message: `${sig.side === "long" ? "Long" : "Short"} ${ASSET.asset} demandé (${L.name.toLowerCase()}) : ${size.collateral.toFixed(2)} $ x${size.leverage.toFixed(1)}, risque ${(baseRisk * mult * confidence * 100).toFixed(1)} %, stop ${stop.toFixed(2)} $ (${sig.reason}).` });
     return "open";
   } catch (e) {
     await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: `Erreur : ${(e as Error).message}`.slice(0, 300) + " — je réessaie au prochain tick." });
