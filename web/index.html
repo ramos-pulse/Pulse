@@ -85,6 +85,7 @@ nav svg{width:22px;height:22px}nav button.on{color:var(--lime)}
   <input id="srv" type="url" autocomplete="off" placeholder="https://xxxx.supabase.co" style="margin-bottom:0">
   <input id="tok" type="password" autocomplete="current-password" placeholder="DASHBOARD_TOKEN">
   <button class="btn go" style="width:100%" id="loginBtn">Entrer</button>
+  <div id="loginErr" class="warnbox" style="display:none;margin:14px 0 0"></div>
 </div></div>
 
 <div id="app" style="display:none">
@@ -128,27 +129,32 @@ function closeSheet() { $("#sheet").classList.remove("on"); }
 $("#sheet").addEventListener("click", e => { if (e.target.id === "sheet") closeSheet(); });
 
 async function api(path, opts = {}) {
-  const r = await fetch(BASE + path, {...opts, headers: {"x-token": TOKEN, "content-type": "application/json"}}).catch(() => { throw new Error("réseau"); });
-  if (r.status === 401) { showLogin(); throw new Error("auth"); }
+  let r;
+  try { r = await fetch(BASE + path, {...opts, headers: {"x-token": TOKEN, "content-type": "application/json"}}); }
+  catch (e) { throw new Error(`Serveur injoignable (${BASE}). Vérifie l'identifiant du projet, ou la fonction n'a pas démarré.`); }
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) { toast(j.error || "Erreur serveur"); throw new Error(j.error); }
+  if (r.status === 401) { showLogin(j.error === "token invalide" ? "Mot de passe (DASHBOARD_TOKEN) incorrect." : (j.error || "Accès refusé.")); throw new Error("auth"); }
+  if (!r.ok) { const m = j.error || j.message || j.msg || `Erreur serveur ${r.status}`; if (lastOk) toast(m); throw new Error(m); }
   return j;
 }
-function showLogin() { $("#login").style.display = "flex"; $("#app").style.display = "none"; if (BASE) $("#srv").value = BASE.replace(/\/functions\/v1\/pulse$/, ""); }
+function showLogin(err) { $("#login").style.display = "flex"; $("#app").style.display = "none";
+  const box = $("#loginErr"); if (box) { box.style.display = err ? "block" : "none"; box.textContent = err || ""; } if (BASE) $("#srv").value = BASE.replace(/\/functions\/v1\/pulse$/, ""); }
 /** Accepte « abcd1234 », « abcd1234.supabase.co » ou l'URL complète. */
 function serverUrl(v) { v = v.trim().replace(/\/+$/, ""); if (!v) return "";
   if (!/^https?:\/\//.test(v)) v = "https://" + (v.includes(".") ? v : v + ".supabase.co");
   return v.includes("/functions/v1/pulse") ? v : v + "/functions/v1/pulse"; }
 $("#loginBtn").onclick = () => { BASE = serverUrl($("#srv").value); TOKEN = $("#tok").value.trim();
   if (!BASE || !TOKEN) return toast("Remplis les deux champs");
-  try { localStorage.setItem("pulse_token", TOKEN); localStorage.setItem("pulse_base", BASE); } catch (e) {} $("#login").style.display = "none"; refresh(); };
+  try { localStorage.setItem("pulse_token", TOKEN); localStorage.setItem("pulse_base", BASE); } catch (e) {}
+  const box = $("#loginErr"); box.style.display = "block"; box.textContent = "Connexion…"; refresh(); };
 
 $("#nav").onclick = e => { const b = e.target.closest("button"); if (b) go(b.dataset.p); };
 function go(p) { PAGE = p; document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
   document.querySelectorAll(".page").forEach(x => x.classList.toggle("on", x.id === "p-" + p)); render(); scrollTo(0, 0); }
 
 async function refresh() {
-  try { S = await api("/api/state"); lastOk = Date.now(); $("#app").style.display = "block"; notifyNew(); render(); } catch (e) { fresh(); }
+  try { S = await api("/api/state"); lastOk = Date.now(); $("#login").style.display = "none"; $("#app").style.display = "block"; notifyNew(); render(); }
+  catch (e) { if (!lastOk && e.message !== "auth") showLogin(e.message); fresh(); }
 }
 function fresh() { const s = lastOk ? (Date.now() - lastOk) / 1000 : 999, ok = s < 10;
   $("#dot").className = "dot " + (ok ? "ok" : "bad"); $("#fresh").textContent = ok ? "en direct" : lastOk ? `hors ligne · ${s|0} s` : "connexion…"; }
@@ -340,7 +346,7 @@ addEventListener("beforeinstallprompt", e => { e.preventDefault(); window.__inst
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 if (!TOKEN || !BASE) showLogin(); else refresh();
-setInterval(() => { if (!document.hidden && !$("#sheet").classList.contains("on") && PAGE !== "set") refresh(); else fresh(); }, 5000);
+setInterval(() => { if (!lastOk) return; if (!document.hidden && !$("#sheet").classList.contains("on") && PAGE !== "set") refresh(); else fresh(); }, 5000);
 }
 </script>
 </body>

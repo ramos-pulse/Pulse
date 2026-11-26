@@ -12,9 +12,19 @@ import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spo
 import { backtest, loadMemory, PERPS_RULES, PRESETS, RISK, RULES, STRATEGY, TOKENS } from "./engine/strategy.ts";
 import { DbStore, notify, type BotKind, type BotState } from "./store.ts";
 
-const SUPABASE_URL = env("SUPABASE_URL")!;
-const SERVICE_KEY = env("SUPABASE_SERVICE_ROLE_KEY") ?? env("PULSE_SERVICE_KEY")!;
-const db = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
+const SUPABASE_URL = env("SUPABASE_URL") ?? "";
+
+/** Clé « service » : son nom varie selon l'âge du projet Supabase. */
+function serviceKey(): string | undefined {
+  const direct = env("SUPABASE_SERVICE_ROLE_KEY") ?? env("SUPABASE_SECRET_KEY") ?? env("PULSE_SERVICE_KEY");
+  if (direct) return direct;
+  const many = env("SUPABASE_SECRET_KEYS"); // format JSON {"default": "sb_secret_..."} sur les projets récents
+  if (many) { try { const o = JSON.parse(many) as Record<string, string>; return o["default"] ?? Object.values(o)[0]; } catch { /* ignore */ } }
+  return undefined;
+}
+const KEY = serviceKey();
+// Créé seulement si la clé existe : sinon la fonction répond avec une erreur claire au lieu de planter au démarrage.
+const db = (KEY && SUPABASE_URL ? createClient(SUPABASE_URL, KEY, { auth: { persistSession: false } }) : null) as ReturnType<typeof createClient>;
 const TOKEN = env("DASHBOARD_TOKEN") ?? "";
 const KINDS: BotKind[] = ["spot", "perps"];
 
@@ -149,6 +159,7 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
   const url = new URL(req.url);
   const route = url.pathname.replace(/^.*?\/pulse/, "") || "/";
+  if (!db) return json({ error: "Clé service Supabase introuvable : ajoute le secret PULSE_SERVICE_KEY (Project Settings → API Keys → clé secret/service_role)." }, 500);
   try {
     if (route === "/tick" && req.method === "POST") {
       if (!TOKEN || !safeEqual(req.headers.get("x-cron-secret") ?? "", await cronSecret())) return json({ error: "interdit" }, 403);
