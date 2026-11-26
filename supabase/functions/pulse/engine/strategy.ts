@@ -205,6 +205,7 @@ export interface Memory {
   initialRisk?: number;     // distance entrée → stop initial (en prix)
   stopCandle?: number;      // dernière bougie ayant servi à remonter le stop
   side?: Side;
+  strategy?: SpotStrategy;  // stratégie qui a ouvert la position (gérée jusqu'au bout avec ses propres règles)
   openedAt?: number;
   costUsd?: number;         // spot : USDC réellement dépensés (frais compris)
   openValueUsd?: number;    // perps : valeur du portefeuille juste avant l'ouverture
@@ -329,4 +330,157 @@ export type History = Record<string, number[]>;
 export const PEAK_KEY = "peak";
 export function perpsLeverage(requested: number): number {
   return Math.min(PERPS_RULES.maxLeverage, Math.max(1.1, requested));
+}
+
+// ---------------------------------------------------------------------------------------------------
+// STRATÉGIE RSI « excès de baisse dans une tendance haussière » (au choix pour le bot spot, achat uniquement)
+//  - Achat quand le RSI vient de passer sous le seuil d'entrée, si la clôture est au-dessus de sa moyenne mobile.
+//  - Sortie à la clôture d'une bougie quand le RSI repasse au-dessus du seuil de sortie.
+//  - Stop sous le dernier creux (plus bas des N dernières bougies), jamais déplacé.
+//  - Risque fixe en % du compte, taille calculée depuis la distance du stop.
+//  - Mode naïf (comparaison) : RSI sous le seuil = achat, RSI au-dessus de 70 = vente, sans filtre de tendance.
+//  Décisions prises à la clôture des bougies 1 h. Une position à la fois. Pas de grille, pas de martingale.
+// ---------------------------------------------------------------------------------------------------
+export interface RsiParams { rsiPeriod: number; entry: number; exit: number; smaPeriod: number; swingBars: number; riskPct: number; naive: boolean }
+export const RSI_DEFAULTS: RsiParams = { rsiPeriod: 14, entry: 30, exit: 50, smaPeriod: 200, swingBars: 10, riskPct: 1, naive: false };
+export const NAIVE_EXIT = 70;
+
+export type SpotStrategy = "tendance" | "rsi";
+export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams }
+
+const clamp = (v: unknown, lo: number, hi: number, def: number) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : def;
+};
+
+/** Valide et borne les réglages envoyés par l'app (jamais de valeur absurde). */
+export function sanitizeRsi(p: Partial<RsiParams> | null | undefined): RsiParams {
+  const d = RSI_DEFAULTS, x = p ?? {};
+  const entry = Math.round(clamp(x.entry, 5, 50, d.entry));
+  return {
+    rsiPeriod: Math.round(clamp(x.rsiPeriod, 2, 50, d.rsiPeriod)),
+    entry,
+    exit: Math.round(clamp(x.exit, entry + 1, 95, Math.max(d.exit, entry + 1))),
+    smaPeriod: Math.round(clamp(x.smaPeriod, 10, 300, d.smaPeriod)),
+    swingBars: Math.round(clamp(x.swingBars, 2, 50, d.swingBars)),
+    riskPct: Math.round(clamp(x.riskPct, 0.1, 3, d.riskPct) * 10) / 10,
+    naive: x.naive === true,
+  };
+}
+
+export function loadConfig(raw: unknown): SpotConfig {
+  const o = (raw && typeof raw === "object" ? raw : {}) as Partial<SpotConfig>;
+  return { strategy: o.strategy === "rsi" ? "rsi" : "tendance", rsi: sanitizeRsi(o.rsi) };
+}
+
+/** RSI de Wilder ; NaN tant qu'il n'y a pas assez de bougies. */
+export function rsiSeries(closes: number[], n: number): number[] {
+  const out: number[] = new Array(closes.length).fill(NaN);
+  let gain = 0, loss = 0;
+  for (let i = 1; i < closes.length; i++) {
+    const ch = closes[i]! - closes[i - 1]!;
+    const g = Math.max(ch, 0), l = Math.max(-ch, 0);
+    if (i <= n) {
+      gain += g / n; loss += l / n;
+      if (i === n) out[i] = loss === 0 ? 100 : 100 - 100 / (1 + gain / loss);
+      continue;
+    }
+    gain = (gain * (n - 1) + g) / n;
+    loss = (loss * (n - 1) + l) / n;
+    out[i] = loss === 0 ? 100 : 100 - 100 / (1 + gain / loss);
+  }
+  return out;
+}
+
+/** Moyenne mobile simple ; NaN tant qu'il n'y a pas assez de bougies. */
+export function smaSeries(values: number[], n: number): number[] {
+  const out: number[] = new Array(values.length).fill(NaN);
+  let sum = 0;
+  for (let i = 0; i < values.length; i++) {
+    sum += values[i]!;
+    if (i >= n) sum -= values[i - n]!;
+    if (i >= n - 1) out[i] = sum / n;
+  }
+  return out;
+}
+
+/** Signal d'entrée sur la bougie d'indice i (séries précalculées). */
+function rsiEntryAt(c: Candle[], r: number[], s: number[], i: number, p: RsiParams): { stop: number; reason: string } | null {
+  const now = r[i]!, prev = r[i - 1]!, close = c[i]!.c;
+  if (!Number.isFinite(now) || !Number.isFinite(prev)) return null;
+  let ok: boolean;
+  if (p.naive) ok = now < p.entry;
+  else ok = prev >= p.entry && now < p.entry && Number.isFinite(s[i]!) && close > s[i]!;
+  if (!ok) return null;
+  let stop = Infinity;
+  for (let k = Math.max(0, i - p.swingBars + 1); k <= i; k++) stop = Math.min(stop, c[k]!.l);
+  if (!(stop < close)) return null;
+  const reason = p.naive
+    ? `RSI ${now.toFixed(0)} sous ${p.entry} (mode naïf, sans filtre de tendance)`
+    : `RSI ${now.toFixed(0)} vient de passer sous ${p.entry}, prix au-dessus de la MM${p.smaPeriod}`;
+  return { stop, reason };
+}
+
+/** Analyse la dernière bougie clôturée pour la stratégie RSI. */
+export function rsiSignal(candles: Candle[], p: RsiParams): Signal {
+  const last = candles.at(-1);
+  const empty = (reason: string): Signal => ({ side: null, reason, price: last?.c ?? 0, atr: 0, stop: 0, candleTime: last?.t ?? 0, score: 0 });
+  const need = (p.naive ? p.rsiPeriod : Math.max(p.smaPeriod, p.rsiPeriod)) + 2;
+  if (!last || candles.length < need) return empty(`historique insuffisant (${candles.length}/${need} bougies)`);
+  const closes = candles.map((x) => x.c);
+  const r = rsiSeries(closes, p.rsiPeriod), s = smaSeries(closes, p.smaPeriod);
+  const i = candles.length - 1;
+  const hit = rsiEntryAt(candles, r, s, i, p);
+  if (hit) return { side: "long", reason: hit.reason, price: last.c, atr: 0, stop: hit.stop, candleTime: last.t, score: p.entry - r[i]! };
+  const trend = Number.isFinite(s[i]!) ? (last.c > s[i]! ? `au-dessus de la MM${p.smaPeriod}` : `sous la MM${p.smaPeriod} (pas d'achat)`) : "";
+  return empty(`RSI ${Number.isFinite(r[i]!) ? r[i]!.toFixed(0) : "—"}, prix ${trend}`.trim());
+}
+
+/** Sortie à la clôture : RSI repassé au-dessus du seuil de sortie (70 en mode naïf). */
+export function rsiExitSignal(candles: Candle[], p: RsiParams): { exit: boolean; rsi: number } {
+  const r = rsiSeries(candles.map((x) => x.c), p.rsiPeriod);
+  const now = r.at(-1)!;
+  return { exit: Number.isFinite(now) && now > (p.naive ? NAIVE_EXIT : p.exit), rsi: now };
+}
+
+/** Backtest de la stratégie RSI, frais inclus (feePct par côté). */
+export function backtestRsi(candles: Candle[], p: RsiParams, feePct: number): BacktestResult {
+  const closes = candles.map((x) => x.c);
+  const r = rsiSeries(closes, p.rsiPeriod), s = smaSeries(closes, p.smaPeriod);
+  const exitLevel = p.naive ? NAIVE_EXIT : p.exit;
+  let equity = 1, peak = 1, maxDd = 0;
+  const log: BacktestResult["log"] = [];
+  let pos: { entry: number; stop: number; size: number } | null = null;
+  const start = Math.max(p.smaPeriod, p.rsiPeriod) + 2;
+  for (let i = start; i < candles.length; i++) {
+    const c = candles[i]!;
+    if (pos) {
+      let exit: number | null = null, reason = "";
+      if (c.l <= pos.stop) { exit = Math.min(c.o, pos.stop); reason = "stop_loss"; }
+      else if (r[i]! > exitLevel) { exit = c.c; reason = "rsi_exit"; }
+      if (exit !== null) {
+        const pnl = pos.size * ((exit - pos.entry) / pos.entry - 2 * feePct);
+        equity *= 1 + pnl;
+        log.push({ side: "long", entry: pos.entry, exit, pnlPct: pnl * 100, reason, t: c.t });
+        pos = null;
+      }
+    } else {
+      const hit = rsiEntryAt(candles, r, s, i, p);
+      if (hit) {
+        const dist = (c.c - hit.stop) / c.c;
+        pos = { entry: c.c, stop: hit.stop, size: Math.min((p.riskPct / 100) / dist, RISK.maxSpotFraction) };
+      }
+    }
+    peak = Math.max(peak, equity);
+    maxDd = Math.max(maxDd, 1 - equity / peak);
+  }
+  const wins = log.filter((x) => x.pnlPct > 0), losses = log.filter((x) => x.pnlPct <= 0);
+  const gw = wins.reduce((a, x) => a + x.pnlPct, 0), gl = -losses.reduce((a, x) => a + x.pnlPct, 0);
+  const first = candles[start], lastC = candles.at(-1);
+  return {
+    trades: log.length, winRate: log.length ? (wins.length / log.length) * 100 : 0,
+    profitFactor: gl > 0 ? gw / gl : gw > 0 ? Infinity : 0, returnPct: (equity - 1) * 100, maxDrawdownPct: maxDd * 100,
+    avgWinPct: wins.length ? gw / wins.length : 0, avgLossPct: losses.length ? -gl / losses.length : 0,
+    days: first && lastC ? (lastC.t - first.t) / 86_400_000 : 0, log,
+  };
 }

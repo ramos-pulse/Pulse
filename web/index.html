@@ -153,7 +153,7 @@ $("#loginBtn").onclick = () => { BASE = serverUrl($("#srv").value); TOKEN = $("#
   const box = $("#loginErr"); box.style.display = "block"; box.textContent = "Connexion…"; refresh(); };
 
 $("#nav").onclick = e => { const b = e.target.closest("button"); if (b) go(b.dataset.p); };
-function go(p) { PAGE = p; document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
+function go(p) { PAGE = p; if (p === "set") $("#p-set").innerHTML = ""; document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
   document.querySelectorAll(".page").forEach(x => x.classList.toggle("on", x.id === "p-" + p)); render(); scrollTo(0, 0); }
 
 async function refresh() {
@@ -196,7 +196,7 @@ function missionCard(kind, title) {
         <div><div class="k">Résultat ${kind === "perps" ? "(cours)" : "(frais inclus)"}</div><div class="v ${cl(m.live?.pnlPct)}">${sg(m.live?.pnlPct)} %</div></div>
         <div><div class="k">Prix d'entrée</div><div class="v">${px(entry)} $</div></div>
         <div><div class="k">Cours actuel</div><div class="v">${px(cur)} $</div></div>
-        <div><div class="k">Stop suiveur</div><div class="v amber">${px(stop)} $</div></div>
+        <div><div class="k">${m.strategy === "rsi" ? "Stop (sous le creux)" : "Stop suiveur"}</div><div class="v amber">${px(stop)} $</div></div>
         <div><div class="k">Ouverte depuis</div><div class="v">${m.openedAt ? ago(new Date(m.openedAt).toISOString()) : "—"}</div></div>
       </div>
       ${stop && cur ? `<div class="range"><div class="t" style="${side === "short" ? "transform:scaleX(-1)" : ""}"></div><div class="e" style="left:${at(entry)}%"></div><div class="n" style="left:${at(cur)}%"></div></div>
@@ -241,14 +241,17 @@ function render() {
   if (!S.secrets.customRpc) a += `<div class="warnbox">RPC Solana public utilisé : ajoute le secret SOLANA_RPC_URL (ton lien Helius) dans Supabase.</div>`;
   if (!S.secrets.telegram && PAGE === "home") a += `<div class="warnbox">Ajoute les secrets TELEGRAM_BOT_TOKEN et TELEGRAM_CHAT_ID dans Supabase pour être prévenu même téléphone verrouillé.</div>`;
   $("#alerts").innerHTML = a;
-  if (PAGE === "home") $("#p-home").innerHTML = missionCard("spot", "Bot 1 · Spot Solana") + missionCard("perps", `Bot 2 · Perps SOL x${S.rules.perps.maxLeverage} max`) + rulesNote();
+  const spotStrat = S.bots.spot.config?.strategy === "rsi" ? (S.bots.spot.config.rsi.naive ? "RSI naïf" : "RSI") : "Tendance";
+  if (PAGE === "home") $("#p-home").innerHTML = missionCard("spot", `Bot 1 · Spot Solana · ${spotStrat}`) + missionCard("perps", `Bot 2 · Perps SOL x${S.rules.perps.maxLeverage} max`) + rulesNote();
   if (PAGE === "hist") renderHist();
   if (PAGE === "bt") renderBt();
-  if (PAGE === "set" && !(document.activeElement && document.activeElement.tagName === "INPUT")) renderSet(); // ne pas effacer une saisie en cours
+  if (PAGE === "set" && !$("#p-set").innerHTML) renderSet(); // dessinée une seule fois : une saisie en cours n'est jamais effacée
 }
 
 function rulesNote() {
-  const st = S.rules.strategy, r = S.rules.risk;
+  const st = S.rules.strategy, r = S.rules.risk, c = S.bots.spot.config;
+  if (c?.strategy === "rsi") { const p = c.rsi;
+    return `<div class="note">Bot spot · stratégie RSI en bougies 1 h · ${p.naive ? `achat RSI sous ${p.entry}, vente RSI au-dessus de 70, sans filtre de tendance` : `achat quand le RSI(${p.rsiPeriod}) passe sous ${p.entry} au-dessus de la MM${p.smaPeriod}, sortie RSI au-dessus de ${p.exit}`} · stop sous le creux des ${p.swingBars} dernières bougies · risque ${String(p.riskPct).replace(".", ",")} % par trade · une position à la fois</div>`; }
   return `<div class="note">Suivi de tendance en bougies 1 h · entrée sur cassure en tendance forte · stop initial ${st.stopAtr} ATR puis stop suiveur · risque ${nf(r.perTrade * 100, 1)} % du capital par trade · perte max ${r.dailyLoss * 100} % par jour</div>`;
 }
 
@@ -302,6 +305,7 @@ function renderSet() {
       <label class="field"><span>Objectif ($)</span><input type="number" inputmode="decimal" id="goal-${k}" value="${g(k).goal_usd}"></label>
       <label class="field"><span>Échéance dans (jours)</span><input type="number" inputmode="numeric" id="days-${k}" placeholder="${g(k).end_at ? Math.max(0, Math.ceil((new Date(g(k).end_at) - Date.now()) / 86400000)) : 30}"></label>
       <button class="btn sm" style="width:100%;margin-top:12px" data-goal="${k}">Enregistrer</button></div>`).join("")}
+    ${strategyCard()}
     <div class="eyebrow">Connexions</div>
     <div class="card" style="font:14px/2 var(--mono)">${ok(s.spotWallet)} Wallet spot<br>${ok(s.perpsWallet)} Wallet perps<br>${ok(s.customRpc)} RPC Solana privé<br>${ok(s.telegram)} Telegram<br>${ok(s.cron)} Tick automatique chaque minute</div>
     <div class="eyebrow">Application</div>
@@ -312,11 +316,40 @@ function renderSet() {
     </div>${rulesNote()}`;
 }
 
+function strategyCard() {
+  const c = S.bots.spot.config || {strategy: "tendance", rsi: {}}, p = c.rsi, rsi = c.strategy === "rsi";
+  const f = (id, label, v, step = "1") => `<label class="field"><span>${label}</span><input type="number" inputmode="decimal" step="${step}" id="${id}" value="${v}"></label>`;
+  return `<div class="eyebrow">Stratégie du bot spot</div><div class="card">
+    <div class="chips" style="margin-bottom:6px">
+      <button class="chip ${!rsi ? "on" : ""}" data-strat="tendance">Suivi de tendance</button>
+      <button class="chip ${rsi ? "on" : ""}" data-strat="rsi">RSI</button></div>
+    <p class="sub" style="margin:8px 0 4px">${rsi ? "Achète les excès de baisse dans une tendance haussière, revend au rebond." : "Achète les cassures en tendance forte, laisse courir avec un stop suiveur. Le bot ajuste lui-même ses réglages chaque jour."}</p>
+    <div id="rsiFields" style="${rsi ? "" : "display:none"}">
+      ${f("r-period", "Période du RSI", p.rsiPeriod)}
+      ${f("r-entry", "Seuil d'entrée (RSI sous…)", p.entry)}
+      ${f("r-exit", "Seuil de sortie (RSI au-dessus de…)", p.exit)}
+      ${f("r-sma", "Période de la moyenne", p.smaPeriod)}
+      ${f("r-swing", "Bougies pour le creux (stop)", p.swingBars)}
+      ${f("r-risk", "Risque par trade (%)", p.riskPct, "0.1")}
+      <label class="field"><span>Mode naïf<br><small class="mut">RSI sous le seuil = achat, au-dessus de 70 = vente, sans filtre de tendance</small></span><input type="checkbox" id="r-naive" ${p.naive ? "checked" : ""} style="width:26px;height:26px"></label>
+    </div>
+    <button class="btn go sm" style="width:100%;margin-top:14px" id="saveStrat" data-sel="${c.strategy}">Enregistrer la stratégie</button>
+    ${S.bots.spot.position_mint ? `<p class="sub" style="margin:10px 0 0">Une position est ouverte : elle reste gérée avec les règles de la stratégie qui l'a ouverte.</p>` : ""}
+  </div>`;
+}
+
 // ---------------------------------------------------------------- actions
 document.addEventListener("click", async e => {
   const t = e.target.closest("button"); if (!t) return;
   if (t.dataset.copy) { try { await navigator.clipboard.writeText(t.dataset.copy); toast("Adresse copiée"); } catch (err) { toast("Copie impossible"); } return; }
   if (t.dataset.hf) { HF = t.dataset.hf; renderHist(); return; }
+  if (t.dataset.strat) { document.querySelectorAll("[data-strat]").forEach(x => x.classList.toggle("on", x === t));
+    $("#rsiFields").style.display = t.dataset.strat === "rsi" ? "" : "none"; $("#saveStrat").dataset.sel = t.dataset.strat; return; }
+  if (t.id === "saveStrat") {
+    const body = {strategy: t.dataset.sel, rsi: {rsiPeriod: +$("#r-period").value, entry: +$("#r-entry").value, exit: +$("#r-exit").value,
+      smaPeriod: +$("#r-sma").value, swingBars: +$("#r-swing").value, riskPct: +String($("#r-risk").value).replace(",", "."), naive: $("#r-naive").checked}};
+    const r = await api("/api/spot/config", {method: "POST", body: JSON.stringify(body)});
+    toast(r.config.strategy === "rsi" ? "Stratégie RSI enregistrée" : "Suivi de tendance enregistré"); BT = null; await refresh(); renderSet(); return; }
   if (t.id === "btRun") {
     BT = "loading"; renderBt(); const results = [];
     for (let i = 0; i < S.markets.length; i++) {
@@ -328,7 +361,7 @@ document.addEventListener("click", async e => {
   if (t.id === "install") { if (window.__inst) { window.__inst.prompt(); window.__inst = null; } else toast("Menu ⋮ de Brave → « Ajouter à l'écran d'accueil »"); return; }
   if (t.id === "logout") { try { localStorage.removeItem("pulse_token"); } catch (err) {} location.reload(); return; }
   if (t.dataset.goal) { const k = t.dataset.goal;
-    await api(`/api/${k}/goal`, {method: "POST", body: JSON.stringify({goal_usd: Number($("#goal-" + k).value), days: Number($("#days-" + k).value)})}); toast("Enregistré"); refresh(); return; }
+    await api(`/api/${k}/goal`, {method: "POST", body: JSON.stringify({goal_usd: Number($("#goal-" + k).value), days: Number($("#days-" + k).value)})}); toast("Enregistré"); await refresh(); renderSet(); return; }
   if (t.id === "sheetCancel") return closeSheet();
   const k = t.dataset.k, act = t.dataset.act;
   if (act === "pause") { await api(`/api/${k}/pause`, {method: "POST"}); toast("En pause (la position reste gérée)"); refresh(); }

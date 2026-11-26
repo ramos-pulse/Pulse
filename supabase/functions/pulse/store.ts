@@ -21,6 +21,7 @@ export interface BotState {
   position_asset: string | null;
   position_side: string | null;
   price_history: unknown;
+  config: unknown;                 // réglages choisis dans l'app (stratégie spot, paramètres RSI)
   last_value_usd: number | null;
   last_tick_at: string | null;
   last_message: string | null;

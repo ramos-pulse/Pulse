@@ -9,7 +9,7 @@ import { hourlyCandles } from "./engine/candles.ts";
 import { env } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { backtest, loadMemory, PERPS_RULES, PRESETS, RISK, RULES, STRATEGY, TOKENS } from "./engine/strategy.ts";
+import { backtest, backtestRsi, loadConfig, loadMemory, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, STRATEGY, TOKENS } from "./engine/strategy.ts";
 import { DbStore, notify, type BotKind, type BotState } from "./store.ts";
 
 const SUPABASE_URL = env("SUPABASE_URL") ?? "";
@@ -128,8 +128,8 @@ async function state() {
     const mem = loadMemory(b.price_history);
     const { data: trades } = await db.from("trades").select("*").eq("bot", k).order("created_at", { ascending: false }).limit(60);
     out[k] = {
-      ...b, price_history: undefined, lock_until: undefined,
-      memory: { stop: mem.stop, best: mem.best, signal: mem.signal, mindset: mem.mindset, live: mem.live, asset: mem.asset, side: mem.side, openedAt: mem.openedAt, costUsd: mem.costUsd, pending: mem.pending ? { kind: mem.pending.kind, at: mem.pending.at } : null },
+      ...b, price_history: undefined, lock_until: undefined, config: loadConfig(b.config),
+      memory: { strategy: mem.strategy, stop: mem.stop, best: mem.best, signal: mem.signal, mindset: mem.mindset, live: mem.live, asset: mem.asset, side: mem.side, openedAt: mem.openedAt, costUsd: mem.costUsd, pending: mem.pending ? { kind: mem.pending.kind, at: mem.pending.at } : null },
       brain: mem.brain ? { risk: riskPerTrade(mem.brain), streak: mem.brain.streak, benched: mem.brain.benched, disabled: mem.brain.disabled, report: mem.brain.report ?? {}, preset: mem.brain.preset } : null,
       trades: trades ?? [],
     };
@@ -147,10 +147,15 @@ async function backtestMarket(i: number) {
   const m = MARKETS[i];
   if (!m) throw new Error("marché inconnu");
   const candles = await hourlyCandles(m.product, 1440);
-  const presets = Object.entries(PRESETS).map(([name, params]) => {
-    const r = backtest(candles, { allowShort: m.allowShort, feePct: m.feePct, hourlyCost: m.hourlyCost, leverageCap: m.cap, params });
-    return { name, trades: r.trades, winRate: r.winRate, profitFactor: Number.isFinite(r.profitFactor) ? r.profitFactor : null, returnPct: r.returnPct, maxDrawdownPct: r.maxDrawdownPct };
-  });
+  type R = ReturnType<typeof backtest>;
+  const row = (name: string, r: R) => ({ name, trades: r.trades, winRate: r.winRate, profitFactor: Number.isFinite(r.profitFactor) ? r.profitFactor : null, returnPct: r.returnPct, maxDrawdownPct: r.maxDrawdownPct });
+  const presets = Object.entries(PRESETS).map(([name, params]) =>
+    row(name, backtest(candles, { allowShort: m.allowShort, feePct: m.feePct, hourlyCost: m.hourlyCost, leverageCap: m.cap, params })));
+  if (!m.allowShort) { // marchés spot : on compare aussi la stratégie RSI (tes réglages) et sa version naïve
+    const rsi = loadConfig((await readBots()).spot.config).rsi;
+    presets.push(row("RSI", backtestRsi(candles, { ...rsi, naive: false }, m.feePct)));
+    presets.push(row("RSI naïf", backtestRsi(candles, { ...rsi, naive: true }, m.feePct)));
+  }
   return { market: m.name, days: Math.round(candles.length / 24), presets };
 }
 
@@ -174,6 +179,13 @@ Deno.serve(async (req) => {
 
     if (req.method === "GET" && route === "/api/state") return json(await state());
     if (req.method === "GET" && route === "/api/backtest") return json(await backtestMarket(Number(url.searchParams.get("market") ?? 0)));
+    if (req.method === "POST" && route === "/api/spot/config") {
+      const body = (await req.json().catch(() => ({}))) as { strategy?: string; rsi?: Record<string, unknown> };
+      const current = loadConfig((await readBots()).spot.config);
+      const config = { strategy: body.strategy === "rsi" ? "rsi" : body.strategy === "tendance" ? "tendance" : current.strategy, rsi: sanitizeRsi({ ...current.rsi, ...(body.rsi ?? {}) }) };
+      await setBot("spot", { config });
+      return json({ ok: true, config });
+    }
     const m = route.match(/^\/api\/(spot|perps)\/(start|pause|stop|goal)$/);
     if (req.method === "POST" && m) {
       const kind = m[1] as BotKind, action = m[2];

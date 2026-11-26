@@ -5,7 +5,7 @@ import { hourlyCandles, lastClosedCandle } from "./candles.ts";
 import { executeSwap, getPrices, getQuote } from "./jupiter.ts";
 import { getBalances, loadKeyPairFrom, txStatus, waitForTx, type Balances } from "./solana.ts";
 import {
-  dayKey, exitCheck, loadMemory, missionEnd, PRESETS, RISK, riskGate, RULES, SOL_MINT, spotSizeUsd, TOKENS,
+  dayKey, exitCheck, loadConfig, loadMemory, missionEnd, PRESETS, RISK, riskGate, rsiExitSignal, rsiSignal, RULES, SOL_MINT, spotSizeUsd, TOKENS,
   trailStop, trendSignal, USDC_MINT, atr, type Memory, type Signal,
 } from "./strategy.ts";
 
@@ -69,6 +69,7 @@ export async function runTick(admin: Admin): Promise<string> {
   if (!(bot.status === "running" || (paused && (bot.position_mint || loadMemory(bot.price_history).pending)))) return "idle";
   const now = Date.now();
   const mem: Memory = loadMemory(bot.price_history);
+  const cfg = loadConfig(bot.config);
   const patch: Partial<BotRow> = {};
   let message = "";
 
@@ -146,7 +147,18 @@ export async function runTick(admin: Admin): Promise<string> {
       }
       const entry = Number(patch.entry_price ?? bot.entry_price ?? livePrice);
       const closed = lastClosedCandle(now);
-      if (token && mem.stopCandle !== closed) {
+      const isRsi = mem.strategy === "rsi";
+      let rsiExit = false;
+      if (isRsi && token && mem.stopCandle !== closed) {
+        // décision à la clôture de chaque bougie : RSI repassé au-dessus du seuil de sortie ?
+        const candles = await hourlyCandles(token.candles, cfg.rsi.rsiPeriod * 6 + 10, now).catch(() => []);
+        if (candles.length > cfg.rsi.rsiPeriod + 2) {
+          const r = rsiExitSignal(candles, cfg.rsi);
+          rsiExit = r.exit;
+          mem.signal = `${token.symbol} : RSI ${r.rsi.toFixed(0)} (sortie au-dessus de ${cfg.rsi.naive ? 70 : cfg.rsi.exit})`;
+          mem.stopCandle = closed;
+        }
+      } else if (!isRsi && token && mem.stopCandle !== closed) {
         const params = PRESETS[brain.preset[token.symbol] ?? "standard"];
         const candles = await hourlyCandles(token.candles, 40, now).catch(() => []);
         if (candles.length > 20) {
@@ -156,7 +168,9 @@ export async function runTick(admin: Admin): Promise<string> {
         }
       }
       const stop = mem.stop ?? entry * 0.95;
-      const exit = exitCheck({ side: "long", entry, price: livePrice, stop, initialRisk: mem.initialRisk ?? entry * 0.05, openedAt: mem.openedAt ?? now }, now);
+      const exit = isRsi
+        ? (livePrice <= stop ? "stop_loss" : rsiExit ? "rsi_exit" : null)   // RSI : stop fixe sous le creux, pas de stop suiveur ni de limite de durée
+        : exitCheck({ side: "long", entry, price: livePrice, stop, initialRisk: mem.initialRisk ?? entry * 0.05, openedAt: mem.openedAt ?? now }, now);
       const pnlPct = mem.costUsd ? (((b.ui[mint] ?? 0) * livePrice) / mem.costUsd - 1) * 100 : (livePrice / entry - 1) * 100;
       if (exit) {
         const sig = await sellAll(mint, b, address, keyPair);
@@ -168,7 +182,7 @@ export async function runTick(admin: Admin): Promise<string> {
       mem.live = { price: livePrice, pnlPct, at: now };
       mem.mindset = mindset(brain, { inPosition: true, blocked: null, goalPct: (value / Number(bot.goal_usd)) * 100 });
       await save(admin, bot, mem, { ...patch, last_value_usd: value,
-        last_message: message || `En position ${symbolOf(mint)} : ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)} %, stop suiveur à ${fmt(stop)} $.` });
+        last_message: message || `En position ${symbolOf(mint)} : ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)} %, ${isRsi ? "stop sous le creux" : "stop suiveur"} à ${fmt(stop)} $.` });
       return "hold";
     }
 
@@ -178,7 +192,7 @@ export async function runTick(admin: Admin): Promise<string> {
     }
     // 6. Pas de position : apprentissage quotidien (un marché par tick), puis recherche d'une entrée à chaque nouvelle bougie.
     const today = dayKey(now);
-    const todo = TOKENS.find((t) => brain.optimized?.[t.symbol] !== today);
+    const todo = cfg.strategy === "tendance" ? TOKENS.find((t) => brain.optimized?.[t.symbol] !== today) : undefined;
     if (todo) {
       const hist = await hourlyCandles(todo.candles, 1440, now).catch(() => null);
       if (hist && hist.length > 500) optimize(brain, todo.symbol, hist, { allowShort: false, feePct: SPOT_COST, leverageCap: RISK.maxSpotFraction }, today);
@@ -197,10 +211,10 @@ export async function runTick(admin: Admin): Promise<string> {
     const signals: { token: Token; sig: Signal }[] = [];
     const notes: string[] = [];
     for (const token of TOKENS) {
-      if (isBenched(brain, token.symbol, now)) { notes.push(`${token.symbol} : sur le banc`); continue; }
+      if (cfg.strategy === "tendance" && isBenched(brain, token.symbol, now)) { notes.push(`${token.symbol} : sur le banc`); continue; }
       try {
-        const candles = await hourlyCandles(token.candles, 400, now);
-        const sig = trendSignal(candles, false, PRESETS[brain.preset[token.symbol] ?? "standard"]);
+        const candles = await hourlyCandles(token.candles, cfg.strategy === "rsi" ? Math.max(cfg.rsi.smaPeriod, cfg.rsi.rsiPeriod * 6) + 40 : 400, now);
+        const sig = cfg.strategy === "rsi" ? rsiSignal(candles, cfg.rsi) : trendSignal(candles, false, PRESETS[brain.preset[token.symbol] ?? "standard"]);
         if (sig.side === "long") signals.push({ token, sig }); else notes.push(`${token.symbol} : ${sig.reason}`);
       } catch { notes.push(`${token.symbol} : historique indisponible`); }
     }
@@ -209,12 +223,12 @@ export async function runTick(admin: Admin): Promise<string> {
     if (!pick) {
       mem.signal = notes.join(" · ");
       mem.mindset = mindset(brain, { inPosition: false, blocked: null, goalPct: (value / Number(bot.goal_usd)) * 100 });
-      await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || "Aucune cassure en tendance : j'attends, patience = argent." });
+      await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || (cfg.strategy === "rsi" ? `Aucun excès de baisse (RSI sous ${cfg.rsi.entry}) : j'attends.` : "Aucune cassure en tendance : j'attends, patience = argent.") });
       return "hold";
     }
 
     // 7. Entrée : taille au risque, cotation vérifiée, swap, confirmation.
-    const risk = riskPerTrade(brain);
+    const risk = cfg.strategy === "rsi" ? cfg.rsi.riskPct / 100 : riskPerTrade(brain); // RSI : risque fixe choisi dans les réglages
     const sizeUsd = spotSizeUsd(value, b.usdc, pick.sig.price, pick.sig.stop, risk);
     if (sizeUsd <= 0) {
       await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: `Signal ${pick.token.symbol} mais pas assez d'USDC pour un ordre (min ${RISK.minOrderUsd} $).` });
@@ -230,7 +244,7 @@ export async function runTick(admin: Admin): Promise<string> {
     const sig = await executeSwap(quote, address, keyPair);
     Object.assign(mem, {
       pending: { kind: "buy", sig, at: now, mint: pick.token.mint, usdcBefore: b.usdc },
-      stop: pick.sig.stop, best: fillPrice, initialRisk: fillPrice - pick.sig.stop, openedAt: now, asset: pick.token.symbol, side: "long",
+      stop: pick.sig.stop, best: fillPrice, initialRisk: fillPrice - pick.sig.stop, openedAt: now, asset: pick.token.symbol, side: "long", strategy: cfg.strategy,
       signal: `${pick.token.symbol} : ${pick.sig.reason}`, stopCandle: closed,
     });
     const r = (await waitForTx(sig)) === "pending" ? "pending" : await settle(admin, bot, mem, patch, address, value);
@@ -320,7 +334,7 @@ export async function liquidate(admin: Admin, bot: BotRow, outcome: "success" | 
 
 // ------------------------------------------------------------------------------------------------
 function clearPosition(mem: Memory) {
-  for (const k of ["stop", "best", "initialRisk", "openedAt", "costUsd", "asset", "side", "stopCandle", "live"] as const) delete mem[k];
+  for (const k of ["stop", "best", "initialRisk", "openedAt", "costUsd", "asset", "side", "stopCandle", "live", "strategy"] as const) delete mem[k];
 }
 async function save(admin: Admin, bot: BotRow, mem: Memory, fields: Partial<BotRow>) {
   void bot;
@@ -328,5 +342,5 @@ async function save(admin: Admin, bot: BotRow, mem: Memory, fields: Partial<BotR
 }
 const fmt = (n: number) => (n >= 1 ? n.toFixed(n >= 100 ? 2 : 4) : n.toPrecision(4));
 function label(reason?: string) {
-  return reason === "trailing_stop" ? "stop suiveur, gain protégé" : reason === "stop_loss" ? "stop loss" : reason === "time_stop" ? "position sans élan" : reason ?? "sortie";
+  return reason === "rsi_exit" ? "RSI repassé au-dessus du seuil de sortie" : reason === "trailing_stop" ? "stop suiveur, gain protégé" : reason === "stop_loss" ? "stop loss" : reason === "time_stop" ? "position sans élan" : reason ?? "sortie";
 }
