@@ -38,7 +38,8 @@ jobs:
       - name: Relier le projet
         run: supabase link --project-ref "$PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
       - name: Base de données (tables + cron)
-        run: supabase db push --password "$SUPABASE_DB_PASSWORD"
+        # selon la version de l'outil Supabase, l'option s'appelle --remote ou --linked
+        run: supabase db push --remote --password "$SUPABASE_DB_PASSWORD" --yes || supabase db push --linked --password "$SUPABASE_DB_PASSWORD" --yes
       - name: Fonction des bots
         run: supabase functions deploy pulse --project-ref "$PROJECT_REF" --no-verify-jwt
 
