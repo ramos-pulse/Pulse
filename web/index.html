@@ -82,8 +82,9 @@ nav svg{width:22px;height:22px}nav button.on{color:var(--lime)}
   <div class="brand">PULSE</div>
   <h2 style="margin:14px 0 4px;font:600 24px var(--sans)">Connexion</h2>
   <div class="sub">Adresse de ton projet Supabase (ou juste son identifiant) et ton DASHBOARD_TOKEN.</div>
-  <input id="srv" type="url" autocomplete="off" placeholder="https://xxxx.supabase.co" style="margin-bottom:0">
-  <input id="tok" type="password" autocomplete="current-password" placeholder="DASHBOARD_TOKEN">
+  <input id="srv" type="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="https://xxxx.supabase.co" style="margin-bottom:0">
+  <input id="tok" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="DASHBOARD_TOKEN">
+  <label style="display:flex;gap:8px;align-items:center;font-size:14px;color:var(--muted);margin:-6px 0 14px"><input type="checkbox" id="showTok" style="width:auto"> Afficher le mot de passe</label>
   <button class="btn go" style="width:100%" id="loginBtn">Entrer</button>
   <div id="loginErr" class="warnbox" style="display:none;margin:14px 0 0"></div>
 </div></div>
@@ -145,6 +146,7 @@ function serverUrl(v) {
   if (!v) return "";
   if (!v.includes(".")) v += ".supabase.co";          // « abcd » → « abcd.supabase.co », avec ou sans https://
   return "https://" + v + "/functions/v1/pulse"; }
+$("#showTok").onchange = e => { $("#tok").type = e.target.checked ? "text" : "password"; };
 $("#loginBtn").onclick = () => { BASE = serverUrl($("#srv").value); TOKEN = $("#tok").value.trim();
   if (!BASE || !TOKEN) return toast("Remplis les deux champs");
   try { localStorage.setItem("pulse_token", TOKEN); localStorage.setItem("pulse_base", BASE); } catch (e) {}

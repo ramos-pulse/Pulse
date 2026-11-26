@@ -25,7 +25,7 @@ function serviceKey(): string | undefined {
 const KEY = serviceKey();
 // Créé seulement si la clé existe : sinon la fonction répond avec une erreur claire au lieu de planter au démarrage.
 const db = (KEY && SUPABASE_URL ? createClient(SUPABASE_URL, KEY, { auth: { persistSession: false } }) : null) as ReturnType<typeof createClient>;
-const TOKEN = env("DASHBOARD_TOKEN") ?? "";
+const TOKEN = (env("DASHBOARD_TOKEN") ?? "").trim().replace(/^["']|["']$/g, ""); // tolère espaces ou guillemets collés par erreur
 const KINDS: BotKind[] = ["spot", "perps"];
 
 const MARKETS = [
@@ -169,7 +169,7 @@ Deno.serve(async (req) => {
     }
     if (!route.startsWith("/api/")) return json({ ok: true, app: "pulse" });
     if (!TOKEN) return json({ error: "Secret DASHBOARD_TOKEN manquant dans Supabase" }, 401);
-    if (!safeEqual(req.headers.get("x-token") ?? "", TOKEN)) return json({ error: "token invalide" }, 401);
+    if (!safeEqual((req.headers.get("x-token") ?? "").trim(), TOKEN)) return json({ error: "token invalide" }, 401);
     await ensureCron();
 
     if (req.method === "GET" && route === "/api/state") return json(await state());
