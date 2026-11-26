@@ -207,7 +207,8 @@ async function notifyNew() {
   if (!all.length) return;
   seen = Math.max(...all.map(t => new Date(t.created_at).getTime())); try { localStorage.setItem("pulse_seen", seen); } catch (e) {}
   for (const t of all.slice(0, 3)) {
-    const msg = `${(t.side || t.action || "").toUpperCase()} ${t.symbol || t.asset || ""}${t.pnl_usd != null ? " · " + sg(t.pnl_usd) + " $" : ""}`;
+    const act = (t.side || t.action || "").toUpperCase();
+    const msg = `${{BUY: "ACHAT", SELL: "VENTE", OPEN: "OUVERTURE", CLOSE: "FERMETURE"}[act] || act} ${t.symbol || t.asset || ""}${t.pnl_usd != null ? " · " + sg(t.pnl_usd) + " $" : ""}`;
     if (document.hidden && "Notification" in window && Notification.permission === "granted") {
       const reg = await navigator.serviceWorker?.getRegistration(); reg?.showNotification("Pulse", {body: msg, icon: "icon-192.png"});
     } else toast(msg);
@@ -216,14 +217,31 @@ async function notifyNew() {
 
 const STATUS = {running: ["run", "En mission"], paused: ["pause", "En pause"], stopped: ["off", "Arrêté"], success: ["win", "Mission réussie"], destroyed: ["off", "Terminée"]};
 
+function bilanCard() {
+  const b = S.bilan; if (!b) return "";
+  return `<div class="card" style="padding:10px 16px"><details data-d="bilan" style="margin:0"><summary>▸ BILAN DU SOIR · ${new Date(b.created_at).toLocaleDateString("fr-FR", {weekday: "long", day: "numeric", month: "long"}).toUpperCase()}</summary>
+    <p class="sub" style="margin:8px 0 0;font-size:13px !important">${esc(b.detail)}</p></details></div>`;
+}
 /** Les deux sommes en haut de l'écran, d'un coup d'œil. */
 function summary() {
   const tile = (k, label) => { const b = S.bots[k], [sc, st] = STATUS[b.status] || ["off", b.status];
     const v = b.last_value_usd, start = b.start_value_usd, g = v != null && start ? v - start : null;
-    const pos = k === "spot" ? (b.position_mint ? (b.memory.asset || "position") : "") : (b.position_side ? `${b.position_side === "short" ? "SHORT" : "LONG"} ${b.position_asset || ""}` : "");
+    const pos = (b.positions || []).map(p => k === "perps" ? `${p.side === "short" ? "SHORT" : "LONG"} ${p.symbol}` : p.symbol).join(", ");
     return `<a href="#card-${k}"><div class="t"><span class="dot ${sc === "run" ? "ok" : sc === "pause" ? "warn" : ""}"></span>${label} · ${st}</div>
-      <div class="n">${nf(v)} $</div><div class="k ${g == null ? "" : cl(g)}">${g == null ? "—" : `${sg(g)} $ (${sg(g / start * 100)} %)`}${pos ? ` · ${esc(pos)}` : ""}</div></a>`; };
-  return `<div class="sum">${tile("spot", "Bot 1")}${tile("perps", "Bot 2")}</div>`;
+      <div class="n">${nf(v)} $</div><div class="k ${g == null ? "" : cl(g)}">${g == null ? "—" : `${sg(g)} $ (${sg(g / start * 100)} %)`}${pos ? ` · ${esc(pos)}` : ""}</div>${spark(b.curve)}</a>`; };
+  const br = S.protections?.breakerTrippedAt ? `<div class="warnbox" style="margin-top:10px">⚠ Disjoncteur déclenché ${ago(new Date(S.protections.breakerTrippedAt).toISOString())} : les deux bots ont été arrêtés après une perte de plus de ${S.protections.breakerPct} %. Relance une mission quand tu es prêt.</div>` : "";
+  return `<div class="sum">${tile("spot", "Bot 1")}${tile("perps", "Bot 2")}</div>${br}`;
+}
+/** Courbe du capital (mini graphique) : vert si au-dessus du point de départ, rouge sinon. */
+function spark(c) {
+  if (!c || c.length < 2) return `<div class="l2" style="margin-top:6px;font-size:11px">courbe dans 1 h</div>`;
+  const W = 140, H = 34, vs = c.map(x => x.v), lo = Math.min(...vs), hi = Math.max(...vs), t0 = c[0].t, t1 = c.at(-1).t;
+  const X = t => ((t - t0) / Math.max(1, t1 - t0) * W).toFixed(1), Y = v => (hi > lo ? H - 2 - (v - lo) / (hi - lo) * (H - 4) : H / 2).toFixed(1);
+  const up = vs.at(-1) >= vs[0], col = up ? "var(--green)" : "var(--red)";
+  const pts = c.map(x => `${X(x.t)},${Y(x.v)}`).join(" ");
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" style="display:block;margin-top:6px">
+    <polygon points="0,${H} ${pts} ${W},${H}" fill="${col}" opacity=".12"/><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>
+    <div class="l2" style="font-size:10.5px;display:flex;justify-content:space-between"><span>${ago(new Date(t0).toISOString())}</span><span>${nf(lo)}–${nf(hi)} $</span></div>`;
 }
 
 function missionCard(kind, title) {
@@ -231,26 +249,25 @@ function missionCard(kind, title) {
   const value = b.last_value_usd, start = b.start_value_usd, goal = b.goal_usd;
   const gain = value != null && start ? value - start : null;
   const prog = value != null && goal ? Math.min(100, value / goal * 100) : 0;
-  const inPos = kind === "spot" ? b.position_mint : b.position_side;
-  const sym = m.asset || b.position_asset || "";
-  const side = kind === "perps" ? b.position_side : "long";
-  let pos = "";
-  if (inPos) {
-    const cur = m.live?.price, entry = b.entry_price, stop = m.stop;
-    const lo = Math.min(stop ?? entry, entry, cur ?? entry), hi = Math.max(stop ?? entry, entry, cur ?? entry, m.best ?? entry);
+  const list = b.positions || [];
+  const inPos = list.length > 0;
+  const posBlock = p => {
+    const cur = p.live?.price, entry = p.entry, stop = p.stop, side = p.side;
+    const lo = Math.min(stop ?? entry, entry, cur ?? entry), hi = Math.max(stop ?? entry, entry, cur ?? entry, p.best ?? entry);
     const at = v => hi > lo ? ((v - lo) / (hi - lo) * 100).toFixed(1) : 50;
-    pos = `<div class="sep"></div>
+    return `<div class="sep"></div>
       <div class="grid g3" style="margin-top:0">
-        <div><div class="k">Position</div><div class="v">${kind === "perps" ? (side === "short" ? "SHORT ▼ " : "LONG ▲ ") : ""}${esc(sym)}</div></div>
-        <div><div class="k">Résultat ${kind === "perps" ? "(cours)" : "(frais inclus)"}</div><div class="v ${cl(m.live?.pnlPct)}">${sg(m.live?.pnlPct)} %</div></div>
-        <div><div class="k">Prix d'entrée</div><div class="v">${px(entry)} $</div></div>
-        <div><div class="k">Cours actuel</div><div class="v">${px(cur)} $</div></div>
-        <div><div class="k">${m.strategy === "rsi" ? "Stop (sous le creux)" : "Stop suiveur"}</div><div class="v amber">${px(stop)} $</div></div>
-        <div><div class="k">Ouverte depuis</div><div class="v">${m.openedAt ? ago(new Date(m.openedAt).toISOString()) : "—"}</div></div>
+        <div><div class="k">Position</div><div class="v">${kind === "perps" ? (side === "short" ? "SHORT ▼ " : "LONG ▲ ") : ""}${esc(p.symbol)}${p.interval === "15m" ? ' <span class="mut" style="font-weight:400">15m</span>' : ""}</div></div>
+        <div><div class="k">Résultat${kind === "perps" ? " (cours)" : ""}</div><div class="v ${cl(p.live?.pnlPct)}">${sg(p.live?.pnlPct)} %</div></div>
+        <div><div class="k">Depuis</div><div class="v">${p.openedAt ? ago(new Date(p.openedAt).toISOString()) : "—"}</div></div>
+        <div><div class="k">Entrée</div><div class="v">${px(entry)} $</div></div>
+        <div><div class="k">Cours</div><div class="v">${px(cur)} $</div></div>
+        <div data-tip="${p.partialDone ? (kind === "spot" ? "La moitié a déjà été vendue avec un gain, et le stop du reste est au prix d'entrée : cette position ne peut plus perdre." : "Le gain a atteint 1,5 fois le risque : le stop est remonté au prix d'entrée, la position ne peut plus perdre.") : "Le stop suit le prix : il ne descend jamais, il monte quand la position gagne."}"><div class="k">Stop</div><div class="v amber">${px(stop)} $${p.partialDone ? " 🔒" : ""}</div></div>
       </div>
       ${stop && cur ? `<div class="range"><div class="t" style="${side === "short" ? "transform:scaleX(-1)" : ""}"></div><div class="e" style="left:${at(entry)}%"></div><div class="n" style="left:${at(cur)}%"></div></div>
       <div class="rl"><span>${side === "short" ? "meilleur" : "stop"} ${px(lo)}</span><span>${side === "short" ? "stop" : "meilleur"} ${px(hi)}</span></div>` : ""}`;
-  }
+  };
+  const pos = list.map(posBlock).join("");
   const running = b.status === "running", paused = b.status === "paused";
   const wallet = S.wallets[kind];
   return `<div class="eyebrow" id="card-${kind}">${title}</div>
@@ -265,6 +282,7 @@ function missionCard(kind, title) {
       <div><div class="k">Contrôle</div><div class="v">${hhmm(b.last_tick_at)}</div></div>
       <div><div class="k">Risque</div><div class="v">${br ? nf(br.risk * 100, 1) + " %" : "—"}${br && br.streak ? ` <span class="${br.streak > 0 ? "up" : "down"}">${br.streak > 0 ? "▲" + br.streak : "▼" + -br.streak}</span>` : ""}</div></div>
     </div>
+    ${b.vault ? `<div class="l2" style="margin-top:8px" data-tip="Coffre à gains : une part de chaque gain est mise de côté et n'est plus jamais retradée. Elle reste dans le wallet du bot, tu peux la retirer quand tu veux.">🔐 Coffre : <b>${nf(b.vault)} $</b> mis de côté, jamais retradés</div>` : ""}
     <div class="sep"></div>
     <div class="k">Dernière action</div><div class="v txt">${esc(b.last_message)}</div>
     ${pos}
@@ -292,7 +310,7 @@ function render() {
   const sc = S.bots.spot.config || {};
   const spotStrat = sc.autopilot ? `Pilote auto${sc.plans?.length ? " · " + sc.plans.map(p => p.symbol + (p.interval === "15m" ? " 15m" : "")).join(", ") : " · en attente"}`
     : sc.plans?.length ? `Chercheur · ${sc.plans.map(p => p.symbol).join(", ")}` : sc.strategy === "rsi" ? (sc.rsi.naive ? "RSI naïf" : "RSI") : "Tendance";
-  if (PAGE === "home") { $("#p-home").innerHTML = summary() + missionCard("spot", `Bot 1 · Spot Solana · ${spotStrat}`) + missionCard("perps", `Bot 2 · Perps · ${perpsLabel()}`) + rulesNote();
+  if (PAGE === "home") { $("#p-home").innerHTML = summary() + missionCard("spot", `Bot 1 · Spot Solana · ${spotStrat}`) + missionCard("perps", `Bot 2 · Perps · ${perpsLabel()}`) + bilanCard() + rulesNote();
     document.querySelectorAll("#p-home details[data-d]").forEach(d => { d.open = OPEN.has(d.dataset.d); }); } // volets ouverts conservés au rafraîchissement
   if (PAGE === "hist") renderHist();
   if (PAGE === "bt") renderBt();
@@ -309,7 +327,7 @@ function biasText(b) {
 function perpsLabel() {
   const c = S.bots.perps.config || {aggr: 1, maxLev: 3, bias: 0};
   const lvl = c.autopilot && !c.pilotAggressive ? Math.min(c.aggr ?? 1, 1) : (c.aggr ?? 1);
-  const plan = c.plan ? ` · ${c.plan.asset}${c.plan.interval === "15m" ? " 15m" : ""}` : "";
+  const plan = c.plans?.length ? ` · ${c.plans.map(p => p.asset + (p.interval === "15m" ? " 15m" : "")).join(", ")}` : "";
   return `${c.autopilot ? "Pilote auto" + (plan || " · en attente") : plan.replace(/^ · /, "")}${c.autopilot || plan ? " · " : ""}${S.rules.aggrLevels?.[lvl]?.name || ""} · x${c.maxLev ?? 3} max${c.bias ? " · " + biasText(c.bias) : ""}`;
 }
 function perpsCard() {
@@ -366,10 +384,30 @@ function renderHist() {
     <div class="card">${rows.map(t => { const act = (t.side || t.action || "").toUpperCase(), sell = act === "SELL" || act === "CLOSE";
       const label = {BUY: "ACHAT", SELL: "VENTE", OPEN: "OUVRE", CLOSE: "FERME"}[act] || act;
       const amt = t.amount_usd ?? t.collateral_usd;
-      return `<div class="row"><div><div class="l1"><span class="${sell ? "amber" : "up"}">${label}</span> ${t.k === "perps" && t.side ? esc(t.side.toUpperCase()) + " " : ""}${esc(t.symbol || t.asset)}</div>
+      return `<div class="row" data-tr="${t.k}:${t.id}" style="cursor:pointer"><div><div class="l1"><span class="${sell ? "amber" : "up"}">${label}</span> ${t.k === "perps" && t.side ? esc(t.side.toUpperCase()) + " " : ""}${esc(t.symbol || t.asset)}</div>
         <div class="l2">${new Date(t.created_at).toLocaleString("fr-FR", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"})} · ${esc(t.reason || "")}</div></div>
         <div class="r">${amt != null ? nf(amt) + " $" : ""}${t.pnl_usd != null ? `<div class="${cl(t.pnl_usd)}">${sg(t.pnl_usd)} $</div>` : ""}
         ${t.signature ? `<div class="l2"><a href="https://solscan.io/tx/${esc(t.signature)}" target="_blank" rel="noopener">tx ↗</a></div>` : ""}</div></div>`; }).join("") || `<div class="sub">Aucun trade pour l'instant.</div>`}</div>`;
+}
+
+/** « Pourquoi ce trade ? » : raison de l'entrée ou de la sortie, stratégie, stop, durée. */
+function whyTrade(t, k) {
+  const d = t.detail || {}, act = (t.side || t.action || "").toUpperCase(), sell = act === "SELL" || act === "CLOSE";
+  const line = (label, v) => v == null || v === "" ? "" : `<div class="row"><div class="l2">${label}</div><div class="r" style="text-align:right;max-width:62%">${v}</div></div>`;
+  sheet(`<h3>Pourquoi ce trade ?</h3>
+    <p><b>${{BUY: "Achat", SELL: "Vente", OPEN: "Ouverture", CLOSE: "Fermeture"}[act] || act} ${esc(t.symbol || t.asset || "")}</b>${k === "perps" && t.side ? ` (${esc(t.side)})` : ""} · ${new Date(t.created_at).toLocaleString("fr-FR", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"})}</p>
+    <p>${esc(d.pourquoi || t.reason || "Raison non enregistrée (trade antérieur à cette mise à jour).")}</p>
+    ${sell && d.entree_pourquoi ? `<p class="sub">Entrée : ${esc(d.entree_pourquoi)}</p>` : ""}
+    ${line("Résultat", t.pnl_usd != null ? `<span class="${cl(t.pnl_usd)}">${sg(t.pnl_usd)} $</span>` : "")}
+    ${line("Montant", (t.amount_usd ?? t.collateral_usd) != null ? nf(t.amount_usd ?? t.collateral_usd) + " $" : "")}
+    ${line("Prix d'entrée", d.entree != null ? px(d.entree) + " $" : "")}
+    ${line("Stop", d.stop != null ? px(d.stop) + " $" : "")}
+    ${line("Levier", d.levier != null ? "x" + d.levier : "")}
+    ${line("Durée", d.duree_h != null ? nf(d.duree_h, 1) + " h" : "")}
+    ${line("Stratégie", esc(d.strategie || t.source || ""))}
+    ${line("Coffre après", d.coffre ? nf(d.coffre) + " $" : "")}
+    ${t.signature ? `<p style="margin-top:12px"><a href="https://solscan.io/tx/${esc(t.signature)}" target="_blank" rel="noopener">Voir la transaction ↗</a></p>` : ""}
+    <div class="btns" style="margin-top:12px"><button class="btn" id="sheetCancel">Fermer</button></div>`);
 }
 
 function renderBt() {
@@ -399,6 +437,7 @@ function renderSet() {
       <label class="field"><span>Objectif ($)</span><input type="number" inputmode="decimal" id="goal-${k}" value="${g(k).goal_usd}"></label>
       <label class="field"><span>Échéance dans (jours)</span><input type="number" inputmode="numeric" id="days-${k}" placeholder="${g(k).end_at ? Math.max(0, Math.ceil((new Date(g(k).end_at) - Date.now()) / 86400000)) : 30}"></label>
       <button class="btn sm" style="width:100%;margin-top:12px" data-goal="${k}">Enregistrer</button></div>`).join("")}
+    ${protectionsCard()}
     ${strategyCard()}
     ${perpsCard()}
     <div class="eyebrow">Connexions</div>
@@ -411,6 +450,31 @@ function renderSet() {
     </div>${rulesNote()}`;
 }
 
+function protectionsCard() {
+  const sc = S.bots.spot.config || {}, pc = S.bots.perps.config || {}, R = S.rules;
+  const chips = (group, vals, cur, fmt) => `<div class="chips" style="margin:6px 0 0">${vals.map(v => `<button class="chip ${v === cur ? "on" : ""}" data-pr="${group}" data-v="${v}">${fmt(v)}</button>`).join("")}</div>`;
+  const tog = (id, on, label) => `<label class="field"><span>${label}</span><input type="checkbox" id="${id}" ${on ? "checked" : ""} style="width:26px;height:26px"></label>`;
+  return `<div class="eyebrow">Protections</div><div class="card" id="protCard">
+    <div class="k" data-tip="Nombre de positions ouvertes en même temps. Avec plusieurs positions, la perte totale si tous les stops sont touchés reste plafonnée (3 % du capital en spot, 1,5 fois le risque max en perps).">Positions simultanées</div>
+    <div class="l2" style="margin-top:6px">Bot 1 · spot</div>${chips("sp-max", [1, 2, 3], sc.maxPositions ?? 3, v => v)}
+    <div class="l2" style="margin-top:8px">Bot 2 · perps (une par marché : SOL, ETH, BTC)</div>${chips("pp-max", [1, 2, 3], pc.maxPositions ?? 3, v => v)}
+    <div class="sep"></div>
+    <div class="k" data-tip="Part de chaque gain mise de côté : elle reste dans le wallet du bot mais n'est plus jamais retradée. Une mauvaise série ne peut pas reprendre ces gains.">Coffre à gains</div>
+    <div class="l2" style="margin-top:6px">Bot 1 · spot</div>${chips("sp-vault", R.vaultSteps || [0, 25, 50, 75], sc.vaultPct ?? 25, v => v ? v + " %" : "aucun")}
+    <div class="l2" style="margin-top:8px">Bot 2 · perps</div>${chips("pp-vault", R.vaultSteps || [0, 25, 50, 75], pc.vaultPct ?? 25, v => v ? v + " %" : "aucun")}
+    <div class="sep"></div>
+    <div class="k" data-tip="Si la valeur totale des deux bots baisse de plus de ce pourcentage depuis le départ, tout s'arrête : positions fermées, bots arrêtés, alerte envoyée.">Disjoncteur global</div>
+    ${chips("breaker", R.breakerSteps || [0, 10, 15, 20, 30], sc.breakerPct ?? 15, v => v ? "−" + v + " %" : "coupé")}
+    <div class="sep"></div>
+    ${tog("prSpPartial", sc.partialTp !== false, "Prise de bénéfices partielle (spot)")}
+    <p class="sub" style="margin:0 0 6px">À +${String(R.partial?.atR ?? 1.5).replace(".", ",")} fois le risque, la moitié est vendue et le stop du reste passe au prix d'entrée.</p>
+    ${tog("prPpPartial", pc.partialTp !== false, "Sécuriser les gains (perps)")}
+    <p class="sub" style="margin:0 0 6px">À +${String(R.partial?.atR ?? 1.5).replace(".", ",")} fois le risque, le stop passe au prix d'entrée : la position ne peut plus perdre.</p>
+    ${tog("prFilter", sc.marketFilter !== false, "Filtre BTC (spot)")}
+    <p class="sub" style="margin:0 0 6px">Pas d'achat spot quand le Bitcoin perd 6 % en 24 h, ou 3 % en étant sous sa moyenne 200 h.</p>
+    <button class="btn go sm" style="width:100%;margin-top:10px" id="saveProt">Enregistrer les protections</button>
+  </div>`;
+}
 function strategyCard() {
   const c = S.bots.spot.config || {strategy: "tendance", rsi: {}}, p = c.rsi, rsi = c.strategy === "rsi";
   const f = (id, label, v, step = "1") => `<label class="field"><span>${label}</span><input type="number" inputmode="decimal" step="${step}" id="${id}" value="${v}"></label>`;
@@ -473,8 +537,16 @@ const TIPS = {
   pf: "Profit factor : total des gains ÷ total des pertes sur la période jamais vue. Au-dessus de 1 on gagne, au-dessus de 1,3 c'est solide. Le 2e chiffre est le nombre de trades : plus il est grand, plus le résultat est fiable.",
   train: "Profit factor sur la première partie de l'historique, celle qui a servi à régler la stratégie. S'il est bien plus faible que sur la période jamais vue, le bon résultat récent tient peut-être de la chance.",
   dd: "Plus forte baisse du capital, d'un sommet au creux suivant, pendant la période jamais vue. Plus c'est bas, plus la stratégie est tranquille à vivre.",
+  luck: "Probabilité, calculée par le mathématicien, que ce résultat soit dû au hasard : avec des milliers de stratégies essayées, certaines gagnent par pure chance. Sous 20 % : talent probable. Au-dessus de 50 % : probablement de la chance, le pilote l'écarte.",
   conf: "Nouvelle : tradée avec 75 % du risque normal tant que les vrais trades ne l'ont pas confirmée. Confirmée : elle a gagné en réel (profit factor ≥ 1,2 sur au moins 4 trades), elle passe à 100 %.",
 };
+/** Ce que fait une stratégie, en mots simples (bulle sur sa description). */
+function explain(r) {
+  const p = r.params || {}, iv = r.interval === "15m" ? "bougies de 15 minutes (scalping)" : "bougies d'une heure";
+  const span = n => r.interval === "15m" ? `${n} bougies de 15 min (${nf(n / 4, n % 4 ? 1 : 0)} h)` : `${n} h`;
+  if (r.family === "rsi") return `Achat d'excès de baisse, sur ${iv}. Le bot achète quand le RSI(${p.rsiPeriod}), un indicateur de 0 à 100 qui mesure la force des derniers mouvements, descend sous ${p.entry} : le prix a chuté trop vite. Il n'achète que si la tendance de fond reste haussière (prix au-dessus de sa moyenne sur ${p.smaPeriod} bougies). Il revend quand le RSI repasse au-dessus de ${p.exit}. Stop de protection sous le plus bas des ${p.swingBars} dernières bougies.`;
+  return `Suivi de tendance, sur ${iv}. Le bot ${r.kind === "perps" ? "ouvre un long quand le prix casse son plus haut, ou un short quand il casse son plus bas," : "achète quand le prix casse son plus haut"} des ${span(p.breakout)}, seulement si la tendance est assez forte (au moins ${String(p.minTrend).replace(".", ",")} fois la volatilité moyenne, ATR). Il laisse courir le gain avec un stop suiveur placé à ${String(p.trailAtr).replace(".", ",")} ATR du meilleur prix : le stop monte avec le prix et ne redescend jamais.`;
+}
 // Bulles explicatives : visibles tant qu'on appuie, disparaissent quand on relâche
 let TIP = null;
 const hideTip = () => { TIP?.remove(); TIP = null; };
@@ -493,9 +565,9 @@ function renderAg() {
   const el = $("#p-ag"); if (!el) return;
   const keepDraft = $("#chatIn")?.value || "";
   const sc = S?.bots.spot.config || {}, pc = S?.bots.perps.config || {};
-  const planLine = p => `<div class="row"><div><div class="l1">${esc(p.symbol || p.asset)} <span class="mut" style="font-weight:400">${p.interval === "15m" ? "scalping 15 min" : "1 h"}</span></div><div class="l2">${esc(p.source)}</div></div>
+  const planLine = p => `<div class="row"><div data-tip="${esc(explain({...p, kind: p.asset ? "perps" : "spot", family: p.family || "tendance"}))}"><div class="l1">${esc(p.symbol || p.asset)} <span class="mut" style="font-weight:400">${p.interval === "15m" ? "scalping 15 min" : "1 h"}</span></div><div class="l2">${esc(p.source)}</div></div>
     <div class="r" data-tip="${TIPS.conf}"><span class="pill ${p.confidence === "confirmée" ? "ok" : "mid"}">${p.confidence === "confirmée" ? "confirmée · 100 %" : "nouvelle · 75 %"}</span></div></div>`;
-  const manual = (!sc.autopilot && sc.plans?.length) || (!pc.autopilot && pc.plan) || sc.source || pc.source;
+  const manual = (!sc.autopilot && sc.plans?.length) || (!pc.autopilot && pc.plans?.length) || sc.source || pc.source;
   const A = {...(AG?.settings || {aggressive: false, nerve: 1, levels: ["Calme", "Normal", "Nerveux", "Très nerveux"]}), ...(window.__agDraft || {})}; // brouillon non enregistré conservé
   const nerveTxt = n => ["Calme : seulement des stratégies lentes et posées (bougies 1 h, cassures longues). Moins de trades.",
     "Normal : toutes les stratégies validées, sans préférence de rythme.",
@@ -517,19 +589,20 @@ function renderAg() {
       <p class="sub" style="margin:6px 0 4px">Il choisit lui-même tokens et stratégies parmi ses découvertes validées (${AG?.settings?.aggressive ? "mode agressif : « prometteuses » ou « à surveiller », ≥ 4 trades, profit factor ≥ 1,15 et baisse ≤ 20 %" : "≥ 5 trades, profit factor ≥ 1,3 et baisse ≤ 10 %"} sur la période jamais vue). En perps, agressivité ${AG?.settings?.aggressive ? "celle choisie dans Réglages" : "plafonnée à « Normal »"}. Il apprend des vrais trades : une stratégie nouvelle est tradée à 75 % du risque, puis à 100 % une fois confirmée en réel ; une stratégie qui perd en réel est abandonnée.</p>
       <label class="field"><span>Bot spot</span><input type="checkbox" data-pilot="spot" ${sc.autopilot ? "checked" : ""} style="width:26px;height:26px"></label>
       <label class="field"><span>Bot perps</span><input type="checkbox" data-pilot="perps" ${pc.autopilot ? "checked" : ""} style="width:26px;height:26px"></label>
-      ${(sc.plans?.length || pc.plan) ? `<div class="k" style="margin-top:12px">Plans en cours</div>${(sc.plans || []).map(planLine).join("")}${pc.plan ? planLine(pc.plan) : ""}` : (sc.autopilot || pc.autopilot) ? `<p class="sub" style="margin:10px 0 0">Aucune stratégie ne passe encore les critères : les bots attendent.</p>` : ""}
+      ${(sc.plans?.length || pc.plans?.length) ? `<div class="k" style="margin-top:12px">Plans en cours</div>${(sc.plans || []).map(planLine).join("")}${(pc.plans || []).map(planLine).join("")}` : (sc.autopilot || pc.autopilot) ? `<p class="sub" style="margin:10px 0 0">Aucune stratégie ne passe encore les critères : les bots attendent.</p>` : ""}
       ${manual ? `<button class="btn sm" style="margin-top:12px;width:100%" data-auto="all">Revenir aux réglages automatiques du cerveau</button>` : ""}
     </div>`;
   const cards = (AG?.best || []).map(r => `<div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div class="l1">#${r.id} · ${esc(r.market)}</div>
         <span class="pill ${r.verdict === "déçue en réel" ? "live" : r.verdict === "prometteuse" ? "ok" : "mid"}">${r.live?.confirmed ? "★ confirmée en réel" : r.qualifies ? "✓ pilote" : esc(r.verdict)}</span></div>
-      <div class="l2" style="margin-top:6px;line-height:1.5">${esc(r.description)}</div>
+      <div class="l2" style="margin-top:6px;line-height:1.5" data-tip="${esc(explain(r))}">${esc(r.description)}</div>
       ${r.origin === "mathématicien" ? `<p class="sub" style="margin:8px 0 0;font-size:13px"><b>∑ Proposée par le mathématicien :</b> ${esc(r.rationale || "")}</p>` : ""}
       <div class="grid" style="margin-top:14px">
         <div data-tip="${TIPS.test}"><div class="k">Période jamais vue</div><div class="v ${cl(r.test.returnPct)}">${sg(r.test.returnPct, 1)} %</div></div>
         <div data-tip="${TIPS.pf}"><div class="k">PF jamais vue · trades</div><div class="v">${nf(r.test.profitFactor)} · ${r.test.trades}</div></div>
         <div data-tip="${TIPS.train}"><div class="k">Entraînement (PF)</div><div class="v">${nf(r.train.profitFactor)}</div></div>
         <div data-tip="${TIPS.dd}"><div class="k">Pire baisse</div><div class="v">${nf(r.test.maxDrawdownPct, 1)} %</div></div>
+        ${r.test.luck != null ? `<div data-tip="${TIPS.luck}"><div class="k">Part de chance</div><div class="v ${r.test.luck > 0.5 ? "down" : r.test.luck > 0.2 ? "amber" : "up"}">${nf(r.test.luck * 100, 0)} %</div></div>` : ""}
       </div>
       ${r.live ? `<div class="sep"></div><div class="k">En réel (trades des bots)</div><div class="v ${cl(r.live.pnlUsd)}" style="font-size:15px">${r.live.trades} trades · ${sg(r.live.pnlUsd)} $ · PF ${nf(r.live.profitFactor)}</div>` : ""}
       ${r.verdict === "déçue en réel" ? `<p class="sub" style="margin:8px 0 0">${esc(r.why)}</p>` : ""}
@@ -562,9 +635,18 @@ async function sendChat() {
 
 // ---------------------------------------------------------------- actions
 document.addEventListener("click", async e => {
+  const row = e.target.closest("[data-tr]");
+  if (row && !e.target.closest("a")) { const [k, id] = row.dataset.tr.split(":"); const tr = S.bots[k].trades.find(x => String(x.id) === id); if (tr) whyTrade(tr, k); return; }
   const t = e.target.closest("button"); if (!t) return;
   if (t.dataset.copy) { try { await navigator.clipboard.writeText(t.dataset.copy); toast("Adresse copiée"); } catch (err) { toast("Copie impossible"); } return; }
   if (t.dataset.hf) { HF = t.dataset.hf; renderHist(); return; }
+  if (t.dataset.pr) { document.querySelectorAll(`[data-pr="${t.dataset.pr}"]`).forEach(x => x.classList.toggle("on", x === t)); return; }
+  if (t.id === "saveProt") { const v = g => +($(`[data-pr="${g}"].on`)?.dataset.v ?? 0);
+    try { const r = await api("/api/protections", {method: "POST", body: JSON.stringify({
+        spot: {maxPositions: v("sp-max"), vaultPct: v("sp-vault"), partialTp: $("#prSpPartial").checked, marketFilter: $("#prFilter").checked},
+        perps: {maxPositions: v("pp-max"), vaultPct: v("pp-vault"), partialTp: $("#prPpPartial").checked}, breakerPct: v("breaker")})});
+      toast(`Protections enregistrées · disjoncteur ${r.spot.breakerPct ? "−" + r.spot.breakerPct + " %" : "coupé"}`); } catch (e) {}
+    await refresh(); renderSet(); return; }
   if (t.id === "chatSend") return sendChat();
   if (t.id === "agSave") { const aggressive = $("#agAggr").checked, nerve = +$("#agNerve").value; window.__agDraft = null;
     try { const r = await api("/api/research/settings", {method: "POST", body: JSON.stringify({aggressive, nerve})});

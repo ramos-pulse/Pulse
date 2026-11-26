@@ -9,11 +9,11 @@ import { candles as getCandles, hourlyCandles } from "./engine/candles.ts";
 import { env } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { AGGR_LEVELS, AGGRESSIVE, effectiveAggr, LEVERAGES, NERVE_LEVELS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
+import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, effectiveAggr, LEVERAGES, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, tempo, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, type BotKind, type BotState } from "./store.ts";
 import { cleanWallet, CLEANER } from "./engine/cleaner.ts";
-import { analyze, propose } from "./engine/math.ts";
+import { analyze, LUCK, luckProbability, propose } from "./engine/math.ts";
 
 const SUPABASE_URL = env("SUPABASE_URL") ?? "";
 
@@ -95,6 +95,9 @@ async function startMission(kind: BotKind, body: { goal_usd?: number; days?: num
   const goal = Number(body.goal_usd ?? bot.goal_usd) || 5000;
   const days = Number(body.days ?? 30) || 30;
   let startValue = bot.start_value_usd;
+  // après un déclenchement du disjoncteur : il repart de zéro avec la nouvelle mission
+  const sc0 = loadConfig((await readBots()).spot.config);
+  if (sc0.breakerTrippedAt) await setBot("spot", { config: { ...sc0, breakerTrippedAt: null, breakerBase: null } });
   if (isNew) {
     try { startValue = (kind === "spot" ? await currentValue() : await currentPerpsValue()).valueUsd; } catch { startValue = null; }
   }
@@ -105,6 +108,30 @@ async function startMission(kind: BotKind, body: { goal_usd?: number; days?: num
   });
   await notify(`${kind === "spot" ? "Bot spot" : "Bot perps"} : mission ${isNew ? "lancée" : "reprise"} (objectif ${goal} $)`);
   return { ok: true };
+}
+
+/**
+ * DISJONCTEUR GLOBAL : si la valeur totale des deux bots baisse de plus de X % depuis le départ, tout s'arrête
+ * (positions fermées, bots arrêtés) et une alerte est envoyée. Remis à zéro au lancement d'une nouvelle mission.
+ */
+async function checkBreaker(): Promise<string | null> {
+  const bots = await readBots();
+  const sc = loadConfig(bots.spot.config);
+  if (!sc.breakerPct || sc.breakerTrippedAt) return null;
+  const active = KINDS.map((k) => bots[k]).filter((b) => (b.status === "running" || b.status === "paused") && Number(b.start_value_usd) > 0 && b.last_value_usd != null);
+  if (!active.length) return null;
+  const base = sc.breakerBase ?? active.reduce((a, b) => a + Number(b.start_value_usd), 0);
+  const now = active.reduce((a, b) => a + Number(b.last_value_usd), 0);
+  const drop = 1 - now / base;
+  if (drop < sc.breakerPct / 100) return null;
+  await setBot("spot", { config: { ...sc, breakerTrippedAt: Date.now() } });
+  const msg = `Disjoncteur : les bots ont perdu ${(drop * 100).toFixed(1)} % ensemble (${base.toFixed(2)} $ → ${now.toFixed(2)} $), au-delà de ta limite de ${sc.breakerPct} %. Tout est arrêté et les positions sont fermées.`;
+  await notify(`⚠ ${msg}`);
+  for (const b of active) {
+    await emergencyStop(b.kind).catch(() => null);
+    await setBot(b.kind, { last_message: msg.slice(0, 300) });
+  }
+  return `DÉCLENCHÉ : ${msg}`;
 }
 
 async function emergencyStop(kind: BotKind) {
@@ -123,6 +150,15 @@ async function emergencyStop(kind: BotKind) {
   return { ok: true };
 }
 
+/** Courbe allégée pour l'app : au plus n points, le dernier toujours gardé. */
+function downsample(c: { t: number; v: number }[], n: number) {
+  if (c.length <= n) return c;
+  const step = c.length / n;
+  const out = Array.from({ length: n - 1 }, (_, i) => c[Math.floor(i * step)]!);
+  out.push(c.at(-1)!);
+  return out;
+}
+
 async function state() {
   const bots = await readBots();
   const out: Record<string, unknown> = {};
@@ -132,16 +168,22 @@ async function state() {
     const { data: trades } = await db.from("trades").select("*").eq("bot", k).order("created_at", { ascending: false }).limit(60);
     out[k] = {
       ...b, price_history: undefined, lock_until: undefined, config: k === "spot" ? loadConfig(b.config) : loadPerpsConfig(b.config),
+      positions: Object.values(migratePositions(mem, b)).map((p) => ({ key: p.key, symbol: p.symbol, side: p.side, entry: p.entry, stop: p.stop, best: p.best, live: p.live, openedAt: p.openedAt, strategy: p.strategy,
+        source: p.source, partialDone: !!p.partialDone, interval: p.posInterval })),
+      vault: Math.round((mem.vault ?? 0) * 100) / 100,
+      curve: downsample(mem.curve ?? [], 120),
       memory: { strategy: mem.strategy, stop: mem.stop, best: mem.best, signal: mem.signal, mindset: mem.mindset, live: mem.live, asset: mem.asset, side: mem.side, openedAt: mem.openedAt, costUsd: mem.costUsd, pending: mem.pending ? { kind: mem.pending.kind, at: mem.pending.at } : null },
       brain: mem.brain ? { risk: riskPerTrade(mem.brain), streak: mem.brain.streak, benched: mem.brain.benched, disabled: mem.brain.disabled, report: mem.brain.report ?? {}, preset: mem.brain.preset } : null,
       trades: trades ?? [],
     };
   }
-  const [spotWallet, perpsWallet] = await Promise.all([getWalletAddress(), getPerpsWalletAddress()]);
+  const [spotWallet, perpsWallet, { data: bilan }] = await Promise.all([getWalletAddress(), getPerpsWalletAddress(),
+    db.from("agent_log").select("created_at, detail").eq("agent", "bilan").order("created_at", { ascending: false }).limit(1)]);
   return {
-    now: new Date().toISOString(), wallets: { spot: spotWallet, perps: perpsWallet }, bots: out, markets: MARKETS.map((m) => m.name),
+    now: new Date().toISOString(), wallets: { spot: spotWallet, perps: perpsWallet }, bilan: bilan?.[0] ?? null,
+    protections: (({ breakerPct, breakerTrippedAt }) => ({ breakerPct, breakerTrippedAt }))(loadConfig(bots.spot.config)), bots: out, markets: MARKETS.map((m) => m.name),
     secrets: { anthropic: !!env("ANTHROPIC_API_KEY"), spotWallet: !!env("BOT_WALLET_PRIVATE_KEY"), perpsWallet: !!env("PERPS_WALLET_PRIVATE_KEY"), customRpc: !!env("SOLANA_RPC_URL"), telegram: !!(env("TELEGRAM_BOT_TOKEN") && env("TELEGRAM_CHAT_ID")), cron: cronReady },
-    rules: { strategy: STRATEGY, risk: RISK, perps: PERPS_RULES, rules: RULES, presets: PRESETS, aggressive: AGGRESSIVE, aggrLevels: AGGR_LEVELS, leverages: LEVERAGES },
+    rules: { strategy: STRATEGY, risk: RISK, perps: PERPS_RULES, rules: RULES, presets: PRESETS, aggressive: AGGRESSIVE, aggrLevels: AGGR_LEVELS, leverages: LEVERAGES, vaultSteps: VAULT_STEPS, breakerSteps: BREAKER_STEPS, partial: PARTIAL },
   };
 }
 
@@ -266,6 +308,8 @@ async function runResearch() {
     const e = evaluate(c, candles, m);
     rows.push({ key, market: c.market, product: c.product, symbol: c.symbol, interval: c.interval, kind: c.kind, family: c.family, params: c.params, train: e.train, test: e.test, score: e.score, verdict: e.verdict, why: e.why, origin: "chercheur", rationale: null });
   }
+  // chance ou talent : probabilité que le résultat sur la période jamais vue soit dû au hasard
+  for (const r of rows) { const luck = luckProbability(r.test, seen.size); if (luck != null) r.test = { ...r.test, luck }; }
   if (rows.length) {
     const { error } = await db.from("research").upsert(rows, { onConflict: "key", ignoreDuplicates: true });
     if (error) throw new Error(`recherche : ${error.message}`);
@@ -288,6 +332,8 @@ const agentSettings = (spotConfig: unknown): AgentSettings => { const c = loadCo
 function qualifies(r: ResearchRow, a: AgentSettings = { aggressive: false, nerve: 1 }): boolean {
   const young = Date.now() - Date.parse(r.created_at) < QUALIFY.maxAgeDays * 86_400_000;
   if (!young || r.verdict === "déçue en réel" || r.live?.failed) return false;
+  const luck = r.test.luck;
+  if (luck != null && luck > (a.aggressive ? LUCK.rejectAggressive : LUCK.reject)) return false; // probablement de la chance
   const t = tempo(r);
   if (a.nerve === 0 && t > 1) return false;          // calme : pas de stratégie nerveuse
   if (a.nerve === 3 && t < 2) return false;          // très nerveux : seulement des stratégies nerveuses
@@ -331,12 +377,14 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
     }
   }
   if (perpsCfg.autopilot) {
-    const best = good.find((r) => r.kind === "perps");
-    const kept = fresh ? undefined : good.slice(0, 20).find((r) => r.kind === "perps" && `chercheur #${r.id} · ${r.market}` === perpsCfg.plan?.source);
-    const plan = kept ? toPerpsPlan(kept) : best ? toPerpsPlan(best) : null;
-    if (`${plan?.source}:${plan?.confidence}` !== `${perpsCfg.plan?.source}:${perpsCfg.plan?.confidence}`) {
-      await setBot("perps", { config: { ...perpsCfg, plan } });
-      changes.push(plan ? `perps → ${plan.asset} (${plan.interval === "15m" ? "15 min" : "1 h"}), agressivité ${AGGR_LEVELS[effectiveAggr(perpsCfg)]!.name.toLowerCase()}` : "perps → aucune stratégie validée, en attente");
+    // une stratégie par marché (SOL, ETH, BTC) : garde celles encore qualifiées, complète avec les meilleures
+    const perpsRows = good.filter((r) => r.kind === "perps");
+    const plans: PerpsPlan[] = fresh ? [] : perpsRows.slice(0, 20).filter((r) => perpsCfg.plans.some((p) => p.source === `chercheur #${r.id} · ${r.market}`)).map(toPerpsPlan);
+    for (const r of perpsRows) { if (plans.length >= perpsCfg.maxPositions) break; const pl = toPerpsPlan(r); if (!plans.some((x) => x.asset === pl.asset)) plans.push(pl); }
+    const sig = (l: PerpsPlan[]) => l.map((p) => `${p.source}:${p.confidence}`).join("|");
+    if (sig(plans) !== sig(perpsCfg.plans)) {
+      await setBot("perps", { config: { ...perpsCfg, plans, plan: plans[0] ?? null } });
+      changes.push(plans.length ? `perps → ${plans.map((p) => `${p.asset} (${p.interval === "15m" ? "15 min" : "1 h"})`).join(", ")}, agressivité ${AGGR_LEVELS[effectiveAggr(perpsCfg)]!.name.toLowerCase()}` : "perps → aucune stratégie validée, en attente");
     }
   }
   if (changes.length) await notify(`Pilote automatique : ${changes.join(" ; ")}`);
@@ -375,9 +423,11 @@ async function applyResearch(id: number) {
     return { ok: true, kind: "spot", config };
   }
   const cur = loadPerpsConfig(bots.perps.config);
-  const config = { ...cur, plan: toPerpsPlan(r) };
+  const plan = toPerpsPlan(r);
+  const plans = [plan, ...cur.plans.filter((p) => p.asset !== plan.asset)].slice(0, 3);
+  const config = { ...cur, plans, plan: plans[0]! };
   await setBot("perps", { config });
-  await notify(`Chercheur : stratégie #${r.id} appliquée au bot perps (${config.plan.asset}, ${desc})`);
+  await notify(`Chercheur : stratégie #${r.id} appliquée au bot perps (${plan.asset}, ${desc})`);
   return { ok: true, kind: "perps", config };
 }
 
@@ -412,6 +462,45 @@ async function runSwapAgent(trigger: "auto" | "manuel") {
     }
   }
   return results;
+}
+
+// ------------------------------------------------------------------ bilan du soir (21 h, heure de Paris)
+const BILAN_HOUR = 21;
+function parisNow(d = new Date()) {
+  const f = Object.fromEntries(new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false })
+    .formatToParts(d).map((x) => [x.type, x.value]));
+  return { day: `${f.year}-${f.month}-${f.day}`, hour: Number(f.hour) % 24 };
+}
+async function eveningReport(force = false): Promise<string> {
+  const { day, hour } = parisNow();
+  if (!force && hour < BILAN_HOUR) return "pas encore l'heure";
+  const { data: done } = await db.from("agent_log").select("id").eq("agent", "bilan").eq("wallet", day).limit(1);
+  if (done?.length && !force) return "déjà fait";
+  const since = new Date(Date.now() - 86_400_000).toISOString();
+  const [bots, { data: trades }, { data: found }] = await Promise.all([
+    readBots(),
+    db.from("trades").select("*").gt("created_at", since).limit(500),
+    db.from("research").select("id").gt("created_at", since).eq("verdict", "prometteuse").limit(1000),
+  ]);
+  const lines: string[] = [];
+  let pnlAll = 0;
+  for (const k of KINDS) {
+    const b = bots[k], mem = loadMemory(b.price_history), pos = Object.values(migratePositions(mem, b));
+    const t = ((trades ?? []) as { bot: string; pnl_usd?: number | null }[]).filter((x) => x.bot === k);
+    const closed = t.filter((x) => typeof x.pnl_usd === "number"), pnl = closed.reduce((a, x) => a + (x.pnl_usd ?? 0), 0);
+    pnlAll += pnl;
+    const start = Number(b.start_value_usd) || null, v = b.last_value_usd;
+    lines.push(`${k === "spot" ? "Bot 1 · spot" : "Bot 2 · perps"} (${b.status === "running" ? "en mission" : b.status === "paused" ? "en pause" : "arrêté"}) : ${v != null ? v.toFixed(2) + " $" : "—"}`
+      + `${start && v != null ? ` (${v - start >= 0 ? "+" : ""}${(v - start).toFixed(2)} $ depuis le départ)` : ""} · ${t.length} trade(s) aujourd'hui, résultat ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $`
+      + `${mem.vault ? ` · coffre ${mem.vault.toFixed(2)} $` : ""}${pos.length ? ` · en position : ${pos.map((p) => `${p.side === "short" ? "short " : ""}${p.symbol}`).join(", ")}` : ""}.`);
+  }
+  const sc = loadConfig(bots.spot.config), pc = loadPerpsConfig(bots.perps.config);
+  lines.push(`Chercheur et mathématicien : ${found?.length ?? 0} nouvelle(s) stratégie(s) prometteuse(s) en 24 h.`);
+  lines.push(`Stratégies suivies : spot ${sc.plans.length ? sc.plans.map((p) => p.symbol).join(", ") : sc.autopilot ? "aucune validée" : "réglages de l'app"} · perps ${pc.plans.length ? pc.plans.map((p) => p.asset).join(", ") : pc.autopilot ? "aucune validée" : "réglages de l'app"}.`);
+  const text = `Bilan du ${day.split("-").reverse().join("/")} : ${lines.join(" ")}`;
+  await db.from("agent_log").insert({ agent: "bilan", wallet: day, action: "bilan", detail: text, usd: Math.round(pnlAll * 100) / 100 });
+  await notify(text);
+  return "envoyé";
 }
 
 async function swapAgentDue(): Promise<boolean> {
@@ -485,6 +574,8 @@ Règles :
 - Tu apprends des vrais trades des bots (resultats_reels) : une stratégie qui perd en réel après 4 trades est déclassée « déçue en réel », une qui gagne est « confirmée » et prioritaire. Une stratégie nouvelle est tradée avec 75 % du risque normal tant qu'elle n'est pas confirmée. Les résultats réels comptent plus que les simulations.
 - Tu travailles avec l'agent mathématicien (donnees.mathematicien) : sur la partie entraînement de l'historique seulement, il mesure le ratio de variance de Lo-MacKinlay (test z, significatif si |z| > 1,96), l'exposant de Hurst, l'autocorrélation et la demi-vie du retour à la moyenne, en déduit le régime du marché (tendance, retour à la moyenne, ou hasard) et des réglages, puis te les propose. Tu testes ses propositions comme les tiennes, sur la période jamais vue. Explique ses conclusions simplement quand on te le demande, et sois honnête : un marché « hasard » n'a pas d'avantage exploitable, et son taux de réussite comparé au tien dit si ses maths aident vraiment.
 - Réglages des agents (donnees.reglages_agents) : en mode agressif, le pilote accepte aussi les stratégies « à surveiller » (≥ 4 trades, PF ≥ 1,15, baisse ≤ 20 %, entraînement PF ≥ 1) et le bot perps applique son agressivité même en pilote automatique ; sinon il reste plafonné à « Normal ». La nervosité (Calme, Normal, Nerveux, Très nerveux) oriente la recherche vers des stratégies plus rapides (15 min, cassures courtes) et le pilote vers celles qui tradent plus souvent. Rappelle que plus nerveux ou plus agressif = plus de trades et plus de risque, pas forcément plus de gains.
+- Chaque stratégie a une « chance » (test.luck) : probabilité, estimée par le mathématicien, que son résultat sur la période jamais vue soit dû au hasard, compte tenu du nombre de stratégies essayées. Au-dessus de 50 % (80 % en mode agressif), le pilote l'écarte. Explique-le simplement si on te le demande.
+- Protections des bots : coffre à gains (une part de chaque gain n'est plus retradée), disjoncteur global (tout s'arrête si les deux bots perdent plus de X % ensemble), filtre BTC pour le spot, prise de bénéfices partielle (spot : moitié vendue à +1,5 R ; perps : stop au prix d'entrée à +1,5 R), jusqu'à 3 positions par bot avec un risque total plafonné.
 - Tu ne donnes pas de conseil d'investissement personnalisé ; rappelle de ne risquer que ce qu'on accepte de perdre si on te demande combien investir.
 - Le mode agressif du bot perps double le risque et monte le levier jusqu'à x5 : signale-le si c'est pertinent.
 Données actuelles (JSON) :
@@ -514,13 +605,16 @@ Deno.serve(async (req) => {
       if (!TOKEN || !safeEqual(req.headers.get("x-cron-secret") ?? "", await cronSecret())) return json({ error: "interdit" }, 403);
       const research = await runResearch();
       const swap = (await swapAgentDue().catch(() => false)) ? await runSwapAgent("auto").catch((e) => `erreur : ${(e as Error).message}`) : "pas encore l'heure";
-      return json({ research, swap });
+      const bilan = await eveningReport().catch((e) => `erreur : ${(e as Error).message}`);
+      return json({ research, swap, bilan });
     }
     if (route === "/tick" && req.method === "POST") {
       if (!TOKEN || !safeEqual(req.headers.get("x-cron-secret") ?? "", await cronSecret())) return json({ error: "interdit" }, 403);
       // les deux bots tournent en parallèle et indépendamment : la panne de l'un ne bloque jamais l'autre
+      const breaker = await checkBreaker().catch((e) => `disjoncteur : ${(e as Error).message}`);
+      if (breaker && breaker.startsWith("DÉCLENCHÉ")) return json({ breaker });
       const results = await Promise.all(KINDS.map((k) => tickBot(k).catch((e: unknown) => `erreur : ${String(e)}`)));
-      return json({ spot: results[0], perps: results[1] });
+      return json({ spot: results[0], perps: results[1], ...(breaker ? { breaker } : {}) });
     }
     if (!route.startsWith("/api/")) return json({ ok: true, app: "pulse" });
     if (!TOKEN) return json({ error: "Secret DASHBOARD_TOKEN manquant dans Supabase" }, 401);
@@ -535,6 +629,7 @@ Deno.serve(async (req) => {
     }
     if (req.method === "POST" && route === "/api/research/run") return json(await runResearch()); // lancer une recherche tout de suite
     if (req.method === "GET" && route === "/api/agents") return json(await agentsBoard());
+    if (req.method === "POST" && route === "/api/bilan") return json({ result: await eveningReport(true) });
     if (req.method === "POST" && route === "/api/agents/swap/run") return json(await runSwapAgent("manuel"));
     if (req.method === "POST" && route === "/api/agents/swap/auto") {
       const body = (await req.json().catch(() => ({}))) as { on?: boolean };
@@ -576,11 +671,24 @@ Deno.serve(async (req) => {
       await setBot("spot", { config });
       return json({ ok: true, config });
     }
+    if (req.method === "POST" && route === "/api/protections") {
+      type P = { maxPositions?: number; vaultPct?: number; partialTp?: boolean; marketFilter?: boolean };
+      const body = (await req.json().catch(() => ({}))) as { spot?: P; perps?: P; breakerPct?: number };
+      const bots = await readBots();
+      const sc = loadConfig(bots.spot.config), pc = loadPerpsConfig(bots.perps.config);
+      const spot = loadConfig({ ...sc, ...(body.spot ?? {}), ...(body.breakerPct != null ? { breakerPct: body.breakerPct, breakerBase: null } : {}) });
+      const perps = loadPerpsConfig({ ...pc, ...(body.perps ?? {}) });
+      await setBot("spot", { config: spot });
+      await setBot("perps", { config: perps });
+      await autopilot(true).catch(() => null); // le nombre de positions perps peut changer le nombre de stratégies choisies
+      await notify(`Protections : spot ${spot.maxPositions} position(s), coffre ${spot.vaultPct} %, prise partielle ${spot.partialTp ? "oui" : "non"}, filtre BTC ${spot.marketFilter ? "oui" : "non"} · perps ${perps.maxPositions} position(s), coffre ${perps.vaultPct} % · disjoncteur ${spot.breakerPct ? spot.breakerPct + " %" : "coupé"}`);
+      return json({ ok: true, spot, perps });
+    }
     if (req.method === "POST" && route === "/api/perps/config") {
       const body = (await req.json().catch(() => ({}))) as { aggr?: number; maxLev?: number; bias?: number; trend?: null };
       const current = loadPerpsConfig((await readBots()).perps.config);
       const config = loadPerpsConfig({ ...current, aggr: body.aggr ?? current.aggr, maxLev: body.maxLev ?? current.maxLev, bias: body.bias ?? current.bias });
-      if (body.trend === null) { config.trend = null; config.plan = null; config.autopilot = false; delete config.source; }
+      if (body.trend === null) { config.trend = null; config.plan = null; config.plans = []; config.autopilot = false; delete config.source; }
       await setBot("perps", { config });
       await notify(`Bot perps : agressivité ${AGGR_LEVELS[config.aggr]!.name.toLowerCase()}${effectiveAggr(config) !== config.aggr ? ` (plafonnée à ${AGGR_LEVELS[effectiveAggr(config)]!.name.toLowerCase()} en pilote automatique)` : ""}, levier max x${config.maxLev}, ${config.bias === 0 ? "longs et shorts équilibrés" : config.bias > 0 ? `longs favorisés (shorts à ${100 - config.bias} %)` : `shorts favorisés (longs à ${100 + config.bias} %)`}`);
       return json({ ok: true, config });

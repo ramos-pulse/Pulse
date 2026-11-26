@@ -29,7 +29,7 @@ export interface BotState {
 
 export interface TradeRow {
   side?: string | null; action?: string; symbol?: string; asset?: string; mint?: string;
-  amount_usd?: number; collateral_usd?: number; price?: number; pnl_usd?: number; reason?: string; signature?: string | null; source?: string;
+  amount_usd?: number; collateral_usd?: number; price?: number; pnl_usd?: number; reason?: string; signature?: string | null; source?: string; detail?: Record<string, unknown>;
 }
 
 /** Interface utilisée par le moteur (identique à la version serveur). */
@@ -98,7 +98,8 @@ export class DbStore implements Store {
 
   addTrade(kind: BotKind, row: TradeRow): void {
     this.inserts.push({ ...row, bot: kind });
-    const what = (row.side ?? row.action ?? "").toUpperCase();
+    const raw = (row.side ?? row.action ?? "").toUpperCase();
+    const what = ({ BUY: "ACHAT", SELL: "VENTE", OPEN: "OUVERTURE", CLOSE: "FERMETURE" } as Record<string, string>)[raw] ?? raw;
     const pnl = typeof row.pnl_usd === "number" ? ` · ${row.pnl_usd >= 0 ? "+" : ""}${row.pnl_usd.toFixed(2)} $` : "";
     this.messages.push(`${what} ${row.symbol ?? row.asset ?? ""}${pnl}${row.reason ? ` (${row.reason})` : ""}`);
   }

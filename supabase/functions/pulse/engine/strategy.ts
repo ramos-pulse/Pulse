@@ -234,7 +234,9 @@ export function perpsSizing(equity: number, usdc: number, entry: number, stop: n
 // Réglages du bot perps : mode agressif et biais longs / shorts
 // ---------------------------------------------------------------------------------------------------
 export type PerpsMode = "normal" | "agressif";
-export interface PerpsConfig { mode: PerpsMode; aggr: number; maxLev: number; pilotAggressive: boolean; bias: number; trend: Params | null; source?: string; autopilot: boolean; plan: PerpsPlan | null } // bias : -100 = shorts seulement, 0 = équilibré, +100 = longs seulement
+export interface PerpsConfig { mode: PerpsMode; aggr: number; maxLev: number; pilotAggressive: boolean; bias: number; trend: Params | null; source?: string; autopilot: boolean;
+  plans: PerpsPlan[]; plan: PerpsPlan | null; // plans : une stratégie par marché (SOL, ETH, BTC) ; plan = la première (compatibilité)
+  maxPositions: number; vaultPct: number; partialTp: boolean } // bias : -100 = shorts seulement, 0 = équilibré, +100 = longs seulement
 
 /** Mode agressif : risque doublé (plafond 3 %), levier jusqu'à x5, perte max 8 %/jour, trade même sans réglage validé. */
 export const AGGRESSIVE = { riskMult: 2, maxRisk: 0.03, maxLeverage: 5, dailyLoss: 0.08 };
@@ -273,7 +275,15 @@ export function loadPerpsConfig(raw: unknown): PerpsConfig {
   return { mode: aggr >= AGGR_AGGRESSIVE ? "agressif" : "normal", aggr, maxLev, pilotAggressive: o.pilotAggressive === true,
     bias: Number.isFinite(bias) ? Math.round(Math.min(100, Math.max(-100, bias))) : 0,
     trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}),
-    autopilot: o.autopilot === true, plan: sanitizePerpsPlan(o.plan) };
+    autopilot: o.autopilot === true, ...plansOf(o), ...protections(o) };
+}
+
+/** Une stratégie par marché, 3 au maximum. Reprend l'ancien champ `plan` s'il n'y a pas encore de liste. */
+function plansOf(o: Partial<PerpsConfig>): { plans: PerpsPlan[]; plan: PerpsPlan | null } {
+  const raw = Array.isArray(o.plans) ? o.plans : o.plan ? [o.plan] : [];
+  const plans: PerpsPlan[] = [];
+  for (const x of raw) { const p = sanitizePerpsPlan(x); if (p && !plans.some((q) => q.asset === p.asset) && plans.length < 3) plans.push(p); }
+  return { plans, plan: plans[0] ?? null };
 }
 
 export function sanitizePerpsPlan(raw: unknown): PerpsPlan | null {
@@ -297,7 +307,22 @@ export function perpsChange(side: Side, entry: number, current: number): number 
 // ---------------------------------------------------------------------------------------------------
 // Mémoire du bot (stockée dans la colonne JSON `price_history`, aucune migration de base nécessaire)
 // ---------------------------------------------------------------------------------------------------
-export interface Pending { kind: "buy" | "sell" | "open" | "close"; sig: string; at: number; mint?: string; usdcBefore?: number; reason?: string }
+export interface Pending { kind: "buy" | "sell" | "partial" | "open" | "close"; sig: string; at: number; mint?: string; asset?: string; usdcBefore?: number; rawBefore?: string; reason?: string; draft?: Position }
+
+/** Une position (spot : clé = mint du token ; perps : clé = marché SOL/ETH/BTC). */
+export interface Position {
+  key: string; symbol: string; side: Side;
+  entry?: number; stop?: number; best?: number; initialRisk?: number; stopCandle?: number; openedAt?: number;
+  strategy?: SpotStrategy; posParams?: Params | RsiParams; posInterval?: Interval; source?: string;
+  costUsd?: number;          // spot : USDC encore engagés (après une vente partielle, la moitié)
+  collateralUsd?: number;    // perps : collatéral déposé à l'ouverture
+  sizeUsd?: number;          // perps : taille de la position
+  lastValueUsd?: number;     // perps : dernière valeur vue (collatéral + PnL)
+  pubkey?: string;
+  partialDone?: boolean;     // prise de bénéfices partielle déjà faite (ou stop remonté au prix d'entrée)
+  why?: string;              // raison de l'entrée (affichée dans « Pourquoi ce trade ? »)
+  live?: { price: number; pnlPct: number; at: number };
+}
 export interface Memory {
   v: 3;
   stop?: number;            // niveau de stop actuel
@@ -323,6 +348,40 @@ export interface Memory {
   asset?: string;           // marché de la position en cours
   live?: { price: number; pnlPct: number; at: number }; // dernier prix vu de la position (affiché dans l'app)
   brain?: import("./brain.ts").Brain;
+  positions?: Record<string, Position>; // toutes les positions ouvertes
+  vault?: number;            // coffre à gains (USD) : jamais retradé
+  curve?: { t: number; v: number }[]; // courbe du capital (un point par heure, 30 jours)
+  lastCandleBy?: Record<string, number>; // perps : dernière bougie analysée par marché
+  lastUsdc?: number;         // perps : USDC vus au tick précédent (estimation des stops on-chain)
+}
+
+/** Ajoute un point à la courbe du capital (au plus un par heure, 30 jours gardés). */
+export function sampleCurve(mem: Memory, valueUsd: number, now: number) {
+  const c = (mem.curve ??= []);
+  if (!(valueUsd > 0)) return;
+  const last = c.at(-1);
+  if (last && now - last.t < 3_600_000) { last.v = Math.round(valueUsd * 100) / 100; return; }
+  c.push({ t: now, v: Math.round(valueUsd * 100) / 100 });
+  if (c.length > 720) c.splice(0, c.length - 720);
+}
+
+/**
+ * Reprend l'ancien format (une seule position décrite à plat dans la mémoire) dans la liste des positions.
+ * Aucune position réelle n'est perdue : sa protection (stop) et sa stratégie sont gardées.
+ */
+export function migratePositions(mem: Memory, bot: { kind: string; position_mint?: string | null; position_asset?: string | null; position_side?: string | null; position_pubkey?: string | null; entry_price?: number | null }) {
+  if (mem.positions) return mem.positions;
+  mem.positions = {};
+  const key = bot.kind === "spot" ? bot.position_mint : bot.position_side ? bot.position_asset ?? mem.asset : null;
+  if (key) {
+    mem.positions[key] = {
+      key, symbol: mem.asset ?? (bot.kind === "spot" ? key.slice(0, 4) : key), side: (bot.kind === "spot" ? "long" : bot.position_side === "short" ? "short" : "long"),
+      entry: bot.entry_price ?? undefined, stop: mem.stop, best: mem.best, initialRisk: mem.initialRisk, stopCandle: mem.stopCandle, openedAt: mem.openedAt,
+      strategy: mem.strategy, posParams: mem.posParams, posInterval: mem.posInterval, source: mem.source, costUsd: mem.costUsd, pubkey: bot.position_pubkey ?? undefined, live: mem.live,
+    };
+  }
+  for (const k of ["stop", "best", "initialRisk", "stopCandle", "openedAt", "strategy", "posParams", "posInterval", "source", "costUsd", "openValueUsd", "asset", "side", "live"] as const) delete mem[k];
+  return mem.positions;
 }
 
 export function loadMemory(raw: unknown): Memory {
@@ -451,7 +510,9 @@ export const RSI_DEFAULTS: RsiParams = { rsiPeriod: 14, entry: 30, exit: 50, sma
 export const NAIVE_EXIT = 70;
 
 export type SpotStrategy = "tendance" | "rsi";
-export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams; trend: Params | null; source?: string; autopilot: boolean; plans: SpotPlan[]; swapAuto: boolean; researchAggressive: boolean; nerve: number }
+export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams; trend: Params | null; source?: string; autopilot: boolean; plans: SpotPlan[]; swapAuto: boolean; researchAggressive: boolean; nerve: number;
+  maxPositions: number; vaultPct: number; partialTp: boolean; marketFilter: boolean;
+  breakerPct: number; breakerBase: number | null; breakerTrippedAt: number | null }
 
 /** Barre de nervosité des agents : 0 calme, 1 normal (tout est permis, comme avant), 2 nerveux, 3 très nerveux. */
 export const NERVE_LEVELS = ["Calme", "Normal", "Nerveux", "Très nerveux"] as const;
@@ -489,7 +550,55 @@ export function loadConfig(raw: unknown): SpotConfig {
   const o = (raw && typeof raw === "object" ? raw : {}) as Partial<SpotConfig>;
   return { strategy: o.strategy === "rsi" ? "rsi" : "tendance", rsi: sanitizeRsi(o.rsi), trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}),
     autopilot: o.autopilot === true, plans: sanitizeSpotPlans(o.plans), swapAuto: o.swapAuto !== false,
-    researchAggressive: o.researchAggressive === true, nerve: Number.isFinite(Number(o.nerve)) ? Math.round(Math.min(3, Math.max(0, Number(o.nerve)))) : 1 };
+    researchAggressive: o.researchAggressive === true, nerve: Number.isFinite(Number(o.nerve)) ? Math.round(Math.min(3, Math.max(0, Number(o.nerve)))) : 1,
+    ...protections(o),
+    marketFilter: o.marketFilter !== false,
+    breakerPct: (BREAKER_STEPS as readonly number[]).includes(Number(o.breakerPct)) ? Number(o.breakerPct) : BREAKER_DEFAULT,
+    breakerBase: Number(o.breakerBase) > 0 ? Number(o.breakerBase) : null, breakerTrippedAt: Number(o.breakerTrippedAt) > 0 ? Number(o.breakerTrippedAt) : null };
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Protections communes aux deux bots
+// ---------------------------------------------------------------------------------------------------
+/** Nombre de positions simultanées (1 à 3) et part de chaque gain mise au coffre (jamais retradée). */
+export const VAULT_STEPS = [0, 25, 50, 75] as const;
+export const VAULT_DEFAULT = 25;
+/** Prise de bénéfices partielle : à +1,5 R (1,5 fois le risque initial), vendre la moitié et remonter le stop au prix d'entrée. */
+export const PARTIAL = { atR: 1.5, fraction: 0.5 };
+/** Risque total ouvert (toutes positions d'un bot) : la perte si TOUS les stops sont touchés ne dépasse pas ce plafond. */
+export const TOTAL_RISK = { spot: 0.03, perpsMult: 1.5 };
+/** Disjoncteur global : les deux bots s'arrêtent si leur valeur totale baisse de plus de X % (0 = coupé). */
+export const BREAKER_STEPS = [0, 10, 15, 20, 30] as const;
+export const BREAKER_DEFAULT = 15;
+export function protections(o: { maxPositions?: unknown; vaultPct?: unknown; partialTp?: unknown }) {
+  const n = Math.round(Number(o.maxPositions));
+  return {
+    maxPositions: n >= 1 && n <= 3 ? n : 3,
+    vaultPct: (VAULT_STEPS as readonly number[]).includes(Number(o.vaultPct)) ? Number(o.vaultPct) : VAULT_DEFAULT,
+    partialTp: o.partialTp !== false,
+  };
+}
+/** Part du gain envoyée au coffre. Le coffre ne peut pas dépasser l'USDC réellement présent. */
+export function addToVault(vault: number | undefined, pnlUsd: number, pct: number): number {
+  return Math.max(0, (vault ?? 0) + (pnlUsd > 0 ? (pnlUsd * pct) / 100 : 0));
+}
+/** Capital tradable : tout, sauf le coffre. */
+export function tradable(valueUsd: number, usdc: number, vault: number | undefined) {
+  const v = Math.min(vault ?? 0, usdc);
+  return { equity: Math.max(0, valueUsd - v), usdc: Math.max(0, usdc - v), vault: v };
+}
+
+/**
+ * Filtre de marché du spot : pas d'achat quand le Bitcoin chute fort (presque tout chute avec lui).
+ * Bloque si BTC a perdu ≥ 6 % en 24 h, ou ≥ 3 % en 24 h en étant sous sa moyenne mobile 200 h.
+ */
+export const MARKET_FILTER = { hardDrop: -0.06, softDrop: -0.03, ema: 200 };
+export function marketFilter(btc: Candle[]): { blocked: boolean; change24h: number; belowEma: boolean } {
+  if (btc.length < 30) return { blocked: false, change24h: 0, belowEma: false };
+  const last = btc.at(-1)!.c, dayAgo = btc[Math.max(0, btc.length - 25)]!.c;
+  const change24h = last / dayAgo - 1;
+  const belowEma = btc.length >= MARKET_FILTER.ema ? last < ema(btc.map((x) => x.c), MARKET_FILTER.ema).at(-1)! : false;
+  return { blocked: change24h <= MARKET_FILTER.hardDrop || (change24h <= MARKET_FILTER.softDrop && belowEma), change24h, belowEma };
 }
 
 const SYMBOLS = new Set<string>(TOKENS.map((t) => t.symbol));

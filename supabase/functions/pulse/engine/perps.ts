@@ -1,17 +1,20 @@
-// Serveur uniquement : BOT 2 — perps Jupiter sur SOL, long ET short, en suivi de tendance.
-// Le levier n'est plus « x10 tout risquer » : il découle du risque (1,5 % du capital au stop), plafonné à x3.
+// Serveur uniquement : BOT 2 — perps Jupiter, long ET short. Une position par marché (SOL, ETH, BTC), risque total plafonné.
+// Le levier découle du risque, plafonné par le levier choisi ET par la distance du stop (jamais de liquidation avant le stop).
 import type { BotState, Store } from "../store.ts";
 import { isBenched, learn, mindset, newBrain, optimize, riskPerTrade } from "./brain.ts";
 import { candles as getCandles, hourlyCandles, lastClosedCandle } from "./candles.ts";
 import { perpsClose, perpsOpen, perpsPositions, perpsPrice, type PerpPosition } from "./jupiter.ts";
 import { getBalances, loadKeyPairFrom, type Balances } from "./solana.ts";
 import {
-  AGGR_AGGRESSIVE, AGGR_LEVELS, effectiveAggr, atr, dayKey, exitCheck, loadMemory, loadPerpsConfig, missionEnd, PERPS_ASSETS, PERPS_RULES, perpsChange, perpsSizing, PRESETS, RISK, riskFactor, sideMult,
-  riskGate, RULES, trailStop, trendSignal, DEFAULT_PARAMS, type Interval, type Memory, type Params,
+  addToVault, AGGR_AGGRESSIVE, AGGR_LEVELS, effectiveAggr, atr, dayKey, exitCheck, loadMemory, loadPerpsConfig, migratePositions, missionEnd, PARTIAL, PERPS_ASSETS, PERPS_RULES,
+  perpsChange, perpsSizing, PRESETS, RISK, riskFactor, sampleCurve, sideMult, riskGate, RULES, TOTAL_RISK, tradable, trailStop, trendSignal, DEFAULT_PARAMS,
+  type Interval, type Memory, type Params, type PerpsConfig, type PerpsPlan, type Position,
 } from "./strategy.ts";
 
 type Admin = Store;
 type PerpsRow = BotState;
+type KeyPair = Awaited<ReturnType<typeof loadKeyPairFrom>>["keyPair"];
+type Asset = (typeof PERPS_ASSETS)[number];
 
 const WALLET_ENV = "PERPS_WALLET_PRIVATE_KEY";
 const SOL = PERPS_ASSETS[0];
@@ -34,217 +37,243 @@ export async function currentPerpsValue() {
   return { address, valueUsd: perpsValue(b, price, positions), positions };
 }
 
+/** Perte si le stop de chaque position est touché, en part du capital. */
+function openRisk(positions: Position[], valueUsd: number) {
+  if (!(valueUsd > 0)) return 0;
+  return positions.reduce((s, p) => {
+    const price = p.live?.price ?? p.entry ?? 0, stop = p.stop ?? price;
+    if (!(price > 0)) return s;
+    const adverse = p.side === "long" ? price - stop : stop - price;
+    return s + Math.max(0, adverse / price) * (p.sizeUsd ?? 0);
+  }, 0) / valueUsd;
+}
+
 export async function runPerpsTick(admin: Admin): Promise<string> {
   const bot = admin.bot("perps");
-  // En pause : plus aucune entrée, mais une position ouverte reste gérée (stop suiveur).
-  const paused = bot.status === "paused";
-  if (!(bot.status === "running" || (paused && (bot.position_side || loadMemory(bot.price_history).pending)))) return "idle";
-  const now = Date.now();
   const mem: Memory = loadMemory(bot.price_history);
+  const mine = migratePositions(mem, bot);
+  // En pause : plus aucune entrée, mais les positions ouvertes restent gérées (stop suiveur).
+  const paused = bot.status === "paused";
+  if (!(bot.status === "running" || (paused && (Object.keys(mine).length || mem.pending)))) return "idle";
+  const now = Date.now();
   const cfg = loadPerpsConfig(bot.config);
-  // Agressivité choisie dans l'app (plafonnée à « Normal » en pilote automatique, sauf mode agressif du chercheur)
+  // Agressivité choisie dans l'app (plafonnée à « Normal » en pilote automatique, sauf mode agressif des agents)
   const level = effectiveAggr(cfg), L = AGGR_LEVELS[level]!;
   const aggressive = level >= AGGR_AGGRESSIVE;
-  const maxLev = cfg.maxLev; // levier maximum choisi ; le dimensionnement le réduit si le stop est trop loin pour lui
   const patch: Partial<PerpsRow> = {};
 
   // 1. Données : prix, soldes ET positions réelles. Sinon on ne touche à rien (le stop on-chain protège).
-  let address: string, keyPair: Awaited<ReturnType<typeof loadKeyPairFrom>>["keyPair"];
-  let price: number, solPrice: number, b: Balances, positions: PerpPosition[];
-  // Marché du tick : celui de la position ouverte, sinon celui du plan du chercheur, sinon SOL.
-  let ASSET: (typeof PERPS_ASSETS)[number] = SOL;
+  let address: string, keyPair: KeyPair, solPrice: number, b: Balances, real: PerpPosition[];
   try {
     ({ address, keyPair } = await loadKeyPairFrom(WALLET_ENV));
-    [solPrice, b, positions] = await Promise.all([perpsPrice(SOL.mint), getBalances(address), perpsPositions(address)]);
-    const held = positions.find((p) => assetOf(p.asset));
-    ASSET = assetOf(held?.asset) ?? assetOf(mem.asset) ?? assetOf(bot.position_asset) ?? assetOf(cfg.plan?.asset) ?? SOL;
-    price = ASSET.asset === SOL.asset ? solPrice : await perpsPrice(ASSET.mint);
+    [solPrice, b, real] = await Promise.all([perpsPrice(SOL.mint), getBalances(address), perpsPositions(address)]);
   } catch (e) {
-    await save(admin, bot, mem, { last_message: `Données indisponibles (${(e as Error).message.slice(0, 80)}). Le stop on-chain protège la position, je réessaie.` });
+    await save(admin, mem, { last_message: `Données indisponibles (${(e as Error).message.slice(0, 80)}). Le stop on-chain protège les positions, je réessaie.` });
     return "data_unavailable";
   }
-  const value = perpsValue(b, solPrice, positions);
+  const prices: Record<string, number> = { SOL: solPrice };
+  const priceOf = async (a: Asset) => (prices[a.asset] ??= await perpsPrice(a.mint));
+  const value = perpsValue(b, solPrice, real);
   patch.wallet_address = address;
   mem.brain = mem.brain ?? newBrain(value);
   const brain = mem.brain;
-  let open = positions.find((p) => p.asset === ASSET.asset) ?? null;
+  const realOf = (asset: string) => real.find((p) => p.asset === asset) ?? null;
   let message = "";
 
-  // 2. Réconciliation avec la blockchain (ordres différés, stop on-chain déclenché, redémarrage…).
+  // 2. Ordre en attente (les keepers Jupiter exécutent en différé).
   if (mem.pending) {
-    const age = now - mem.pending.at;
-    if (mem.pending.kind === "open") {
+    const pd = mem.pending, asset = pd.asset ?? pd.draft?.key ?? "", open = realOf(asset), age = now - pd.at;
+    if (pd.kind === "open") {
       if (open) {
-        Object.assign(patch, { position_pubkey: open.pubkey, position_asset: open.asset, position_side: open.side, entry_price: open.entryPrice });
-        mem.initialRisk = Math.abs(open.entryPrice - (mem.stop ?? open.entryPrice));
-        mem.best = open.entryPrice;
-        admin.addTrade("perps", { action: "open", asset: open.asset, side: open.side, collateral_usd: open.valueUsd, price: open.entryPrice, reason: mem.signal ?? "tendance", signature: mem.pending.sig, source: mem.source });
-        message = `${open.side === "long" ? "Long" : "Short"} ${open.asset} ouvert à ${open.entryPrice.toFixed(2)} $, stop ${mem.stop?.toFixed(2)} $.`;
+        const d = pd.draft ?? { key: asset, symbol: asset, side: open.side };
+        mine[asset] = { ...d, key: asset, symbol: asset, side: open.side, entry: open.entryPrice, pubkey: open.pubkey, best: open.entryPrice, initialRisk: Math.abs(open.entryPrice - (d.stop ?? open.entryPrice)),
+          collateralUsd: d.collateralUsd ?? open.valueUsd, sizeUsd: open.sizeUsd, lastValueUsd: open.valueUsd };
+        admin.addTrade("perps", { action: "open", asset, side: open.side, collateral_usd: open.valueUsd, price: open.entryPrice, reason: mem.signal ?? "tendance", signature: pd.sig, source: d.source,
+          detail: { pourquoi: d.why, stop: d.stop, strategie: d.source, levier: open.sizeUsd && d.collateralUsd ? Math.round((open.sizeUsd / d.collateralUsd) * 10) / 10 : null } });
+        message = `${open.side === "long" ? "Long" : "Short"} ${asset} ouvert à ${open.entryPrice.toFixed(2)} $, stop ${d.stop?.toFixed(2)} $.`;
         mem.pending = undefined;
-      } else if (age > PENDING_MS) {
-        message = "Ordre d'ouverture non exécuté par Jupiter : annulé, fonds intacts."; clearPosition(mem); mem.pending = undefined;
-      } else { await save(admin, bot, mem, { last_value_usd: value, last_message: "Ouverture en cours d'exécution…" }); return "pending"; }
-    } else if (mem.pending.kind === "close") {
-      if (!open) { message = await recordClose(admin, bot, mem, patch, value, price, mem.pending.reason ?? "sortie", mem.pending.sig, ASSET.asset); mem.pending = undefined; }
-      else if (age > PENDING_MS) { message = "Fermeture non exécutée : je réessaie."; mem.pending = undefined; }
-      else { await save(admin, bot, mem, { last_value_usd: value, last_message: "Fermeture en cours d'exécution…" }); return "pending"; }
+      } else if (age > PENDING_MS) { message = `Ordre d'ouverture ${asset} non exécuté par Jupiter : annulé, fonds intacts.`; mem.pending = undefined; }
+      else { await save(admin, mem, { ...mirror(mine), last_value_usd: value, last_message: `Ouverture ${asset} en cours d'exécution…` }); return "pending"; }
+    } else if (pd.kind === "close") {
+      if (!open) { message = recordClose(admin, mem, cfg, asset, value, b.usdc - (pd.usdcBefore ?? b.usdc), pd.reason ?? "sortie", pd.sig); mem.pending = undefined; }
+      else if (age > PENDING_MS) { message = `Fermeture ${asset} non exécutée : je réessaie.`; mem.pending = undefined; }
+      else { await save(admin, mem, { ...mirror(mine), last_value_usd: value, last_message: `Fermeture ${asset} en cours d'exécution…` }); return "pending"; }
     }
   }
-  if (!mem.pending && bot.position_side && !open && patch.position_side === undefined) {
-    message = await recordClose(admin, bot, mem, patch, value, price, "stop_onchain", null, ASSET.asset); // stop on-chain déclenché
-  }
-  if (open && !bot.position_side && patch.position_side === undefined) {
-    Object.assign(patch, { position_pubkey: open.pubkey, position_asset: open.asset, position_side: open.side, entry_price: open.entryPrice });
-    const fallback = open.side === "long" ? open.entryPrice * 0.96 : open.entryPrice * 1.04;
-    Object.assign(mem, { stop: mem.stop ?? fallback, best: open.entryPrice, initialRisk: Math.abs(open.entryPrice - (mem.stop ?? fallback)), openedAt: now, openValueUsd: value, side: open.side, asset: open.asset });
-    message = `Position ${open.side} ${open.asset} trouvée : je reprends sa gestion.`;
-  }
 
-  // 3. Fin de mission (données complètes uniquement).
+  // 3. Réconciliation avec la blockchain : stop on-chain déclenché, ou position trouvée sans mémoire.
+  const gone = Object.values(mine).filter((p) => !realOf(p.key) && mem.pending?.asset !== p.key);
+  const back = b.usdc - (mem.lastUsdc ?? b.usdc); // USDC revenus depuis le tick précédent
+  for (const p of gone) // une seule position fermée : on connaît exactement les USDC revenus ; sinon dernière valeur vue
+    message = recordClose(admin, mem, cfg, p.key, value, gone.length === 1 && back > 0 ? back : p.lastValueUsd ?? 0, "stop_onchain", null);
+  for (const o of real) {
+    if (!assetOf(o.asset) || mine[o.asset] || mem.pending?.asset === o.asset) continue;
+    const fallback = o.side === "long" ? o.entryPrice * 0.96 : o.entryPrice * 1.04;
+    mine[o.asset] = { key: o.asset, symbol: o.asset, side: o.side, entry: o.entryPrice, stop: fallback, best: o.entryPrice, initialRisk: Math.abs(o.entryPrice - fallback), openedAt: now,
+      pubkey: o.pubkey, collateralUsd: o.valueUsd, sizeUsd: o.sizeUsd, lastValueUsd: o.valueUsd, source: "position trouvée sur Jupiter", why: "reprise d'une position existante (stop de sécurité ±4 %)" };
+    message = `Position ${o.side} ${o.asset} trouvée : je reprends sa gestion.`;
+  }
+  for (const p of Object.values(mine)) { const o = realOf(p.key); if (o) { p.lastValueUsd = o.valueUsd; p.sizeUsd = o.sizeUsd; p.pubkey = o.pubkey; } }
+  sampleCurve(mem, value, now);
+  mem.lastUsdc = b.usdc;
+
+  // 4. Fin de mission (données complètes uniquement).
   const end = missionEnd({ now, endAt: RULES.destroyAtDeadline && bot.end_at ? Date.parse(bot.end_at) : Infinity,
     goalUsd: Number(bot.goal_usd), valueUsd: value, floorUsd: PERPS_RULES.floorUsd, complete: true });
   if (end && !paused) {
     const outcome = end === "success" ? "success" : end === "destroyed" ? "destroyed" : "stopped";
-    await save(admin, bot, mem, { ...patch, last_value_usd: value });
-    await liquidatePerps(admin, { ...bot, ...patch } as PerpsRow, outcome,
+    await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value });
+    await liquidatePerps(admin, { ...bot, ...patch, price_history: mem } as PerpsRow, outcome,
       end === "success" ? "Mission réussie ! Objectif atteint, gains sécurisés." : end === "destroyed" ? "Date limite atteinte." : `Capital sous ${PERPS_RULES.floorUsd} $ : je protège ce qui reste.`);
     return outcome;
   }
 
   try {
-    const plan = cfg.plan && cfg.plan.asset === ASSET.asset ? cfg.plan : null;
-    const params: Params = open && mem.posParams ? (mem.posParams as Params)
-      : plan ? plan.params : cfg.trend ?? PRESETS[brain.preset[ASSET.asset] ?? "standard"] ?? DEFAULT_PARAMS;
-    const iv: Interval = open ? mem.posInterval ?? "1h" : plan?.interval ?? "1h";
-    const closed = lastClosedCandle(now, iv);
-
-    // 4. Position ouverte : stop suiveur à chaque bougie, sortie vérifiée chaque minute.
-    if (open) {
-      if (mem.stopCandle !== closed) {
-        const candles = await getCandles(ASSET.candles, iv, 40, now).catch(() => []);
-        if (candles.length > 20) {
-          const c = candles.at(-1)!.c;
-          mem.best = open.side === "long" ? Math.max(mem.best ?? open.entryPrice, c) : Math.min(mem.best ?? open.entryPrice, c);
-          mem.stop = trailStop(open.side, mem.stop ?? open.entryPrice, mem.best, atr(candles, 14).at(-1)!, params);
-          mem.stopCandle = closed;
+    // 5. Positions ouvertes : stop suiveur à chaque bougie, stop au prix d'entrée à +1,5 R, sortie vérifiée chaque minute.
+    for (const p of Object.values(mine)) {
+      const A = assetOf(p.key), o = realOf(p.key);
+      if (!A || !o) continue;
+      const price = await priceOf(A);
+      const entry = p.entry ?? o.entryPrice;
+      const iv: Interval = p.posInterval ?? "1h";
+      const closed = lastClosedCandle(now, iv);
+      const params = (p.posParams as Params | undefined) ?? cfg.trend ?? PRESETS[brain.preset[p.key] ?? "standard"] ?? DEFAULT_PARAMS;
+      if (p.stopCandle !== closed) {
+        const c = await getCandles(A.candles, iv, 40, now).catch(() => []);
+        if (c.length > 20) {
+          const last = c.at(-1)!.c;
+          p.best = p.side === "long" ? Math.max(p.best ?? entry, last) : Math.min(p.best ?? entry, last);
+          p.stop = trailStop(p.side, p.stop ?? entry, p.best, atr(c, 14).at(-1)!, params);
+          p.stopCandle = closed;
         }
       }
-      const stop = mem.stop!;
-      const exit = exitCheck({ side: open.side, entry: open.entryPrice, price, stop, initialRisk: mem.initialRisk ?? open.entryPrice * 0.03, openedAt: mem.openedAt ?? now }, now);
+      // Protection des gains : à +1,5 R, le stop passe au prix d'entrée (la position ne peut plus perdre)
+      const r = p.initialRisk ? (p.side === "long" ? price - entry : entry - price) / p.initialRisk : 0;
+      if (cfg.partialTp && !p.partialDone && r >= PARTIAL.atR) {
+        p.stop = p.side === "long" ? Math.max(p.stop ?? entry, entry) : Math.min(p.stop ?? entry, entry);
+        p.partialDone = true;
+        message = `${p.key} : gain de +${String(PARTIAL.atR).replace(".", ",")} fois le risque atteint, stop remonté au prix d'entrée.`;
+      }
+      const move = perpsChange(p.side, entry, price) * 100;
+      p.live = { price, pnlPct: move, at: now };
+      const exit = exitCheck({ side: p.side, entry, price, stop: p.stop ?? entry, initialRisk: p.initialRisk ?? entry * 0.03, openedAt: p.openedAt ?? now }, now);
       if (exit) {
-        const sig = await perpsClose(open.pubkey, PERPS_RULES.slippageBps * 2, keyPair);
-        mem.pending = { kind: "close", sig, at: now, reason: exit };
-        await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: `Fermeture ${open.side} ${open.asset} demandée (${label(exit)})…` });
+        const sig = await perpsClose(o.pubkey, PERPS_RULES.slippageBps * 2, keyPair);
+        mem.pending = { kind: "close", sig, at: now, asset: p.key, usdcBefore: b.usdc, reason: exit };
+        await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value, last_message: `Fermeture ${p.side} ${p.key} demandée (${label(exit)})…` });
         return "close";
       }
-      const move = perpsChange(open.side, open.entryPrice, price) * 100;
-      mem.live = { price, pnlPct: move, at: now };
-      mem.mindset = mindset(brain, { inPosition: true, blocked: null, goalPct: (value / Number(bot.goal_usd)) * 100 });
-      await save(admin, bot, mem, { ...patch, last_value_usd: value,
-        last_message: message || `En ${open.side} ${open.asset} : ${move >= 0 ? "+" : ""}${move.toFixed(2)} % du cours, stop suiveur à ${stop.toFixed(2)} $.` });
-      return "hold";
     }
+    const held = Object.values(mine);
+    const posText = held.map((p) => `${p.side === "long" ? "long" : "short"} ${p.key} ${p.live ? `${p.live.pnlPct >= 0 ? "+" : ""}${p.live.pnlPct.toFixed(2)} %` : ""}`).join(", ");
+    const hold = async (msg: string, blocked: string | null = null) => {
+      mem.mindset = mindset(brain, { inPosition: held.length > 0, blocked, goalPct: (value / Number(bot.goal_usd)) * 100 });
+      await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value, last_message: message || (held.length ? `${msg} · ${posText}` : msg) });
+      return "hold";
+    };
+    if (paused) return await hold("En pause : aucune nouvelle entrée.");
 
-    if (paused) {
-      await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || "En pause : aucune nouvelle entrée." });
-      return "paused";
+    // 6. Entrées : une par marché. Plans du chercheur (un par marché), sinon SOL avec les réglages du cerveau.
+    const plans: (PerpsPlan | null)[] = cfg.autopilot || cfg.plans.length ? cfg.plans : [null];
+    if (cfg.autopilot && !cfg.plans.length) return await hold("Pilote automatique : j'attends que le chercheur valide une stratégie perps.");
+    if (held.length >= cfg.maxPositions) return await hold(`${held.length} position(s) ouverte(s), maximum atteint`);
+    const blocked = riskGate(mem, value, now, L.dailyLoss);
+    if (blocked) return await hold(blocked, blocked);
+    const notes: string[] = [];
+    for (const plan of plans) {
+      const A = plan ? assetOf(plan.asset) : SOL;
+      if (!A || mine[A.asset] || mem.pending) continue;
+      const params: Params = plan ? plan.params : cfg.trend ?? PRESETS[brain.preset[A.asset] ?? "standard"] ?? DEFAULT_PARAMS;
+      const iv: Interval = plan?.interval ?? "1h";
+      const closed = lastClosedCandle(now, iv);
+      mem.lastCandleBy ??= {};
+      if (mem.lastCandleBy[A.asset] === closed) continue; // chaque bougie n'est analysée qu'une fois
+      const today = dayKey(now);
+      if (!plan && brain.optimized?.[A.asset] !== today) {
+        const hist = await hourlyCandles(A.candles, 1440, now).catch(() => null);
+        if (hist && hist.length > 500) optimize(brain, A.asset, hist, { allowShort: true, feePct: PERPS_COST, hourlyCost: BORROW_PER_HOUR, leverageCap: cfg.maxLev }, today);
+        else brain.optimized = { ...brain.optimized, [A.asset]: today };
+      }
+      mem.lastCandleBy[A.asset] = closed;
+      // À partir de « Agressif », il trade même sans réglage validé sur 60 jours (mais respecte la mise sur le banc)
+      const benched = aggressive || cfg.trend || plan ? (brain.benched[A.asset] ?? 0) > now : isBenched(brain, A.asset, now);
+      if (benched) { notes.push((!aggressive && !plan && brain.disabled[A.asset]) || `${A.asset} sur le banc après une série difficile`); continue; }
+      const c = await getCandles(A.candles, iv, 400, now);
+      const sig = trendSignal(c, sideMult(cfg.bias, "short") > 0, params);
+      mem.signal = `${A.asset} : ${sig.reason}`;
+      const mult = sig.side ? sideMult(cfg.bias, sig.side) : 0;
+      if (!sig.side || mult === 0) { notes.push(sig.side ? `${A.asset} : ${sig.side} désactivé par ta barre longs/shorts` : `${A.asset} : ${sig.reason}`); continue; }
+      const price = await priceOf(A);
+      const dist = Math.abs(sig.price - sig.stop);
+      const stop = sig.side === "long" ? price - dist : price + dist;
+      const confidence = plan ? riskFactor(plan.confidence) : 1; // stratégie du chercheur pas encore confirmée en réel : 75 %
+      const wanted = Math.min(L.maxRisk, riskPerTrade(brain) * L.riskMult) * mult * confidence;
+      const room = L.maxRisk * TOTAL_RISK.perpsMult - openRisk(held, value); // risque total plafonné
+      const risk = Math.min(wanted, room);
+      if (risk < 0.002) { notes.push(`${A.asset} : risque total des positions déjà au plafond`); continue; }
+      const T = tradable(value, b.usdc, mem.vault);
+      const size = perpsSizing(T.equity, T.usdc, price, stop, risk, cfg.maxLev);
+      if (!size) { notes.push(`${A.asset} : signal ${sig.side} mais capital disponible (hors coffre) insuffisant (min ${PERPS_RULES.minCollateralUsd} $ de collatéral)`); continue; }
+      const txid = await perpsOpen({ wallet: address, asset: A.asset, side: sig.side, usdcRaw: BigInt(Math.floor(size.collateral * 1e6)), leverage: size.leverage, stop, slippageBps: PERPS_RULES.slippageBps }, keyPair);
+      const source = plan?.source ?? cfg.source ?? "réglages de l'app";
+      mem.pending = { kind: "open", sig: txid, at: now, asset: A.asset, draft: {
+        key: A.asset, symbol: A.asset, side: sig.side, stop, best: price, initialRisk: dist, openedAt: now, stopCandle: closed, posParams: params, posInterval: iv, source,
+        collateralUsd: size.collateral, sizeUsd: size.notional,
+        why: `${sig.reason} · stratégie : ${source} · ${L.name.toLowerCase()}, risque ${(risk * 100).toFixed(1)} %, levier x${size.leverage.toFixed(1)}${mem.vault ? ` (coffre de ${mem.vault.toFixed(2)} $ exclu)` : ""}`,
+      } };
+      await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value,
+        last_message: `${sig.side === "long" ? "Long" : "Short"} ${A.asset} demandé (${L.name.toLowerCase()}) : ${size.collateral.toFixed(2)} $ x${size.leverage.toFixed(1)}, risque ${(risk * 100).toFixed(1)} %, stop ${stop.toFixed(2)} $ (${sig.reason}).` });
+      return "open";
     }
-    // 5. Pas de position : apprentissage quotidien, puis analyse de chaque nouvelle bougie.
-    if (cfg.autopilot && !plan) {
-      await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || "Pilote automatique : j'attends que le chercheur valide une stratégie perps." });
-      return "hold";
-    }
-    const today = dayKey(now);
-    if (!plan && brain.optimized?.[ASSET.asset] !== today) {
-      const hist = await hourlyCandles(ASSET.candles, 1440, now).catch(() => null);
-      if (hist && hist.length > 500) optimize(brain, ASSET.asset, hist, { allowShort: true, feePct: PERPS_COST, hourlyCost: BORROW_PER_HOUR, leverageCap: maxLev }, today);
-      else brain.optimized = { ...brain.optimized, [ASSET.asset]: today };
-    }
-    // Mode agressif : il trade même quand aucun réglage n'a été validé sur 60 jours, mais respecte toujours la perte max du jour
-    // et la mise sur le banc après une série de pertes.
-    const benched = aggressive || cfg.trend || plan ? (brain.benched[ASSET.asset] ?? 0) > now : isBenched(brain, ASSET.asset, now);
-    const blocked = riskGate(mem, value, now, L.dailyLoss)
-      ?? (benched ? ((!aggressive && !plan && brain.disabled[ASSET.asset]) || `${ASSET.asset} sur le banc après une série difficile`) : null);
-    if (blocked || mem.lastCandle === closed) {
-      mem.mindset = mindset(brain, { inPosition: false, blocked, goalPct: (value / Number(bot.goal_usd)) * 100 });
-      await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || blocked || mem.signal || "En attente de la prochaine bougie." });
-      return "hold";
-    }
-    mem.lastCandle = closed;
-    const candles = await getCandles(ASSET.candles, iv, 400, now);
-    const sig = trendSignal(candles, sideMult(cfg.bias, "short") > 0, params);
-    mem.signal = `${ASSET.asset} : ${sig.reason}`;
-    const mult = sig.side ? sideMult(cfg.bias, sig.side) : 0;
-    if (sig.side && mult === 0) {
-      await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || `Signal ${sig.side} ignoré : les ${sig.side === "long" ? "longs" : "shorts"} sont désactivés par ta barre longs/shorts.` });
-      return "hold";
-    }
-    if (!sig.side) {
-      mem.mindset = mindset(brain, { inPosition: false, blocked: null, goalPct: (value / Number(bot.goal_usd)) * 100 });
-      await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || `Pas d'entrée : ${sig.reason}.` });
-      return "hold";
-    }
-    // le stop reste à la même distance que sur la bougie, recalé sur le prix réel
-    const dist = Math.abs(sig.price - sig.stop);
-    const stop = sig.side === "long" ? price - dist : price + dist;
-    const baseRisk = Math.min(L.maxRisk, riskPerTrade(brain) * L.riskMult);
-    const confidence = plan ? riskFactor(plan.confidence) : 1; // stratégie du chercheur pas encore confirmée en réel : 75 % du risque
-    const size = perpsSizing(value, b.usdc, price, stop, baseRisk * mult * confidence, maxLev);
-    if (!size) {
-      await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: `Signal ${sig.side} mais capital insuffisant pour respecter le risque (min ${PERPS_RULES.minCollateralUsd} $ de collatéral).` });
-      return "hold";
-    }
-    const txid = await perpsOpen({ wallet: address, asset: ASSET.asset, side: sig.side, usdcRaw: BigInt(Math.floor(size.collateral * 1e6)),
-      leverage: size.leverage, stop, slippageBps: PERPS_RULES.slippageBps }, keyPair);
-    Object.assign(mem, { pending: { kind: "open", sig: txid, at: now }, stop, best: price, initialRisk: dist, openedAt: now, openValueUsd: value, side: sig.side, asset: ASSET.asset, stopCandle: closed,
-      posParams: params, posInterval: iv, source: plan?.source ?? cfg.source ?? "réglages de l'app" });
-    await save(admin, bot, mem, { ...patch, last_value_usd: value,
-      last_message: `${sig.side === "long" ? "Long" : "Short"} ${ASSET.asset} demandé (${L.name.toLowerCase()}) : ${size.collateral.toFixed(2)} $ x${size.leverage.toFixed(1)}, risque ${(baseRisk * mult * confidence * 100).toFixed(1)} %, stop ${stop.toFixed(2)} $ (${sig.reason}).` });
-    return "open";
+    if (notes.length) mem.signal = notes.join(" · ");
+    return await hold(notes.length ? `Pas d'entrée : ${notes.join(" · ")}.` : mem.signal || "En attente de la prochaine bougie.");
   } catch (e) {
-    await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: `Erreur : ${(e as Error).message}`.slice(0, 300) + " — je réessaie au prochain tick." });
+    await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value, last_message: `Erreur : ${(e as Error).message}`.slice(0, 300) + " — je réessaie au prochain tick." });
     return "error";
   }
 }
 
-/** PnL RÉEL = valeur du portefeuille maintenant − valeur juste avant l'ouverture (frais et portage inclus). */
-async function recordClose(admin: Admin, bot: PerpsRow, mem: Memory, patch: Partial<PerpsRow>, value: number, price: number, reason: string, sig: string | null, asset: string) {
-  const before = mem.openValueUsd ?? value;
-  const pnl = value - before;
-  const pnlPct = before > 0 ? (pnl / before) * 100 : 0;
-  admin.addTrade("perps", { action: "close", asset: bot.position_asset ?? asset, side: bot.position_side, collateral_usd: value, price, pnl_usd: pnl, reason, signature: sig, source: mem.source });
-  const brain = mem.brain ?? newBrain(value);
-  learn(brain, asset, pnlPct, value, Date.now());
+/** PnL d'une position = USDC revenus − collatéral déposé (frais et portage inclus). Une part du gain va au coffre. */
+function recordClose(admin: Admin, mem: Memory, cfg: PerpsConfig, asset: string, value: number, proceeds: number, reason: string, sig: string | null) {
+  const p = mem.positions?.[asset];
+  const collateral = p?.collateralUsd ?? proceeds;
+  const pnl = proceeds - collateral;
+  const pnlPct = value > 0 ? (pnl / value) * 100 : 0;
+  mem.vault = addToVault(mem.vault, pnl, cfg.vaultPct);
+  admin.addTrade("perps", { action: "close", asset, side: p?.side, collateral_usd: proceeds, price: p?.live?.price, pnl_usd: pnl, reason, signature: sig, source: p?.source,
+    detail: { pourquoi: label(reason), entree: p?.entry, stop: p?.stop, strategie: p?.source, duree_h: p?.openedAt ? Math.round((Date.now() - p.openedAt) / 360_000) / 10 : null, entree_pourquoi: p?.why, coffre: mem.vault } });
+  learn(mem.brain ?? newBrain(value), asset, pnlPct, value, Date.now());
   if (pnl < 0) mem.cooldownUntil = Date.now() + RISK.cooldownAfterLossMs;
-  clearPosition(mem);
-  Object.assign(patch, { position_pubkey: null, position_asset: null, position_side: null, entry_price: null });
-  return `Position fermée (${label(reason)}) : ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ (${pnlPct.toFixed(1)} % du capital).`;
+  if (mem.positions) delete mem.positions[asset];
+  return `Position ${asset} fermée (${label(reason)}) : ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ (${pnlPct.toFixed(1)} % du capital).${pnl > 0 && cfg.vaultPct ? ` ${cfg.vaultPct} % du gain mis au coffre.` : ""}`;
 }
 
 export async function liquidatePerps(admin: Admin, bot: PerpsRow, outcome: "success" | "destroyed" | "stopped", message: string) {
   const { address, keyPair } = await loadKeyPairFrom(WALLET_ENV);
-  const positions = await perpsPositions(address);
+  const real = await perpsPositions(address);
+  const mem = loadMemory(bot.price_history);
+  const mine = migratePositions(mem, bot);
   const failures: string[] = [];
-  for (const p of positions) {
+  for (const p of real) {
     try {
       const sig = await perpsClose(p.pubkey, PERPS_RULES.slippageBps * 2, keyPair);
-      admin.addTrade("perps", { action: "close", asset: p.asset, side: p.side, collateral_usd: p.valueUsd, reason: outcome, signature: sig });
+      const pnl = mine[p.asset]?.collateralUsd != null ? p.valueUsd - mine[p.asset]!.collateralUsd! : undefined;
+      admin.addTrade("perps", { action: "close", asset: p.asset, side: p.side, collateral_usd: p.valueUsd, pnl_usd: pnl, reason: outcome, signature: sig, source: mine[p.asset]?.source, detail: { pourquoi: message } });
+      delete mine[p.asset];
     } catch (e) { failures.push((e as Error).message); }
   }
-  const mem = loadMemory(bot.price_history);
-  clearPosition(mem);
   admin.update("perps", {
-    status: failures.length ? "running" : outcome, price_history: mem as never, last_tick_at: new Date().toISOString(),
+    status: failures.length ? "running" : outcome, price_history: mem as never, last_tick_at: new Date().toISOString(), ...mirror(mine),
     last_message: (failures.length ? `${message} Fermeture impossible (${failures.join(", ")}) : je garde la main.` : message).slice(0, 300),
-    ...(failures.length ? {} : { position_pubkey: null, position_asset: null, position_side: null, entry_price: null }),
   });
 }
 
-function clearPosition(mem: Memory) {
-  for (const k of ["stop", "best", "initialRisk", "openedAt", "openValueUsd", "asset", "side", "stopCandle", "live", "posParams", "posInterval", "source"] as const) delete mem[k];
+/** Colonnes « position » de la base = première position (pour l'app). */
+function mirror(mine: Record<string, Position>): Partial<PerpsRow> {
+  const p = Object.values(mine)[0];
+  return { position_pubkey: p?.pubkey ?? null, position_asset: p?.key ?? null, position_side: p?.side ?? null, entry_price: p?.entry ?? null };
 }
-async function save(admin: Admin, bot: PerpsRow, mem: Memory, fields: Partial<PerpsRow>) {
-  void bot;
+async function save(admin: Admin, mem: Memory, fields: Partial<PerpsRow>) {
   admin.update("perps", { price_history: mem, last_tick_at: new Date().toISOString(), ...fields });
 }
 function label(reason?: string) {

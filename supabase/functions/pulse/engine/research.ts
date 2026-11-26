@@ -22,7 +22,7 @@ export interface Candidate {
   params: Params | RsiParams;
 }
 
-export interface SegmentStats { trades: number; winRate: number; profitFactor: number; returnPct: number; maxDrawdownPct: number }
+export interface SegmentStats { trades: number; winRate: number; profitFactor: number; returnPct: number; maxDrawdownPct: number; meanPct?: number; sdPct?: number; luck?: number }
 export interface Evaluation { train: SegmentStats; test: SegmentStats; score: number; verdict: "prometteuse" | "à surveiller" | "rejetée"; why: string }
 
 const pick = <T>(rnd: () => number, list: readonly T[]): T => list[Math.floor(rnd() * list.length)]!;
@@ -102,9 +102,12 @@ function segment(log: BacktestResult["log"]): SegmentStats {
   for (const t of log) { eq *= 1 + t.pnlPct / 100; peak = Math.max(peak, eq); dd = Math.max(dd, 1 - eq / peak); }
   const wins = log.filter((t) => t.pnlPct > 0);
   const gw = wins.reduce((s, t) => s + t.pnlPct, 0), gl = -log.filter((t) => t.pnlPct <= 0).reduce((s, t) => s + t.pnlPct, 0);
+  const mean = log.length ? log.reduce((a, t) => a + t.pnlPct, 0) / log.length : 0;
+  const sd = log.length > 1 ? Math.sqrt(log.reduce((a, t) => a + (t.pnlPct - mean) ** 2, 0) / (log.length - 1)) : 0;
   return {
     trades: log.length, winRate: log.length ? (wins.length / log.length) * 100 : 0,
     profitFactor: gl > 0 ? gw / gl : gw > 0 ? 99 : 0, returnPct: (eq - 1) * 100, maxDrawdownPct: dd * 100,
+    meanPct: Math.round(mean * 10000) / 10000, sdPct: Math.round(sd * 10000) / 10000,
   };
 }
 

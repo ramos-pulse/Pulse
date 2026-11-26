@@ -179,3 +179,31 @@ export function propose(trainCandles: Candle[], m: Market, ins = analyze(trainCa
   }
   return out;
 }
+
+// ------------------------------------------------------------------------------------------------
+// CHANCE OU TALENT ?
+// Quand on teste des milliers de stratégies, certaines gagnent par pur hasard. Le mathématicien estime la
+// probabilité qu'une stratégie ait obtenu son résultat (sur la période jamais vue) juste par chance, en tenant
+// compte du nombre de stratégies déjà essayées sur ce marché (correction des tests multiples).
+// ------------------------------------------------------------------------------------------------
+/** Fonction de répartition de la loi normale (approximation d'Abramowitz-Stegun, précision 1e-7). */
+export function normCdf(x: number): number {
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const d = 0.3989422804014327 * Math.exp((-x * x) / 2);
+  const p = d * t * (0.31938153 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  return x >= 0 ? 1 - p : p;
+}
+/**
+ * Probabilité que le résultat soit de la chance.
+ * t = gain moyen par trade / (écart-type / √trades) : la force du résultat.
+ * Avec M essais indépendants, la meilleure stratégie au hasard dépasse t avec la probabilité 1 − Φ(t)^M.
+ * Les stratégies d'un même marché se ressemblent beaucoup : on compte ~1 essai indépendant pour 20 testés.
+ */
+export const LUCK = { correlated: 20, reject: 0.5, rejectAggressive: 0.8 };
+export function luckProbability(s: { trades: number; meanPct?: number; sdPct?: number }, tested: number): number | null {
+  if (s.meanPct == null || s.sdPct == null || s.trades < 2) return null;
+  if (s.meanPct <= 0) return 1;
+  const t = s.sdPct > 0 ? s.meanPct / (s.sdPct / Math.sqrt(s.trades)) : 10;
+  const m = Math.max(1, tested / LUCK.correlated);
+  return Math.round((1 - Math.pow(normCdf(t), m)) * 1000) / 1000;
+}
