@@ -389,6 +389,22 @@ function strategyCard() {
 let AG = null, AGS = null, CHAT = [], AG_BUSY = false, SW_BUSY = false;
 try { CHAT = JSON.parse(localStorage.getItem("pulse_chat") || "[]"); } catch (e) {}
 async function loadAg() { try { [AG, AGS] = await Promise.all([api("/api/research"), api("/api/agents")]); } catch (e) {} if (PAGE === "ag") renderAg(); }
+function mathCard() {
+  const m = AGS?.math; if (!m) return "";
+  const pct = x => x == null ? "—" : `${nf(x, 1)} %`;
+  const reg = { "tendance": ["ok", "Tendance"], "retour à la moyenne": ["mid", "Retour à la moyenne"], "hasard": ["", "Hasard"] };
+  const rows = m.insights.map(x => { const [c, label] = reg[x.regime] || ["", x.regime];
+    return `<div class="row"><div><div class="l1">${esc(x.market)} <span class="mut" style="font-weight:400">${x.interval === "15m" ? "15 min" : "1 h"}</span></div>
+      <div class="l2">Hurst ${nf(x.hurst)}${x.half_life ? ` · demi-vie ${nf(x.half_life, 0)} bougies` : ""}${x.significant ? " · effet significatif" : ""}</div></div>
+      <div class="r"><span class="pill ${c}">${label}</span></div></div>`; }).join("");
+  return `<div class="eyebrow">Agent mathématicien</div><div class="card">
+    <div class="status run"><span class="dot ok"></span>Analyse les marchés à chaque cycle</div>
+    <p class="sub" style="margin:10px 0 0">Il mesure chaque marché avec des outils statistiques (ratio de variance de Lo-MacKinlay, exposant de Hurst, demi-vie du retour à la moyenne) pour savoir si les mouvements se prolongent, se corrigent, ou relèvent du hasard. Il en déduit des réglages et les propose au chercheur, qui les teste sur la période jamais vue comme les autres. Un marché « hasard » n'a pas d'avantage exploitable.</p>
+    <div class="grid"><div><div class="k">Ses idées validées</div><div class="v">${pct(m.stats.math.rate)}</div><div class="l2">${m.stats.math.promising} / ${m.stats.math.tested}</div></div>
+      <div><div class="k">Idées du chercheur</div><div class="v">${pct(m.stats.chercheur.rate)}</div><div class="l2">${m.stats.chercheur.promising} / ${m.stats.chercheur.tested}</div></div></div>
+    ${rows ? `<div class="sep"></div>${rows}` : `<p class="sub" style="margin:10px 0 0">Première analyse dans les 5 minutes.</p>`}
+  </div>`;
+}
 function swapCard() {
   const w = AGS?.swap; if (!w) return "";
   const line = r => `<div class="row"><div><div class="l1">${r.action === "vente" ? "VENTE" : "RÉCUP"} <span class="mut" style="font-weight:400">${r.wallet === "spot" ? "spot" : "perps"}</span></div><div class="l2">${esc(r.detail)}</div></div>
@@ -422,6 +438,7 @@ function renderAg() {
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div class="l1">#${r.id} · ${esc(r.market)}</div>
         <span class="pill ${r.verdict === "déçue en réel" ? "live" : r.verdict === "prometteuse" ? "ok" : "mid"}">${r.live?.confirmed ? "★ confirmée en réel" : r.qualifies ? "✓ pilote" : esc(r.verdict)}</span></div>
       <div class="l2" style="margin-top:6px;line-height:1.5">${esc(r.description)}</div>
+      ${r.origin === "mathématicien" ? `<p class="sub" style="margin:8px 0 0;font-size:13px"><b>∑ Proposée par le mathématicien :</b> ${esc(r.rationale || "")}</p>` : ""}
       <div class="grid" style="margin-top:14px">
         <div><div class="k">Période jamais vue</div><div class="v ${cl(r.test.returnPct)}">${sg(r.test.returnPct, 1)} %</div></div>
         <div><div class="k">PF jamais vue · trades</div><div class="v">${nf(r.test.profitFactor)} · ${r.test.trades}</div></div>
@@ -431,7 +448,7 @@ function renderAg() {
       ${r.live ? `<div class="sep"></div><div class="k">En réel (trades des bots)</div><div class="v ${cl(r.live.pnlUsd)}" style="font-size:15px">${r.live.trades} trades · ${sg(r.live.pnlUsd)} $ · PF ${nf(r.live.profitFactor)}</div>` : ""}
       ${r.verdict === "déçue en réel" ? `<p class="sub" style="margin:8px 0 0">${esc(r.why)}</p>` : ""}
       <button class="btn sm" style="width:100%;margin-top:14px" data-apply="${r.id}" data-desc="${esc(r.description)}" data-kind="${r.kind}">${r.kind === "spot" ? "Ajouter au bot spot" : "Appliquer au bot perps"}</button></div>`).join("");
-  el.innerHTML = `${swapCard()}<div class="eyebrow">Le Chercheur</div>
+  el.innerHTML = `${mathCard()}${swapCard()}<div class="eyebrow">Le Chercheur</div>
     <div class="card"><div class="status run"><span class="dot ok"></span>Recherche en continu</div>
       <div class="big" style="font-size:40px">${AG ? nf(AG.tested, 0) : "…"}<small>stratégies testées</small></div>
       <div class="sub">Toutes les 5 minutes, il invente et teste de nouvelles stratégies, puis les juge sur 30 jours qu'il n'a jamais vus.${AG?.lastAt ? ` Dernière recherche il y a ${ago(AG.lastAt)}.` : ""}</div>

@@ -13,6 +13,7 @@ import { AGGRESSIVE, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsCon
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, type BotKind, type BotState } from "./store.ts";
 import { cleanWallet, CLEANER } from "./engine/cleaner.ts";
+import { analyze, propose } from "./engine/math.ts";
 
 const SUPABASE_URL = env("SUPABASE_URL") ?? "";
 
@@ -168,7 +169,7 @@ async function backtestMarket(i: number) {
 
 // ------------------------------------------------------------------ agent chercheur
 type LiveStats = { trades: number; wins: number; pnlUsd: number; profitFactor: number; confirmed: boolean; failed: boolean; lastAt: string };
-type ResearchRow = { id: number; created_at: string; market: string; product: string; symbol?: string | null; interval?: string | null; kind: "spot" | "perps"; family: "tendance" | "rsi"; params: Candidate["params"]; train: Record<string, number>; test: Record<string, number>; score: number; verdict: string; why: string; live?: LiveStats | null };
+type ResearchRow = { id: number; created_at: string; market: string; product: string; symbol?: string | null; interval?: string | null; kind: "spot" | "perps"; family: "tendance" | "rsi"; params: Candidate["params"]; train: Record<string, number>; test: Record<string, number>; score: number; verdict: string; why: string; live?: LiveStats | null; origin?: string | null; rationale?: string | null };
 
 // ------------------------------------------------------------------ apprentissage croisé : le chercheur apprend des vrais trades des bots
 const LIVE = { minTrades: 4, failPF: 0.8, confirmPF: 1.2, boost: 1.3, days: 45 };
@@ -237,6 +238,19 @@ async function runResearch() {
   const rnd = seeded(cycle * 7919 + Date.now() % 1000);
   const rows = [];
   const t0 = performance.now();
+  // 1. le mathématicien analyse la partie entraînement (jamais la période de validation) et propose ses stratégies en premier
+  const train = candles.slice(0, Math.floor(candles.length * 2 / 3));
+  const insight = analyze(train);
+  let proposed = 0;
+  for (const pr of propose(train, m, insight)) {
+    const key = candidateKey(pr.candidate);
+    if (seen.has(key)) continue;
+    seen.add(key); proposed++;
+    const e = evaluate(pr.candidate, candles, m);
+    rows.push({ key, market: pr.candidate.market, product: pr.candidate.product, symbol: pr.candidate.symbol, interval: pr.candidate.interval, kind: pr.candidate.kind, family: pr.candidate.family, params: pr.candidate.params, train: e.train, test: e.test, score: e.score, verdict: e.verdict, why: e.why, origin: "mathématicien", rationale: pr.rationale });
+  }
+  await db.from("math_insights").upsert({ key: `${m.product}|${m.kind}|${m.interval}`, updated_at: new Date().toISOString(), market: m.name, kind: m.kind, interval: m.interval, regime: insight.regime, hurst: insight.hurst, ac1: insight.ac1, half_life: insight.halfLife, significant: insight.significant, vr: insight.vr, note: insight.note, proposed }, { onConflict: "key" });
+  // 2. le chercheur : moitié améliorations des meilleures (y compris celles du mathématicien), moitié idées nouvelles
   let tries = 0;
   while (rows.length < RESEARCH_MAX && performance.now() - t0 < RESEARCH_BUDGET_MS && tries < RESEARCH_MAX * 5) {
     tries++;
@@ -246,7 +260,7 @@ async function runResearch() {
     if (seen.has(key)) continue;
     seen.add(key);
     const e = evaluate(c, candles, m);
-    rows.push({ key, market: c.market, product: c.product, symbol: c.symbol, interval: c.interval, kind: c.kind, family: c.family, params: c.params, train: e.train, test: e.test, score: e.score, verdict: e.verdict, why: e.why });
+    rows.push({ key, market: c.market, product: c.product, symbol: c.symbol, interval: c.interval, kind: c.kind, family: c.family, params: c.params, train: e.train, test: e.test, score: e.score, verdict: e.verdict, why: e.why, origin: "chercheur", rationale: null });
   }
   if (rows.length) {
     const { error } = await db.from("research").upsert(rows, { onConflict: "key", ignoreDuplicates: true });
@@ -256,7 +270,8 @@ async function runResearch() {
   await db.from("research").delete().eq("verdict", "rejetée").lt("created_at", new Date(Date.now() - 3 * 86_400_000).toISOString());
   const learned = await learnFromBots().catch(() => [] as string[]);
   const pilot = await autopilot().catch((e) => `pilote : ${(e as Error).message}`);
-  return { market: m.name, tested: rows.length, promising: rows.filter((r) => r.verdict === "prometteuse").length, learned, pilot };
+  const math = rows.filter((r) => r.origin === "mathématicien");
+  return { market: m.name, tested: rows.length, promising: rows.filter((r) => r.verdict === "prometteuse").length, math: { regime: insight.regime, proposed: math.length, promising: math.filter((r) => r.verdict === "prometteuse").length }, learned, pilot };
 }
 
 // ------------------------------------------------------------------ pilote automatique
@@ -382,10 +397,25 @@ async function swapAgentDue(): Promise<boolean> {
   return !last || Date.now() - Date.parse(last) > SWAP_EVERY_MS;
 }
 
+async function mathBoard() {
+  const count = async (origin: string, verdict?: string) => {
+    let q = db.from("research").select("id", { count: "exact", head: true }).eq("origin", origin);
+    if (verdict) q = q.eq("verdict", verdict);
+    return (await q).count ?? 0;
+  };
+  const [{ data: insights }, mT, mP, cT, cP] = await Promise.all([
+    db.from("math_insights").select("*").order("updated_at", { ascending: false }).limit(40),
+    count("mathématicien"), count("mathématicien", "prometteuse"), count("chercheur"), count("chercheur", "prometteuse"),
+  ]);
+  const rate = (p: number, t: number) => (t ? Math.round((p / t) * 1000) / 10 : null);
+  // comparaison honnête : les idées du mathématicien réussissent-elles plus souvent que les idées au hasard ?
+  return { insights: insights ?? [], stats: { math: { tested: mT, promising: mP, rate: rate(mP, mT) }, chercheur: { tested: cT, promising: cP, rate: rate(cP, cT) } } };
+}
+
 async function agentsBoard() {
-  const [{ data: log }, bots] = await Promise.all([
+  const [{ data: log }, bots, math] = await Promise.all([
     db.from("agent_log").select("*").eq("agent", "swap").order("created_at", { ascending: false }).limit(40),
-    readBots(),
+    readBots(), mathBoard(),
   ]);
   const rows = (log ?? []) as { created_at: string; action: string; sol?: number | null; usd?: number | null }[];
   const lastRun = rows.find((r) => r.action === "passage")?.created_at ?? null;
@@ -395,6 +425,7 @@ async function agentsBoard() {
       totals: { sol: rows.filter((r) => r.action === "fermeture").reduce((a, r) => a + (r.sol ?? 0), 0), usd: rows.filter((r) => r.action === "vente").reduce((a, r) => a + (r.usd ?? 0), 0) },
       rules: CLEANER, log: rows.filter((r) => r.action !== "passage").slice(0, 15), runs: rows.filter((r) => r.action === "passage").slice(0, 5),
     },
+    math,
   };
 }
 
@@ -406,7 +437,8 @@ async function agentChat(messages: { role: string; content: string }[]) {
   const context = {
     date: new Date().toISOString(),
     bots: Object.fromEntries(Object.entries(bots).map(([k, b]) => [k, { statut: b.status, valeur_usd: b.last_value_usd, derniere_action: b.last_message, pensee: b.memory?.mindset, analyse: b.memory?.signal, reglages: b.config }])),
-    recherche: { strategies_testees: board.tested, meilleures: board.best.slice(0, 8).map((r) => ({ id: r.id, marche: r.market, type: r.family, description: r.description, verdict: r.verdict, entrainement: r.train, validation_jamais_vue: r.test, resultats_reels: r.live ?? "pas encore tradée", score: r.score })) },
+    recherche: { strategies_testees: board.tested, meilleures: board.best.slice(0, 8).map((r) => ({ id: r.id, marche: r.market, type: r.family, description: r.description, verdict: r.verdict, entrainement: r.train, validation_jamais_vue: r.test, resultats_reels: r.live ?? "pas encore tradée", score: r.score, origine: r.origin ?? "chercheur", justification_mathematique: r.rationale ?? undefined })) },
+    mathematicien: await mathBoard().then((m) => ({ taux_de_reussite: m.stats, analyses: m.insights.slice(0, 16).map((x: Record<string, unknown>) => ({ marche: x.market, intervalle: x.interval, regime: x.regime, hurst: x.hurst, demi_vie: x.half_life, significatif: x.significant, conclusion: x.note })) })).catch(() => "indisponible"),
   };
   const key = env("ANTHROPIC_API_KEY");
   if (!key) {
@@ -426,6 +458,7 @@ Règles :
 - Tu ne modifies rien pendant la discussion : pour appliquer une stratégie à la main, l'utilisateur touche « Appliquer » sur la stratégie #id, ou active le pilote automatique.
 - Le scalping est testé en bougies de 15 minutes, frais inclus ; dis-le clairement quand une stratégie 15 min est retenue ou rejetée.
 - Tu apprends des vrais trades des bots (resultats_reels) : une stratégie qui perd en réel après 4 trades est déclassée « déçue en réel », une qui gagne est « confirmée » et prioritaire. Une stratégie nouvelle est tradée avec 75 % du risque normal tant qu'elle n'est pas confirmée. Les résultats réels comptent plus que les simulations.
+- Tu travailles avec l'agent mathématicien (donnees.mathematicien) : sur la partie entraînement de l'historique seulement, il mesure le ratio de variance de Lo-MacKinlay (test z, significatif si |z| > 1,96), l'exposant de Hurst, l'autocorrélation et la demi-vie du retour à la moyenne, en déduit le régime du marché (tendance, retour à la moyenne, ou hasard) et des réglages, puis te les propose. Tu testes ses propositions comme les tiennes, sur la période jamais vue. Explique ses conclusions simplement quand on te le demande, et sois honnête : un marché « hasard » n'a pas d'avantage exploitable, et son taux de réussite comparé au tien dit si ses maths aident vraiment.
 - Tu ne donnes pas de conseil d'investissement personnalisé ; rappelle de ne risquer que ce qu'on accepte de perdre si on te demande combien investir.
 - Le mode agressif du bot perps double le risque et monte le levier jusqu'à x5 : signale-le si c'est pertinent.
 Données actuelles (JSON) :
