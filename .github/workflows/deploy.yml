@@ -41,7 +41,7 @@ jobs:
         # selon la version de l'outil Supabase, l'option s'appelle --remote ou --linked
         run: supabase db push --remote --password "$SUPABASE_DB_PASSWORD" --yes || supabase db push --linked --password "$SUPABASE_DB_PASSWORD" --yes
       - name: Fonction des bots
-        run: supabase functions deploy pulse --project-ref "$PROJECT_REF" --no-verify-jwt
+        run: supabase functions deploy pulse --no-verify-jwt --yes
 
   app-build:
     name: App mobile (préparation)
