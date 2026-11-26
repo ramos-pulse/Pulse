@@ -42,8 +42,13 @@ export const INTERVAL_MS: Record<Interval, number> = { "1h": 3_600_000, "15m": 9
 export const asInterval = (v: unknown): Interval => (v === "15m" ? "15m" : "1h");
 
 /** Un « plan » choisi par le chercheur : quel token, quelle stratégie, quels réglages, quelle unité de temps. */
-export interface SpotPlan { symbol: string; family: "tendance" | "rsi"; params: Params | RsiParams; interval: Interval; source: string; score: number }
-export interface PerpsPlan { asset: string; params: Params; interval: Interval; source: string; score: number }
+export type Confidence = "nouvelle" | "confirmée";
+export interface SpotPlan { symbol: string; family: "tendance" | "rsi"; params: Params | RsiParams; interval: Interval; source: string; score: number; confidence: Confidence }
+export interface PerpsPlan { asset: string; params: Params; interval: Interval; source: string; score: number; confidence: Confidence }
+/** Les bots apprennent du chercheur : une stratégie pas encore confirmée en réel est tradée avec 75 % du risque normal. */
+export const PROBATION_RISK = 0.75;
+export const riskFactor = (c: Confidence | undefined) => (c === "confirmée" ? 1 : PROBATION_RISK);
+const asConfidence = (v: unknown): Confidence => (v === "confirmée" ? "confirmée" : "nouvelle");
 
 export interface Params { breakout: number; trailAtr: number; minTrend: number }
 /** Jeux de paramètres testés chaque jour par le cerveau du bot (peu nombreux pour éviter la sur-optimisation). */
@@ -237,7 +242,7 @@ export function sanitizePerpsPlan(raw: unknown): PerpsPlan | null {
   if (!PERPS_ASSETS.some((a) => a.asset === x.asset)) return null;
   const params = sanitizeTrend(x.params);
   if (!params) return null;
-  return { asset: String(x.asset), params, interval: asInterval(x.interval), source: String(x.source ?? "").slice(0, 120), score: Number(x.score) || 0 };
+  return { asset: String(x.asset), params, interval: asInterval(x.interval), source: String(x.source ?? "").slice(0, 120), score: Number(x.score) || 0, confidence: asConfidence(x.confidence) };
 }
 
 /** Part de la taille normale accordée à un côté (1 = 100 %, 0 = côté désactivé). Le côté favorisé garde 100 %. */
@@ -264,6 +269,7 @@ export interface Memory {
   posParams?: Params | RsiParams; // réglages exacts de la position en cours (venant d'un plan du chercheur)
   posInterval?: Interval;   // unité de temps de la position en cours
   seen?: Record<string, number>; // dernière bougie analysée par plan (« SOL|15m » → horodatage)
+  source?: string;          // stratégie qui a ouvert la position (« chercheur #123 · Spot WIF » ou « réglages de l'app »)
   openedAt?: number;
   costUsd?: number;         // spot : USDC réellement dépensés (frais compris)
   openValueUsd?: number;    // perps : valeur du portefeuille juste avant l'ouverture
@@ -405,7 +411,7 @@ export const RSI_DEFAULTS: RsiParams = { rsiPeriod: 14, entry: 30, exit: 50, sma
 export const NAIVE_EXIT = 70;
 
 export type SpotStrategy = "tendance" | "rsi";
-export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams; trend: Params | null; source?: string; autopilot: boolean; plans: SpotPlan[] }
+export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams; trend: Params | null; source?: string; autopilot: boolean; plans: SpotPlan[]; swapAuto: boolean }
 
 /** Réglages de tendance personnalisés (appliqués depuis le chercheur) ; null = le cerveau choisit chaque jour. */
 export function sanitizeTrend(t: unknown): Params | null {
@@ -439,7 +445,7 @@ export function sanitizeRsi(p: Partial<RsiParams> | null | undefined): RsiParams
 export function loadConfig(raw: unknown): SpotConfig {
   const o = (raw && typeof raw === "object" ? raw : {}) as Partial<SpotConfig>;
   return { strategy: o.strategy === "rsi" ? "rsi" : "tendance", rsi: sanitizeRsi(o.rsi), trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}),
-    autopilot: o.autopilot === true, plans: sanitizeSpotPlans(o.plans) };
+    autopilot: o.autopilot === true, plans: sanitizeSpotPlans(o.plans), swapAuto: o.swapAuto !== false };
 }
 
 const SYMBOLS = new Set<string>(TOKENS.map((t) => t.symbol));
@@ -452,7 +458,7 @@ export function sanitizeSpotPlans(raw: unknown): SpotPlan[] {
     const family = x.family === "rsi" ? "rsi" : "tendance";
     const params = family === "rsi" ? sanitizeRsi(x.params as Partial<RsiParams>) : sanitizeTrend(x.params);
     if (!params) continue;
-    out.push({ symbol: String(x.symbol), family, params, interval: asInterval(x.interval), source: String(x.source ?? "").slice(0, 120), score: Number(x.score) || 0 });
+    out.push({ symbol: String(x.symbol), family, params, interval: asInterval(x.interval), source: String(x.source ?? "").slice(0, 120), score: Number(x.score) || 0, confidence: asConfidence(x.confidence) });
   }
   return out;
 }

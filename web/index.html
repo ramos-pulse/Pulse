@@ -72,7 +72,7 @@ input{background:var(--bg);border:1px solid var(--line);color:var(--text);border
 .bubble.ai{background:var(--card2);border:1px solid var(--line);border-bottom-left-radius:5px}
 .chatbox{display:flex;gap:8px;margin-top:12px;align-items:flex-end}
 .chatbox textarea{flex:1;min-height:48px;max-height:140px;resize:none;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:14px;padding:12px;font:16px var(--sans)}
-.pill.ok{background:rgba(74,222,128,.15);color:var(--green)}.pill.mid{background:rgba(242,181,79,.14);color:var(--amber)}
+.pill.ok{background:rgba(74,222,128,.15);color:var(--green)}.pill.live{background:rgba(239,83,80,.15);color:var(--red)}.pill.mid{background:rgba(242,181,79,.14);color:var(--amber)}
 nav{position:fixed;left:0;right:0;bottom:0;z-index:20;background:rgba(8,16,12,.95);backdrop-filter:blur(14px);border-top:1px solid var(--line);display:grid;grid-template-columns:repeat(5,1fr);padding:8px 6px calc(8px + var(--sb))}
 nav button{display:flex;flex-direction:column;align-items:center;gap:3px;font:11px var(--mono);color:var(--muted);min-height:44px}
 nav svg{width:22px;height:22px}nav button.on{color:var(--lime)}
@@ -111,7 +111,7 @@ nav svg{width:22px;height:22px}nav button.on{color:var(--lime)}
     <button data-p="home" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12l9-8 9 8M5 10v10h14V10"/></svg>Missions</button>
     <button data-p="hist"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Historique</button>
     <button data-p="bt"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 20h18M6 16l4-5 4 3 5-7"/></svg>Backtest</button>
-    <button data-p="ag"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M8 11h6M11 8v6"/></svg>Chercheur</button>
+    <button data-p="ag"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M8 11h6M11 8v6"/></svg>Agents</button>
     <button data-p="set"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>Réglages</button>
   </nav>
 </div>
@@ -386,17 +386,33 @@ function strategyCard() {
 }
 
 // ---------------------------------------------------------------- agent chercheur
-let AG = null, CHAT = [], AG_BUSY = false;
+let AG = null, AGS = null, CHAT = [], AG_BUSY = false, SW_BUSY = false;
 try { CHAT = JSON.parse(localStorage.getItem("pulse_chat") || "[]"); } catch (e) {}
-async function loadAg() { try { AG = await api("/api/research"); } catch (e) {} if (PAGE === "ag") renderAg(); }
+async function loadAg() { try { [AG, AGS] = await Promise.all([api("/api/research"), api("/api/agents")]); } catch (e) {} if (PAGE === "ag") renderAg(); }
+function swapCard() {
+  const w = AGS?.swap; if (!w) return "";
+  const line = r => `<div class="row"><div><div class="l1">${r.action === "vente" ? "VENTE" : "RÉCUP"} <span class="mut" style="font-weight:400">${r.wallet === "spot" ? "spot" : "perps"}</span></div><div class="l2">${esc(r.detail)}</div></div>
+    <div class="r">${r.action === "vente" ? `${nf(r.usd)} $` : `+${nf(r.sol, 4)} SOL`}<div class="l2">${ago(r.created_at)}${r.signature ? ` · <a href="https://solscan.io/tx/${esc(r.signature)}" target="_blank" rel="noopener">tx ↗</a>` : ""}</div></div></div>`;
+  return `<div class="eyebrow">Agent swap</div><div class="card">
+    <div class="status ${w.auto ? "run" : "off"}"><span class="dot ${w.auto ? "ok" : ""}"></span>${w.auto ? "Nettoyage automatique" : "Automatique coupé"}</div>
+    <p class="sub" style="margin:10px 0 0">Comme le bouton « Reclaim » de Jupiter, mais tout seul, sur les wallets des bots : il revend les restes de tokens (au moins ${nf(w.rules.minSellUsd)} $) en USDC et ferme les comptes de tokens vides pour récupérer le SOL de caution. Il ne détruit jamais de tokens et ne touche ni à l'USDC ni aux positions en cours.</p>
+    <div class="grid"><div><div class="k">SOL récupéré</div><div class="v up">+${nf(w.totals.sol, 4)}</div></div><div><div class="k">Restes revendus</div><div class="v">${nf(w.totals.usd)} $</div></div>
+      <div><div class="k">Dernier passage</div><div class="v">${w.lastRun ? "il y a " + ago(w.lastRun) : "jamais"}</div></div><div><div class="k">Prochain</div><div class="v">${w.auto ? (w.nextRun ? new Date(w.nextRun).toLocaleString("fr-FR", {weekday: "short", hour: "2-digit", minute: "2-digit"}) : "dans 5 min") : "—"}</div></div></div>
+    <label class="field" style="margin-top:8px"><span>Une fois par jour, tout seul</span><input type="checkbox" data-swapauto="1" ${w.auto ? "checked" : ""} style="width:26px;height:26px"></label>
+    <button class="btn go sm" style="width:100%;margin-top:12px" id="swapRun">${SW_BUSY ? "Nettoyage en cours… (jusqu'à 2 min)" : "Nettoyer maintenant"}</button>
+    ${w.log.length ? `<div class="sep"></div>${w.log.map(line).join("")}` : ""}
+    ${w.runs[0] ? `<p class="sub" style="margin:10px 0 0;font-size:13px">Dernier passage : ${esc(w.runs[0].detail)}</p>` : ""}
+  </div>`;
+}
 function renderAg() {
   const el = $("#p-ag"); if (!el) return;
   const keepDraft = $("#chatIn")?.value || "";
   const sc = S?.bots.spot.config || {}, pc = S?.bots.perps.config || {};
-  const planLine = p => `<div class="row"><div><div class="l1">${esc(p.symbol || p.asset)} <span class="mut" style="font-weight:400">${p.interval === "15m" ? "scalping 15 min" : "1 h"}</span></div><div class="l2">${esc(p.source)}</div></div></div>`;
+  const planLine = p => `<div class="row"><div><div class="l1">${esc(p.symbol || p.asset)} <span class="mut" style="font-weight:400">${p.interval === "15m" ? "scalping 15 min" : "1 h"}</span></div><div class="l2">${esc(p.source)}</div></div>
+    <div class="r"><span class="pill ${p.confidence === "confirmée" ? "ok" : "mid"}">${p.confidence === "confirmée" ? "confirmée · 100 %" : "nouvelle · 75 %"}</span></div></div>`;
   const manual = (!sc.autopilot && sc.plans?.length) || (!pc.autopilot && pc.plan) || sc.source || pc.source;
   const pilot = `<div class="card"><div class="v txt" style="font-weight:600">Pilote automatique</div>
-      <p class="sub" style="margin:6px 0 4px">Il choisit lui-même tokens et stratégies parmi ses découvertes validées (≥ 5 trades, profit factor ≥ 1,3 et baisse ≤ 10 % sur la période jamais vue). En perps, toujours en mode normal.</p>
+      <p class="sub" style="margin:6px 0 4px">Il choisit lui-même tokens et stratégies parmi ses découvertes validées (≥ 5 trades, profit factor ≥ 1,3 et baisse ≤ 10 % sur la période jamais vue). En perps, toujours en mode normal. Il apprend des vrais trades : une stratégie nouvelle est tradée à 75 % du risque, puis à 100 % une fois confirmée en réel ; une stratégie qui perd en réel est abandonnée.</p>
       <label class="field"><span>Bot spot</span><input type="checkbox" data-pilot="spot" ${sc.autopilot ? "checked" : ""} style="width:26px;height:26px"></label>
       <label class="field"><span>Bot perps</span><input type="checkbox" data-pilot="perps" ${pc.autopilot ? "checked" : ""} style="width:26px;height:26px"></label>
       ${(sc.plans?.length || pc.plan) ? `<div class="k" style="margin-top:12px">Plans en cours</div>${(sc.plans || []).map(planLine).join("")}${pc.plan ? planLine(pc.plan) : ""}` : (sc.autopilot || pc.autopilot) ? `<p class="sub" style="margin:10px 0 0">Aucune stratégie ne passe encore les critères : les bots attendent.</p>` : ""}
@@ -404,7 +420,7 @@ function renderAg() {
     </div>`;
   const cards = (AG?.best || []).map(r => `<div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div class="l1">#${r.id} · ${esc(r.market)}</div>
-        <span class="pill ${r.verdict === "prometteuse" ? "ok" : "mid"}">${r.qualifies ? "✓ pilote" : esc(r.verdict)}</span></div>
+        <span class="pill ${r.verdict === "déçue en réel" ? "live" : r.verdict === "prometteuse" ? "ok" : "mid"}">${r.live?.confirmed ? "★ confirmée en réel" : r.qualifies ? "✓ pilote" : esc(r.verdict)}</span></div>
       <div class="l2" style="margin-top:6px;line-height:1.5">${esc(r.description)}</div>
       <div class="grid" style="margin-top:14px">
         <div><div class="k">Période jamais vue</div><div class="v ${cl(r.test.returnPct)}">${sg(r.test.returnPct, 1)} %</div></div>
@@ -412,8 +428,10 @@ function renderAg() {
         <div><div class="k">Entraînement (PF)</div><div class="v">${nf(r.train.profitFactor)}</div></div>
         <div><div class="k">Pire baisse</div><div class="v">${nf(r.test.maxDrawdownPct, 1)} %</div></div>
       </div>
+      ${r.live ? `<div class="sep"></div><div class="k">En réel (trades des bots)</div><div class="v ${cl(r.live.pnlUsd)}" style="font-size:15px">${r.live.trades} trades · ${sg(r.live.pnlUsd)} $ · PF ${nf(r.live.profitFactor)}</div>` : ""}
+      ${r.verdict === "déçue en réel" ? `<p class="sub" style="margin:8px 0 0">${esc(r.why)}</p>` : ""}
       <button class="btn sm" style="width:100%;margin-top:14px" data-apply="${r.id}" data-desc="${esc(r.description)}" data-kind="${r.kind}">${r.kind === "spot" ? "Ajouter au bot spot" : "Appliquer au bot perps"}</button></div>`).join("");
-  el.innerHTML = `<div class="eyebrow">Le Chercheur</div>
+  el.innerHTML = `${swapCard()}<div class="eyebrow">Le Chercheur</div>
     <div class="card"><div class="status run"><span class="dot ok"></span>Recherche en continu</div>
       <div class="big" style="font-size:40px">${AG ? nf(AG.tested, 0) : "…"}<small>stratégies testées</small></div>
       <div class="sub">Toutes les 5 minutes, il invente et teste de nouvelles stratégies, puis les juge sur 30 jours qu'il n'a jamais vus.${AG?.lastAt ? ` Dernière recherche il y a ${ago(AG.lastAt)}.` : ""}</div>
@@ -445,6 +463,11 @@ document.addEventListener("click", async e => {
   if (t.dataset.copy) { try { await navigator.clipboard.writeText(t.dataset.copy); toast("Adresse copiée"); } catch (err) { toast("Copie impossible"); } return; }
   if (t.dataset.hf) { HF = t.dataset.hf; renderHist(); return; }
   if (t.id === "chatSend") return sendChat();
+  if (t.id === "swapRun") { if (SW_BUSY) return; SW_BUSY = true; renderAg();
+    try { const r = await api("/api/agents/swap/run", {method: "POST"});
+      const txt = ["spot", "perps"].map(k => typeof r[k] === "string" ? `${k} : ${r[k]}` : `${k} : ${r[k].vendus} vente(s), ${r[k].comptesFermes} compte(s) fermé(s), +${nf(r[k].solRecupere, 4)} SOL`).join(" · ");
+      toast(txt); } catch (e) {}
+    SW_BUSY = false; await loadAg(); return; }
   if (t.id === "chatClear") { CHAT = []; try { localStorage.removeItem("pulse_chat"); } catch (e) {} renderAg(); return; }
   if (t.id === "agRun") { if (AG_BUSY) return; AG_BUSY = true; renderAg();
     try { const r = await api("/api/research/run", {method: "POST"}); toast(`${r.tested} stratégies testées sur ${r.market}`); } catch (e) {}
@@ -500,6 +523,7 @@ document.addEventListener("click", async e => {
 });
 
 document.addEventListener("change", async e => {
+  if (e.target.dataset?.swapauto) { await api("/api/agents/swap/auto", {method: "POST", body: JSON.stringify({on: e.target.checked})}); toast(e.target.checked ? "Nettoyage automatique activé" : "Nettoyage automatique coupé"); return loadAg(); }
   const k = e.target.dataset?.pilot; if (!k) return;
   const on = e.target.checked;
   try { const r = await api("/api/autopilot", {method: "POST", body: JSON.stringify({[k]: on})});

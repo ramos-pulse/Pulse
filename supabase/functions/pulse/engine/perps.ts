@@ -6,7 +6,7 @@ import { candles as getCandles, hourlyCandles, lastClosedCandle } from "./candle
 import { perpsClose, perpsOpen, perpsPositions, perpsPrice, type PerpPosition } from "./jupiter.ts";
 import { getBalances, loadKeyPairFrom, type Balances } from "./solana.ts";
 import {
-  AGGRESSIVE, atr, dayKey, exitCheck, loadMemory, loadPerpsConfig, missionEnd, PERPS_ASSETS, PERPS_RULES, perpsChange, perpsSizing, PRESETS, RISK, sideMult,
+  AGGRESSIVE, atr, dayKey, exitCheck, loadMemory, loadPerpsConfig, missionEnd, PERPS_ASSETS, PERPS_RULES, perpsChange, perpsSizing, PRESETS, RISK, riskFactor, sideMult,
   riskGate, RULES, trailStop, trendSignal, DEFAULT_PARAMS, type Interval, type Memory, type Params,
 } from "./strategy.ts";
 
@@ -76,7 +76,7 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
         Object.assign(patch, { position_pubkey: open.pubkey, position_asset: open.asset, position_side: open.side, entry_price: open.entryPrice });
         mem.initialRisk = Math.abs(open.entryPrice - (mem.stop ?? open.entryPrice));
         mem.best = open.entryPrice;
-        admin.addTrade("perps", { action: "open", asset: open.asset, side: open.side, collateral_usd: open.valueUsd, price: open.entryPrice, reason: mem.signal ?? "tendance", signature: mem.pending.sig });
+        admin.addTrade("perps", { action: "open", asset: open.asset, side: open.side, collateral_usd: open.valueUsd, price: open.entryPrice, reason: mem.signal ?? "tendance", signature: mem.pending.sig, source: mem.source });
         message = `${open.side === "long" ? "Long" : "Short"} ${open.asset} ouvert à ${open.entryPrice.toFixed(2)} $, stop ${mem.stop?.toFixed(2)} $.`;
         mem.pending = undefined;
       } else if (age > PENDING_MS) {
@@ -186,7 +186,8 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
     const dist = Math.abs(sig.price - sig.stop);
     const stop = sig.side === "long" ? price - dist : price + dist;
     const baseRisk = aggressive ? Math.min(AGGRESSIVE.maxRisk, riskPerTrade(brain) * AGGRESSIVE.riskMult) : riskPerTrade(brain);
-    const size = perpsSizing(value, b.usdc, price, stop, baseRisk * mult, maxLev);
+    const confidence = plan ? riskFactor(plan.confidence) : 1; // stratégie du chercheur pas encore confirmée en réel : 75 % du risque
+    const size = perpsSizing(value, b.usdc, price, stop, baseRisk * mult * confidence, maxLev);
     if (!size) {
       await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: `Signal ${sig.side} mais capital insuffisant pour respecter le risque (min ${PERPS_RULES.minCollateralUsd} $ de collatéral).` });
       return "hold";
@@ -194,9 +195,9 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
     const txid = await perpsOpen({ wallet: address, asset: ASSET.asset, side: sig.side, usdcRaw: BigInt(Math.floor(size.collateral * 1e6)),
       leverage: size.leverage, stop, slippageBps: PERPS_RULES.slippageBps }, keyPair);
     Object.assign(mem, { pending: { kind: "open", sig: txid, at: now }, stop, best: price, initialRisk: dist, openedAt: now, openValueUsd: value, side: sig.side, asset: ASSET.asset, stopCandle: closed,
-      posParams: params, posInterval: iv });
+      posParams: params, posInterval: iv, source: plan?.source ?? cfg.source ?? "réglages de l'app" });
     await save(admin, bot, mem, { ...patch, last_value_usd: value,
-      last_message: `${sig.side === "long" ? "Long" : "Short"} ${ASSET.asset} demandé${aggressive ? " (mode agressif)" : ""} : ${size.collateral.toFixed(2)} $ x${size.leverage.toFixed(1)}, risque ${(baseRisk * mult * 100).toFixed(1)} %, stop ${stop.toFixed(2)} $ (${sig.reason}).` });
+      last_message: `${sig.side === "long" ? "Long" : "Short"} ${ASSET.asset} demandé${aggressive ? " (mode agressif)" : ""} : ${size.collateral.toFixed(2)} $ x${size.leverage.toFixed(1)}, risque ${(baseRisk * mult * confidence * 100).toFixed(1)} %, stop ${stop.toFixed(2)} $ (${sig.reason}).` });
     return "open";
   } catch (e) {
     await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: `Erreur : ${(e as Error).message}`.slice(0, 300) + " — je réessaie au prochain tick." });
@@ -209,7 +210,7 @@ async function recordClose(admin: Admin, bot: PerpsRow, mem: Memory, patch: Part
   const before = mem.openValueUsd ?? value;
   const pnl = value - before;
   const pnlPct = before > 0 ? (pnl / before) * 100 : 0;
-  admin.addTrade("perps", { action: "close", asset: bot.position_asset ?? asset, side: bot.position_side, collateral_usd: value, price, pnl_usd: pnl, reason, signature: sig });
+  admin.addTrade("perps", { action: "close", asset: bot.position_asset ?? asset, side: bot.position_side, collateral_usd: value, price, pnl_usd: pnl, reason, signature: sig, source: mem.source });
   const brain = mem.brain ?? newBrain(value);
   learn(brain, asset, pnlPct, value, Date.now());
   if (pnl < 0) mem.cooldownUntil = Date.now() + RISK.cooldownAfterLossMs;
@@ -238,7 +239,7 @@ export async function liquidatePerps(admin: Admin, bot: PerpsRow, outcome: "succ
 }
 
 function clearPosition(mem: Memory) {
-  for (const k of ["stop", "best", "initialRisk", "openedAt", "openValueUsd", "asset", "side", "stopCandle", "live", "posParams", "posInterval"] as const) delete mem[k];
+  for (const k of ["stop", "best", "initialRisk", "openedAt", "openValueUsd", "asset", "side", "stopCandle", "live", "posParams", "posInterval", "source"] as const) delete mem[k];
 }
 async function save(admin: Admin, bot: PerpsRow, mem: Memory, fields: Partial<PerpsRow>) {
   void bot;

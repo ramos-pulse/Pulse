@@ -2,7 +2,16 @@
 // Règle d'or : une transaction envoyée n'est pas une transaction exécutée. Rien n'est enregistré tant que la blockchain
 // ne l'a pas confirmée, et l'état du bot est toujours recalé sur le contenu réel du portefeuille.
 import {
+  AccountRole,
   address,
+  appendTransactionMessageInstructions,
+  compileTransaction,
+  createTransactionMessage,
+  getBase64EncodedWireTransaction,
+  pipe,
+  setTransactionMessageFeePayer,
+  setTransactionMessageLifetimeUsingBlockhash,
+  signTransaction,
   createKeyPairFromBytes,
   getAddressEncoder,
   getAddressFromPublicKey,
@@ -117,4 +126,52 @@ export async function waitForTx(sig: string, ms = 20_000): Promise<TxStatus> {
 
 export async function sendRaw(wireBase64: string): Promise<string> {
   return rpc<string>("sendTransaction", [wireBase64, { encoding: "base64", maxRetries: 3, skipPreflight: false, preflightCommitment: "confirmed" }]);
+}
+
+// ------------------------------------ Comptes de tokens (agent swap) ------------------------------------
+export const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PE6Z2ZZ8vKtzqjB";
+export const WSOL_MINT = "So11111111111111111111111111111111111111112";
+export interface TokenAccount { pubkey: string; mint: string; program: string; amount: bigint; ui: number; decimals: number; lamports: number }
+
+/** Tous les comptes de tokens du portefeuille (programme classique et Token-2022). */
+export async function listTokenAccounts(owner: string): Promise<TokenAccount[]> {
+  type R = { value: { pubkey: string; account: { lamports: number; data: { parsed: { info: { mint: string; tokenAmount: { amount: string; uiAmount: number | null; decimals: number } } } } } }[] };
+  const out: TokenAccount[] = [];
+  for (const program of [TOKEN_PROGRAM, TOKEN_2022]) {
+    const res = await rpc<R>("getTokenAccountsByOwner", [owner, { programId: program }, { encoding: "jsonParsed", commitment: "confirmed" }]);
+    for (const a of res.value) {
+      const info = a.account.data.parsed.info;
+      out.push({ pubkey: a.pubkey, mint: info.mint, program, amount: BigInt(info.tokenAmount.amount), ui: info.tokenAmount.uiAmount ?? 0, decimals: info.tokenAmount.decimals, lamports: a.account.lamports });
+    }
+  }
+  return out;
+}
+
+type KeyPair = Awaited<ReturnType<typeof loadKeyPairFrom>>["keyPair"];
+
+/**
+ * Ferme des comptes de tokens VIDES (ou de SOL emballé) : le SOL bloqué en caution revient au portefeuille.
+ * Une seule transaction pour au plus 8 comptes. Renvoie la signature (à confirmer).
+ */
+export async function closeTokenAccounts(keyPair: KeyPair, owner: string, accounts: TokenAccount[]): Promise<string> {
+  if (!accounts.length || accounts.length > 8) throw new Error("1 à 8 comptes par transaction");
+  for (const a of accounts) if (a.amount > 0n && a.mint !== WSOL_MINT) throw new Error(`compte non vide (${a.mint})`); // sécurité : jamais de tokens détruits
+  const { value } = await rpc<{ value: { blockhash: string; lastValidBlockHeight: number } }>("getLatestBlockhash", [{ commitment: "confirmed" }]);
+  const instructions = accounts.map((a) => ({
+    programAddress: address(a.program),
+    accounts: [
+      { address: address(a.pubkey), role: AccountRole.WRITABLE },        // compte fermé
+      { address: address(owner), role: AccountRole.WRITABLE },           // le SOL revient au propriétaire
+      { address: address(owner), role: AccountRole.READONLY_SIGNER },    // autorisation du propriétaire
+    ],
+    data: new Uint8Array([9]), // instruction CloseAccount du programme de tokens
+  }));
+  const message = pipe(
+    createTransactionMessage({ version: 0 }),
+    (m) => setTransactionMessageFeePayer(address(owner), m),
+    (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: value.blockhash as never, lastValidBlockHeight: BigInt(value.lastValidBlockHeight) }, m),
+    (m) => appendTransactionMessageInstructions(instructions, m),
+  );
+  const signed = await signTransaction([keyPair], compileTransaction(message) as Parameters<typeof signTransaction>[1]);
+  return sendRaw(getBase64EncodedWireTransaction(signed));
 }

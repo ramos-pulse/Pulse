@@ -6,7 +6,7 @@ import { executeSwap, getPrices, getQuote, verifyToken } from "./jupiter.ts";
 import { getBalances, loadKeyPairFrom, txStatus, waitForTx, type Balances } from "./solana.ts";
 import {
   DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, missionEnd, PRESETS, RISK, riskGate, rsiExitSignal, rsiSignal, RULES, SOL_MINT, spotSizeUsd, TOKENS,
-  trailStop, trendSignal, USDC_MINT, atr, type Interval, type Memory, type Params, type RsiParams, type Signal, type SpotStrategy,
+  riskFactor, trailStop, trendSignal, USDC_MINT, atr, type Interval, type Memory, type Params, type RsiParams, type Signal, type SpotStrategy,
 } from "./strategy.ts";
 
 type Admin = Store;
@@ -210,7 +210,7 @@ export async function runTick(admin: Admin): Promise<string> {
       await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || blocked || "Pilote automatique : j'attends que le chercheur valide une stratégie." });
       return "hold";
     }
-    type Choice = { token: Token; sig: Signal; strategy: SpotStrategy; params: Params | RsiParams; interval: Interval; rank: number; risk: number };
+    type Choice = { token: Token; sig: Signal; strategy: SpotStrategy; params: Params | RsiParams; interval: Interval; rank: number; risk: number; source: string };
     const choices: Choice[] = [];
     const notes: string[] = [];
     let analysed = 0;
@@ -232,7 +232,9 @@ export async function runTick(admin: Admin): Promise<string> {
           const c = await getCandles(token.candles, plan.interval, rsi ? Math.max(rp.smaPeriod, rp.rsiPeriod * 6) + 40 : 400, now);
           const sig = rsi ? rsiSignal(c, rp) : trendSignal(c, false, plan.params as Params);
           const tag = `${token.symbol} ${plan.interval === "15m" ? "15 min" : "1 h"}`;
-          if (sig.side === "long") choices.push({ token, sig, strategy: plan.family, params: plan.params, interval: plan.interval, rank: plan.score, risk: rsi ? rp.riskPct / 100 : riskPerTrade(brain) });
+          // apprentissage croisé : risque plein seulement si la stratégie a été confirmée en réel
+          const risk = (rsi ? rp.riskPct / 100 : riskPerTrade(brain)) * riskFactor(plan.confidence);
+          if (sig.side === "long") choices.push({ token, sig, strategy: plan.family, params: plan.params, interval: plan.interval, rank: plan.score, risk, source: plan.source });
           else notes.push(`${tag} : ${sig.reason}`);
         } catch { notes.push(`${token.symbol} : historique indisponible`); }
       }
@@ -248,7 +250,7 @@ export async function runTick(admin: Admin): Promise<string> {
           const c = await hourlyCandles(token.candles, cfg.strategy === "rsi" ? Math.max(cfg.rsi.smaPeriod, cfg.rsi.rsiPeriod * 6) + 40 : 400, now);
           const params: Params | RsiParams = cfg.strategy === "rsi" ? cfg.rsi : cfg.trend ?? PRESETS[brain.preset[token.symbol] ?? "standard"] ?? DEFAULT_PARAMS;
           const sig = cfg.strategy === "rsi" ? rsiSignal(c, cfg.rsi) : trendSignal(c, false, params as Params);
-          if (sig.side === "long") choices.push({ token, sig, strategy: cfg.strategy, params, interval: "1h", rank: sig.score, risk: cfg.strategy === "rsi" ? cfg.rsi.riskPct / 100 : riskPerTrade(brain) });
+          if (sig.side === "long") choices.push({ token, sig, strategy: cfg.strategy, params, interval: "1h", rank: sig.score, risk: cfg.strategy === "rsi" ? cfg.rsi.riskPct / 100 : riskPerTrade(brain), source: cfg.source ?? "réglages de l'app" });
           else notes.push(`${token.symbol} : ${sig.reason}`);
         } catch { notes.push(`${token.symbol} : historique indisponible`); }
       }
@@ -287,7 +289,7 @@ export async function runTick(admin: Admin): Promise<string> {
     Object.assign(mem, {
       pending: { kind: "buy", sig, at: now, mint: pick.token.mint, usdcBefore: b.usdc },
       stop: pick.sig.stop, best: fillPrice, initialRisk: fillPrice - pick.sig.stop, openedAt: now, asset: pick.token.symbol, side: "long",
-      strategy: pick.strategy, posParams: pick.params, posInterval: pick.interval,
+      strategy: pick.strategy, posParams: pick.params, posInterval: pick.interval, source: pick.source,
       signal: `${pick.token.symbol} : ${pick.sig.reason}`, stopCandle: closed,
     });
     const r = (await waitForTx(sig)) === "pending" ? "pending" : await settle(admin, bot, mem, patch, address, value);
@@ -321,7 +323,7 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, patch: Partial<Bot
     if (!(mem.stop && mem.stop < entry)) mem.stop = entry * 0.95;
     mem.initialRisk = entry - mem.stop;
     Object.assign(patch, { position_mint: mint, entry_price: entry });
-    admin.addTrade("spot", { side: "buy", symbol: symbolOf(mint), mint, amount_usd: cost, price: entry, reason: mem.signal ?? "tendance", signature: p.sig });
+    admin.addTrade("spot", { side: "buy", symbol: symbolOf(mint), mint, amount_usd: cost, price: entry, reason: mem.signal ?? "tendance", signature: p.sig, source: mem.source });
     return `Achat ${symbolOf(mint)} confirmé : ${cost.toFixed(2)} $ à ${fmt(entry)} $, stop à ${fmt(mem.stop)} $.`;
   }
 
@@ -333,7 +335,7 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, patch: Partial<Bot
   const pnlPct = cost > 0 ? (pnl / cost) * 100 : 0;
   admin.addTrade("spot", {
     side: "sell", symbol: symbolOf(mint), mint, amount_usd: proceeds,
-    price: Number(bot.entry_price ?? 0) * (1 + pnlPct / 100), pnl_usd: pnl, reason: p.reason ?? "sortie", signature: p.sig,
+    price: Number(bot.entry_price ?? 0) * (1 + pnlPct / 100), pnl_usd: pnl, reason: p.reason ?? "sortie", signature: p.sig, source: mem.source,
   });
   const brain = mem.brain ?? newBrain(valueBefore);
   learn(brain, symbolOf(mint), pnlPct, valueBefore + pnl, Date.now());
@@ -377,7 +379,7 @@ export async function liquidate(admin: Admin, bot: BotRow, outcome: "success" | 
 
 // ------------------------------------------------------------------------------------------------
 function clearPosition(mem: Memory) {
-  for (const k of ["stop", "best", "initialRisk", "openedAt", "costUsd", "asset", "side", "stopCandle", "live", "strategy", "posParams", "posInterval"] as const) delete mem[k];
+  for (const k of ["stop", "best", "initialRisk", "openedAt", "costUsd", "asset", "side", "stopCandle", "live", "strategy", "posParams", "posInterval", "source"] as const) delete mem[k];
 }
 async function save(admin: Admin, bot: BotRow, mem: Memory, fields: Partial<BotRow>) {
   void bot;

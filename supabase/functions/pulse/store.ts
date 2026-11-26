@@ -29,7 +29,7 @@ export interface BotState {
 
 export interface TradeRow {
   side?: string | null; action?: string; symbol?: string; asset?: string; mint?: string;
-  amount_usd?: number; collateral_usd?: number; price?: number; pnl_usd?: number; reason?: string; signature?: string | null;
+  amount_usd?: number; collateral_usd?: number; price?: number; pnl_usd?: number; reason?: string; signature?: string | null; source?: string;
 }
 
 /** Interface utilisée par le moteur (identique à la version serveur). */
