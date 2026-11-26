@@ -3,8 +3,9 @@
 import type { BotState, Store } from "../store.ts";
 import { isBenched, learn, mindset, newBrain, optimize, riskPerTrade } from "./brain.ts";
 import { candles as getCandles, hourlyCandles, lastClosedCandle } from "./candles.ts";
-import { perpsClose, perpsOpen, perpsPositions, perpsPrice, type PerpPosition } from "./jupiter.ts";
-import { getBalances, loadKeyPairFrom, type Balances } from "./solana.ts";
+import { perpsPrice, type PerpPosition } from "./jupiter.ts";
+import { loadKeyPairFrom, type Balances } from "./solana.ts";
+import { venueFor, type KeyPair } from "./venue.ts";
 import {
   AGGRESSIVE, atr, dayKey, exitCheck, loadMemory, loadPerpsConfig, missionEnd, PERPS_ASSETS, PERPS_RULES, perpsChange, perpsSizing, PRESETS, RISK, riskFactor, sideMult,
   riskGate, RULES, trailStop, trendSignal, DEFAULT_PARAMS, type Interval, type Memory, type Params,
@@ -28,9 +29,10 @@ export function perpsValue(b: Balances, solPrice: number, positions: PerpPositio
   return b.usdc + b.sol * solPrice + positions.reduce((s, p) => s + p.valueUsd, 0);
 }
 
-export async function currentPerpsValue() {
-  const { address } = await loadKeyPairFrom(WALLET_ENV);
-  const [price, b, positions] = await Promise.all([perpsPrice(SOL.mint), getBalances(address), perpsPositions(address)]);
+export async function currentPerpsValue(bot: Pick<PerpsRow, "paper"> = { paper: { on: false } }) {
+  const V = venueFor("perps", bot);
+  const { address } = await V.wallet();
+  const [price, b, positions] = await Promise.all([perpsPrice(SOL.mint), V.balances(address), V.positions(address)]);
   return { address, valueUsd: perpsValue(b, price, positions), positions };
 }
 
@@ -45,15 +47,16 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
   const aggressive = cfg.mode === "agressif" && !cfg.autopilot; // prudence : le pilote automatique ne trade jamais en mode agressif
   const maxLev = aggressive ? AGGRESSIVE.maxLeverage : PERPS_RULES.maxLeverage;
   const patch: Partial<PerpsRow> = {};
+  const V = venueFor("perps", bot, admin); // réel ou paper : mêmes décisions, exécution différente
 
   // 1. Données : prix, soldes ET positions réelles. Sinon on ne touche à rien (le stop on-chain protège).
-  let address: string, keyPair: Awaited<ReturnType<typeof loadKeyPairFrom>>["keyPair"];
+  let address: string, keyPair: KeyPair;
   let price: number, solPrice: number, b: Balances, positions: PerpPosition[];
   // Marché du tick : celui de la position ouverte, sinon celui du plan du chercheur, sinon SOL.
   let ASSET: (typeof PERPS_ASSETS)[number] = SOL;
   try {
-    ({ address, keyPair } = await loadKeyPairFrom(WALLET_ENV));
-    [solPrice, b, positions] = await Promise.all([perpsPrice(SOL.mint), getBalances(address), perpsPositions(address)]);
+    ({ address, keyPair } = await V.wallet());
+    [solPrice, b, positions] = await Promise.all([perpsPrice(SOL.mint), V.balances(address), V.positions(address)]);
     const held = positions.find((p) => assetOf(p.asset));
     ASSET = assetOf(held?.asset) ?? assetOf(mem.asset) ?? assetOf(bot.position_asset) ?? assetOf(cfg.plan?.asset) ?? SOL;
     price = ASSET.asset === SOL.asset ? solPrice : await perpsPrice(ASSET.mint);
@@ -130,7 +133,7 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
       const stop = mem.stop!;
       const exit = exitCheck({ side: open.side, entry: open.entryPrice, price, stop, initialRisk: mem.initialRisk ?? open.entryPrice * 0.03, openedAt: mem.openedAt ?? now }, now);
       if (exit) {
-        const sig = await perpsClose(open.pubkey, PERPS_RULES.slippageBps * 2, keyPair);
+        const sig = await V.close(open.pubkey, PERPS_RULES.slippageBps * 2, keyPair);
         mem.pending = { kind: "close", sig, at: now, reason: exit };
         await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: `Fermeture ${open.side} ${open.asset} demandée (${label(exit)})…` });
         return "close";
@@ -192,7 +195,7 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
       await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: `Signal ${sig.side} mais capital insuffisant pour respecter le risque (min ${PERPS_RULES.minCollateralUsd} $ de collatéral).` });
       return "hold";
     }
-    const txid = await perpsOpen({ wallet: address, asset: ASSET.asset, side: sig.side, usdcRaw: BigInt(Math.floor(size.collateral * 1e6)),
+    const txid = await V.open({ wallet: address, asset: ASSET.asset, side: sig.side, usdcRaw: BigInt(Math.floor(size.collateral * 1e6)),
       leverage: size.leverage, stop, slippageBps: PERPS_RULES.slippageBps }, keyPair);
     Object.assign(mem, { pending: { kind: "open", sig: txid, at: now }, stop, best: price, initialRisk: dist, openedAt: now, openValueUsd: value, side: sig.side, asset: ASSET.asset, stopCandle: closed,
       posParams: params, posInterval: iv, source: plan?.source ?? cfg.source ?? "réglages de l'app" });
@@ -220,12 +223,13 @@ async function recordClose(admin: Admin, bot: PerpsRow, mem: Memory, patch: Part
 }
 
 export async function liquidatePerps(admin: Admin, bot: PerpsRow, outcome: "success" | "destroyed" | "stopped", message: string) {
-  const { address, keyPair } = await loadKeyPairFrom(WALLET_ENV);
-  const positions = await perpsPositions(address);
+  const V = venueFor("perps", bot, admin);
+  const { address, keyPair } = await V.wallet();
+  const positions = await V.positions(address);
   const failures: string[] = [];
   for (const p of positions) {
     try {
-      const sig = await perpsClose(p.pubkey, PERPS_RULES.slippageBps * 2, keyPair);
+      const sig = await V.close(p.pubkey, PERPS_RULES.slippageBps * 2, keyPair);
       admin.addTrade("perps", { action: "close", asset: p.asset, side: p.side, collateral_usd: p.valueUsd, reason: outcome, signature: sig });
     } catch (e) { failures.push((e as Error).message); }
   }

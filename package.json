@@ -3,5 +3,10 @@
   "private": true,
   "type": "module",
   "description": "Tests locaux de la stratégie (facultatif). Les bots tournent sur Supabase, l'app sur GitHub Pages.",
-  "scripts": { "test": "node --experimental-strip-types --no-warnings --test tests/strategy.test.ts tests/rsi.test.ts tests/perps.test.ts tests/research.test.ts tests/learning.test.ts tests/math.test.ts" }
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test tests/strategy.test.ts tests/rsi.test.ts tests/perps.test.ts tests/research.test.ts tests/learning.test.ts tests/math.test.ts tests/paper.test.ts"
+  },
+  "devDependencies": {
+    "@solana/kit": "^2.1.0"
+  }
 }

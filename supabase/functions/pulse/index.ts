@@ -1,7 +1,7 @@
 // Fonction Supabase « pulse » : appelée chaque minute par le cron (tick des deux bots) et par l'app (API).
 //   POST /pulse/tick                 cron (en-tête x-cron-secret)
 //   GET  /pulse/api/state            état des deux missions
-//   POST /pulse/api/{spot|perps}/{start|pause|stop|goal}
+//   POST /pulse/api/{spot|perps}/{start|pause|stop|goal|paper}
 //   GET  /pulse/api/backtest?market=N
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { riskPerTrade } from "./engine/brain.ts";
@@ -14,6 +14,7 @@ import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, type
 import { DbStore, notify, type BotKind, type BotState } from "./store.ts";
 import { cleanWallet, CLEANER } from "./engine/cleaner.ts";
 import { analyze, propose } from "./engine/math.ts";
+import { freshPaper, loadPaper, PAPER, PAPER_ADDRESS } from "./engine/venue.ts";
 
 const SUPABASE_URL = env("SUPABASE_URL") ?? "";
 
@@ -95,16 +96,73 @@ async function startMission(kind: BotKind, body: { goal_usd?: number; days?: num
   const goal = Number(body.goal_usd ?? bot.goal_usd) || 5000;
   const days = Number(body.days ?? 30) || 30;
   let startValue = bot.start_value_usd;
-  if (isNew) {
+  const paper = loadPaper(bot.paper);
+  if (isNew && paper.on) {
+    // nouvelle mission paper : portefeuille fictif remis à neuf, aucun wallet ni clé nécessaire
+    const fresh = { ...freshPaper(paper.startUsd), since: new Date().toISOString() };
+    await setBot(kind, { paper: fresh, wallet_address: PAPER_ADDRESS, position_mint: null, position_pubkey: null, position_asset: null, position_side: null, entry_price: null, price_history: resetPositionMemory(bot.price_history) });
+    startValue = fresh.startUsd;
+  } else if (isNew) {
     try { startValue = (kind === "spot" ? await currentValue() : await currentPerpsValue()).valueUsd; } catch { startValue = null; }
   }
   await setBot(kind, {
     status: "running", goal_usd: goal,
     ...(isNew ? { started_at: new Date().toISOString(), start_value_usd: startValue, end_at: new Date(Date.now() + days * 86_400_000).toISOString() } : {}),
-    last_message: isNew ? "Mission lancée. J'analyse le marché." : "Je reprends la mission.",
+    last_message: isNew ? `Mission ${paper.on ? "PAPER (argent fictif) " : ""}lancée. J'analyse le marché.` : "Je reprends la mission.",
   });
-  await notify(`${kind === "spot" ? "Bot spot" : "Bot perps"} : mission ${isNew ? "lancée" : "reprise"} (objectif ${goal} $)`);
+  await notify(`${kind === "spot" ? "Bot spot" : "Bot perps"} : mission ${paper.on ? "PAPER " : ""}${isNew ? "lancée" : "reprise"} (objectif ${goal} $)`);
   return { ok: true };
+}
+
+/** Mémoire de position effacée (le cerveau, lui, est gardé) : utile au passage réel ⇄ paper. */
+function resetPositionMemory(ph: unknown) {
+  const mem = loadMemory(ph) as unknown as Record<string, unknown>;
+  for (const k of ["pending", "stop", "best", "initialRisk", "openedAt", "costUsd", "openValueUsd", "asset", "side", "stopCandle", "live", "strategy", "posParams", "posInterval", "source"]) delete mem[k];
+  return mem;
+}
+
+const isBusy = (b: BotState) => b.status === "running" || b.status === "paused" || !!b.position_mint || !!b.position_side;
+
+/** Passe un bot en paper ou en réel. Seulement quand il ne trade pas : jamais de bascule avec une position ouverte. */
+async function setPaper(kind: BotKind, body: { on?: boolean; startUsd?: number }) {
+  const bot = (await readBots())[kind];
+  const cur = loadPaper(bot.paper);
+  const on = body.on ?? cur.on;
+  if (isBusy(bot) && on !== cur.on) return { ok: false, error: "Arrête d'abord la mission (arrêt d'urgence) avant de passer du réel au paper ou l'inverse." };
+  const startUsd = body.startUsd ?? cur.startUsd;
+  const next = isBusy(bot) ? { ...cur, startUsd: freshPaper(startUsd).startUsd } : freshPaper(startUsd, on);
+  await setBot(kind, { paper: next, ...(isBusy(bot) ? {} : { wallet_address: on ? PAPER_ADDRESS : null, start_value_usd: null, started_at: null, last_value_usd: on ? next.startUsd : null }) });
+  return { ok: true, paper: { on: next.on, startUsd: next.startUsd } };
+}
+
+/** Teste une stratégie trouvée en paper : le bot (paper) la trade seule, pilote automatique coupé. */
+async function paperTest(id: number) {
+  const { data } = await db.from("research").select("*").eq("id", id).limit(1);
+  const r = data?.[0] as ResearchRow | undefined;
+  if (!r) return { ok: false, error: "stratégie introuvable" };
+  const kind: BotKind = r.kind;
+  const bot = (await readBots())[kind];
+  if (!loadPaper(bot.paper).on) {
+    if (isBusy(bot)) return { ok: false, error: `Le bot ${kind} est en mission RÉELLE : arrête-le d'abord, puis relance le test.` };
+    await setPaper(kind, { on: true });
+  }
+  if (kind === "spot") {
+    const cur = loadConfig((await readBots()).spot.config);
+    await setBot("spot", { config: { ...cur, autopilot: false, plans: [toSpotPlan(r)] } });
+  } else {
+    const cur = loadPerpsConfig((await readBots()).perps.config);
+    await setBot("perps", { config: { ...cur, autopilot: false, mode: "normal", plan: toPerpsPlan(r) } });
+  }
+  const fresh = (await readBots())[kind];
+  if (fresh.status !== "running" && fresh.status !== "paused") await startMission(kind, {});
+  await notify(`Paper : stratégie #${r.id} (${r.market}) en test sur le bot ${kind}`);
+  return { ok: true, kind, started: fresh.status !== "running" };
+}
+
+async function paperCandidates() {
+  const { data } = await db.from("research").select("*").neq("verdict", "rejetée").order("score", { ascending: false }).limit(60);
+  return { list: ((data ?? []) as ResearchRow[]).sort(byRank).slice(0, 40).map((r) => ({ id: r.id, kind: r.kind, market: r.market, family: r.family, verdict: r.verdict, origin: r.origin ?? "chercheur",
+    description: describe({ ...r, interval: r.interval === "15m" ? "15m" : "1h" }), test: r.test, paper: r.paper ?? null, live: r.live ?? null })) };
 }
 
 async function emergencyStop(kind: BotKind) {
@@ -131,7 +189,7 @@ async function state() {
     const mem = loadMemory(b.price_history);
     const { data: trades } = await db.from("trades").select("*").eq("bot", k).order("created_at", { ascending: false }).limit(60);
     out[k] = {
-      ...b, price_history: undefined, lock_until: undefined, config: k === "spot" ? loadConfig(b.config) : loadPerpsConfig(b.config),
+      ...b, price_history: undefined, lock_until: undefined, paper: (({ on, startUsd, since }) => ({ on, startUsd, since }))(loadPaper(b.paper)), config: k === "spot" ? loadConfig(b.config) : loadPerpsConfig(b.config),
       memory: { strategy: mem.strategy, stop: mem.stop, best: mem.best, signal: mem.signal, mindset: mem.mindset, live: mem.live, asset: mem.asset, side: mem.side, openedAt: mem.openedAt, costUsd: mem.costUsd, pending: mem.pending ? { kind: mem.pending.kind, at: mem.pending.at } : null },
       brain: mem.brain ? { risk: riskPerTrade(mem.brain), streak: mem.brain.streak, benched: mem.brain.benched, disabled: mem.brain.disabled, report: mem.brain.report ?? {}, preset: mem.brain.preset } : null,
       trades: trades ?? [],
@@ -141,6 +199,7 @@ async function state() {
   return {
     now: new Date().toISOString(), wallets: { spot: spotWallet, perps: perpsWallet }, bots: out, markets: MARKETS.map((m) => m.name),
     secrets: { anthropic: !!env("ANTHROPIC_API_KEY"), spotWallet: !!env("BOT_WALLET_PRIVATE_KEY"), perpsWallet: !!env("PERPS_WALLET_PRIVATE_KEY"), customRpc: !!env("SOLANA_RPC_URL"), telegram: !!(env("TELEGRAM_BOT_TOKEN") && env("TELEGRAM_CHAT_ID")), cron: cronReady },
+    paperRules: PAPER,
     rules: { strategy: STRATEGY, risk: RISK, perps: PERPS_RULES, rules: RULES, presets: PRESETS, aggressive: AGGRESSIVE },
   };
 }
@@ -169,7 +228,7 @@ async function backtestMarket(i: number) {
 
 // ------------------------------------------------------------------ agent chercheur
 type LiveStats = { trades: number; wins: number; pnlUsd: number; profitFactor: number; confirmed: boolean; failed: boolean; lastAt: string };
-type ResearchRow = { id: number; created_at: string; market: string; product: string; symbol?: string | null; interval?: string | null; kind: "spot" | "perps"; family: "tendance" | "rsi"; params: Candidate["params"]; train: Record<string, number>; test: Record<string, number>; score: number; verdict: string; why: string; live?: LiveStats | null; origin?: string | null; rationale?: string | null };
+type ResearchRow = { id: number; created_at: string; market: string; product: string; symbol?: string | null; interval?: string | null; kind: "spot" | "perps"; family: "tendance" | "rsi"; params: Candidate["params"]; train: Record<string, number>; test: Record<string, number>; score: number; verdict: string; why: string; live?: LiveStats | null; paper?: Omit<LiveStats, "confirmed" | "failed"> | null; origin?: string | null; rationale?: string | null };
 
 // ------------------------------------------------------------------ apprentissage croisé : le chercheur apprend des vrais trades des bots
 const LIVE = { minTrades: 4, failPF: 0.8, confirmPF: 1.2, boost: 1.3, days: 45 };
@@ -183,13 +242,20 @@ async function learnFromBots(): Promise<string[]> {
   const since = new Date(Date.now() - LIVE.days * 86_400_000).toISOString();
   const { data } = await db.from("trades").select("*").gt("created_at", since).limit(5000);
   const by = new Map<number, { pnl: number[]; lastAt: string }>();
-  for (const t of (data ?? []) as { source?: string | null; pnl_usd?: number | null; created_at: string }[]) {
+  const byPaper = new Map<number, { pnl: number[]; lastAt: string }>();
+  for (const t of (data ?? []) as { source?: string | null; pnl_usd?: number | null; created_at: string; paper?: boolean | null }[]) {
     const m = /chercheur #(\d+)/.exec(t.source ?? "");
     if (!m || typeof t.pnl_usd !== "number") continue; // seuls les trades clôturés comptent
-    const e = by.get(+m[1]!) ?? { pnl: [], lastAt: t.created_at };
+    const map = t.paper ? byPaper : by; // le paper ne compte JAMAIS comme « confirmé en réel »
+    const e = map.get(+m[1]!) ?? { pnl: [], lastAt: t.created_at };
     e.pnl.push(t.pnl_usd); if (t.created_at > e.lastAt) e.lastAt = t.created_at;
-    by.set(+m[1]!, e);
+    map.set(+m[1]!, e);
   }
+  const statsOf = (pnl: number[]) => {
+    const wins = pnl.filter((x) => x > 0), gw = wins.reduce((a, x) => a + x, 0), gl = -pnl.filter((x) => x <= 0).reduce((a, x) => a + x, 0);
+    return { trades: pnl.length, wins: wins.length, pnlUsd: Math.round((gw - gl) * 100) / 100, profitFactor: Math.round((gl > 0 ? gw / gl : gw > 0 ? 99 : 0) * 100) / 100 };
+  };
+  for (const [id, e] of byPaper) await db.from("research").update({ paper: { ...statsOf(e.pnl), lastAt: e.lastAt } }).eq("id", id);
   const news: string[] = [];
   for (const [id, e] of by) {
     const wins = e.pnl.filter((x) => x > 0), gw = wins.reduce((a, x) => a + x, 0), gl = -e.pnl.filter((x) => x <= 0).reduce((a, x) => a + x, 0);
@@ -509,6 +575,11 @@ Deno.serve(async (req) => {
     }
     if (req.method === "POST" && route === "/api/research/run") return json(await runResearch()); // lancer une recherche tout de suite
     if (req.method === "GET" && route === "/api/agents") return json(await agentsBoard());
+    if (req.method === "GET" && route === "/api/paper/candidates") return json(await paperCandidates());
+    if (req.method === "POST" && route === "/api/paper/test") {
+      const body = (await req.json().catch(() => ({}))) as { id?: number };
+      const r = await paperTest(Number(body.id)); return json(r, r.ok ? 200 : 409);
+    }
     if (req.method === "POST" && route === "/api/agents/swap/run") return json(await runSwapAgent("manuel"));
     if (req.method === "POST" && route === "/api/agents/swap/auto") {
       const body = (await req.json().catch(() => ({}))) as { on?: boolean };
@@ -548,11 +619,12 @@ Deno.serve(async (req) => {
       await notify(`Bot perps : mode ${config.mode}, ${config.bias === 0 ? "longs et shorts équilibrés" : config.bias > 0 ? `longs favorisés (shorts à ${100 - config.bias} %)` : `shorts favorisés (longs à ${100 + config.bias} %)`}`);
       return json({ ok: true, config });
     }
-    const m = route.match(/^\/api\/(spot|perps)\/(start|pause|stop|goal)$/);
+    const m = route.match(/^\/api\/(spot|perps)\/(start|pause|stop|goal|paper)$/);
     if (req.method === "POST" && m) {
       const kind = m[1] as BotKind, action = m[2];
       const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
       if (action === "start") return json(await startMission(kind, body as { goal_usd?: number; days?: number }));
+      if (action === "paper") { const r = await setPaper(kind, body as { on?: boolean; startUsd?: number }); return json(r, r.ok ? 200 : 409); }
       if (action === "pause") { await setBot(kind, { status: "paused", last_message: "En pause. Une position ouverte reste gérée par son stop." }); return json({ ok: true }); }
       if (action === "stop") { const r = await emergencyStop(kind); return json(r, r.ok ? 200 : 409); }
       if (action === "goal") {

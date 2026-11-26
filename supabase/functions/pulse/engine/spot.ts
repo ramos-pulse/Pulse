@@ -2,8 +2,9 @@
 import type { BotState, Store } from "../store.ts";
 import { isBenched, learn, mindset, newBrain, optimize, riskPerTrade } from "./brain.ts";
 import { candles as getCandles, hourlyCandles, lastClosedCandle } from "./candles.ts";
-import { executeSwap, getPrices, getQuote, verifyToken } from "./jupiter.ts";
-import { getBalances, loadKeyPairFrom, txStatus, waitForTx, type Balances } from "./solana.ts";
+import { getPrices, getQuote, verifyToken } from "./jupiter.ts";
+import { loadKeyPairFrom, type Balances } from "./solana.ts";
+import { venueFor, type KeyPair, type Venue } from "./venue.ts";
 import {
   DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, missionEnd, PRESETS, RISK, riskGate, rsiExitSignal, rsiSignal, RULES, SOL_MINT, spotSizeUsd, TOKENS,
   riskFactor, trailStop, trendSignal, USDC_MINT, atr, type Interval, type Memory, type Params, type RsiParams, type Signal, type SpotStrategy,
@@ -40,9 +41,10 @@ export function portfolio(b: Balances, prices: Record<string, number>, totalSol:
   return { value, complete };
 }
 
-export async function currentValue() {
-  const { address } = await loadKeyPairFrom(WALLET_ENV);
-  const [prices, b] = await Promise.all([getPrices(ALL_MINTS), getBalances(address)]);
+export async function currentValue(bot: Pick<BotRow, "paper"> = { paper: { on: false } }) {
+  const V = venueFor("spot", bot);
+  const { address } = await V.wallet();
+  const [prices, b] = await Promise.all([getPrices(ALL_MINTS), V.balances(address)]);
   return { address, valueUsd: portfolio(b, prices, b.sol).value };
 }
 
@@ -54,11 +56,11 @@ function holds(b: Balances, mint: string, prices: Record<string, number>): boole
   return p ? (b.ui[mint] ?? 0) * p >= MIN_POSITION_USD : true;
 }
 
-async function sellAll(mint: string, b: Balances, owner: string, keyPair: Parameters<typeof executeSwap>[2]) {
+async function sellAll(V: Venue, mint: string, b: Balances, owner: string, keyPair: KeyPair) {
   const amount = b.raw[mint] ?? 0n;
   if (amount <= 0n) throw new Error("rien à vendre");
   const quote = await getQuote(mint, USDC_MINT, amount, RULES.exitSlippageBps);
-  return executeSwap(quote, owner, keyPair);
+  return V.swap(quote, owner, keyPair);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -72,12 +74,13 @@ export async function runTick(admin: Admin): Promise<string> {
   const cfg = loadConfig(bot.config);
   const patch: Partial<BotRow> = {};
   let message = "";
+  const V = venueFor("spot", bot, admin); // réel ou paper : mêmes décisions, exécution différente
 
   // 1. Données. Sans soldes on ne fait RIEN (mais on ne s'arrête pas pour autant).
-  let address: string, keyPair: Parameters<typeof executeSwap>[2], b: Balances, prices: Record<string, number>;
+  let address: string, keyPair: KeyPair, b: Balances, prices: Record<string, number>;
   try {
-    ({ address, keyPair } = await loadKeyPairFrom(WALLET_ENV));
-    [b, prices] = await Promise.all([getBalances(address), getPrices(ALL_MINTS).catch(() => ({} as Record<string, number>))]);
+    ({ address, keyPair } = await V.wallet());
+    [b, prices] = await Promise.all([V.balances(address), getPrices(ALL_MINTS).catch(() => ({} as Record<string, number>))]);
   } catch (e) {
     await save(admin, bot, mem, { last_message: `Données indisponibles (${(e as Error).message.slice(0, 80)}). Je réessaie dans une minute.` });
     return "data_unavailable";
@@ -90,13 +93,13 @@ export async function runTick(admin: Admin): Promise<string> {
 
   // 2. Transaction en attente : on attend la vérité de la blockchain avant toute nouvelle décision.
   if (mem.pending) {
-    const r = await settle(admin, bot, mem, patch, address, value);
+    const r = await settle(V, admin, bot, mem, patch, address, value);
     if (r === "pending") {
       await save(admin, bot, mem, { ...patch, last_message: "Transaction en cours de confirmation…" });
       return "pending";
     }
     message = r;
-    b = await getBalances(address);
+    b = await V.balances(address);
     ({ value, complete } = portfolio(b, prices, b.sol));
   }
 
@@ -175,9 +178,9 @@ export async function runTick(admin: Admin): Promise<string> {
         : exitCheck({ side: "long", entry, price: livePrice, stop, initialRisk: mem.initialRisk ?? entry * 0.05, openedAt: mem.openedAt ?? now }, now);
       const pnlPct = mem.costUsd ? (((b.ui[mint] ?? 0) * livePrice) / mem.costUsd - 1) * 100 : (livePrice / entry - 1) * 100;
       if (exit) {
-        const sig = await sellAll(mint, b, address, keyPair);
+        const sig = await sellAll(V, mint, b, address, keyPair);
         mem.pending = { kind: "sell", sig, at: now, mint, usdcBefore: b.usdc, reason: exit };
-        const r = (await waitForTx(sig)) === "pending" ? "pending" : await settle(admin, bot, mem, patch, address, value);
+        const r = (await V.wait(sig)) === "pending" ? "pending" : await settle(V, admin, bot, mem, patch, address, value);
         await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: r === "pending" ? `Vente ${symbolOf(mint)} envoyée (${label(exit)}), confirmation en cours…` : r });
         return "sell";
       }
@@ -285,14 +288,14 @@ export async function runTick(admin: Admin): Promise<string> {
       await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: `Signal ${pick.token.symbol} ignoré : exécution trop chère (impact ${impact.toFixed(2)} %) ou prix déjà trop loin.` });
       return "hold";
     }
-    const sig = await executeSwap(quote, address, keyPair);
+    const sig = await V.swap(quote, address, keyPair);
     Object.assign(mem, {
       pending: { kind: "buy", sig, at: now, mint: pick.token.mint, usdcBefore: b.usdc },
       stop: pick.sig.stop, best: fillPrice, initialRisk: fillPrice - pick.sig.stop, openedAt: now, asset: pick.token.symbol, side: "long",
       strategy: pick.strategy, posParams: pick.params, posInterval: pick.interval, source: pick.source,
       signal: `${pick.token.symbol} : ${pick.sig.reason}`, stopCandle: closed,
     });
-    const r = (await waitForTx(sig)) === "pending" ? "pending" : await settle(admin, bot, mem, patch, address, value);
+    const r = (await V.wait(sig)) === "pending" ? "pending" : await settle(V, admin, bot, mem, patch, address, value);
     await save(admin, bot, mem, { ...patch, last_value_usd: value,
       last_message: r === "pending" ? `Achat ${pick.token.symbol} envoyé, confirmation en cours…` : r });
     return "buy";
@@ -304,12 +307,12 @@ export async function runTick(admin: Admin): Promise<string> {
 
 // ------------------------------------------------------------------------------------------------
 /** Règle une transaction en attente d'après la blockchain et le portefeuille. Renvoie un message, ou "pending". */
-async function settle(admin: Admin, bot: BotRow, mem: Memory, patch: Partial<BotRow>, address: string, valueBefore: number): Promise<string> {
+async function settle(V: Venue, admin: Admin, bot: BotRow, mem: Memory, patch: Partial<BotRow>, address: string, valueBefore: number): Promise<string> {
   const p = mem.pending!;
-  const st = await txStatus(p.sig).catch(() => "pending" as const);
+  const st = await V.status(p.sig).catch(() => "pending" as const);
   if (st === "pending" && Date.now() - p.at < 120_000) return "pending";
   const mint = p.mint!;
-  const [b, prices] = await Promise.all([getBalances(address), getPrices([USDC_MINT, mint]).catch(() => ({} as Record<string, number>))]);
+  const [b, prices] = await Promise.all([V.balances(address), getPrices([USDC_MINT, mint]).catch(() => ({} as Record<string, number>))]);
   const held = holds(b, mint, prices);
   mem.pending = undefined;
 
@@ -347,19 +350,20 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, patch: Partial<Bot
 
 /** Vend tout et termine la mission (signature inchangée pour l'interface existante). */
 export async function liquidate(admin: Admin, bot: BotRow, outcome: "success" | "destroyed" | "stopped", message: string) {
-  const { address, keyPair } = await loadKeyPairFrom(WALLET_ENV);
+  const V = venueFor("spot", bot, admin);
+  const { address, keyPair } = await V.wallet();
   const mem = loadMemory(bot.price_history);
-  let b = await getBalances(address);
+  let b = await V.balances(address);
   const prices = await getPrices(ALL_MINTS).catch(() => ({} as Record<string, number>));
   const failures: string[] = [];
   for (const t of TOKENS) {
     if (t.mint === SOL_MINT || !holds(b, t.mint, prices)) continue;
     try {
       const usdcBefore = b.usdc;
-      const sig = await sellAll(t.mint, b, address, keyPair);
-      const st = await waitForTx(sig, 25_000);
+      const sig = await sellAll(V, t.mint, b, address, keyPair);
+      const st = await V.wait(sig, 25_000);
       if (st !== "confirmed") throw new Error(`transaction ${st}`);
-      b = await getBalances(address);
+      b = await V.balances(address);
       const proceeds = b.usdc - usdcBefore;
       const cost = t.mint === bot.position_mint ? mem.costUsd ?? proceeds : proceeds;
       admin.addTrade("spot", { side: "sell", symbol: t.symbol, mint: t.mint, amount_usd: proceeds, price: prices[t.mint] ?? 0, pnl_usd: proceeds - cost, reason: outcome, signature: sig });

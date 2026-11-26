@@ -22,6 +22,7 @@ export interface BotState {
   position_side: string | null;
   price_history: unknown;
   config: unknown;                 // réglages choisis dans l'app (stratégie spot, paramètres RSI)
+  paper?: unknown;                 // mode paper trade : portefeuille fictif (voir engine/venue.ts)
   last_value_usd: number | null;
   last_tick_at: string | null;
   last_message: string | null;
@@ -29,7 +30,7 @@ export interface BotState {
 
 export interface TradeRow {
   side?: string | null; action?: string; symbol?: string; asset?: string; mint?: string;
-  amount_usd?: number; collateral_usd?: number; price?: number; pnl_usd?: number; reason?: string; signature?: string | null; source?: string;
+  amount_usd?: number; collateral_usd?: number; price?: number; pnl_usd?: number; reason?: string; signature?: string | null; source?: string; paper?: boolean;
 }
 
 /** Interface utilisée par le moteur (identique à la version serveur). */
@@ -97,10 +98,11 @@ export class DbStore implements Store {
   }
 
   addTrade(kind: BotKind, row: TradeRow): void {
-    this.inserts.push({ ...row, bot: kind });
+    const paper = (this.row.paper as { on?: boolean } | null | undefined)?.on !== false; // sans réglage : paper
+    this.inserts.push({ ...row, bot: kind, paper });
     const what = (row.side ?? row.action ?? "").toUpperCase();
     const pnl = typeof row.pnl_usd === "number" ? ` · ${row.pnl_usd >= 0 ? "+" : ""}${row.pnl_usd.toFixed(2)} $` : "";
-    this.messages.push(`${what} ${row.symbol ?? row.asset ?? ""}${pnl}${row.reason ? ` (${row.reason})` : ""}`);
+    this.messages.push(`${paper ? "[PAPER] " : ""}${what} ${row.symbol ?? row.asset ?? ""}${pnl}${row.reason ? ` (${row.reason})` : ""}`);
   }
 
   /** Écrit les trades puis les champs modifiés, libère le verrou, envoie les notifications. */

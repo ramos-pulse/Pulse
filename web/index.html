@@ -58,6 +58,8 @@ main{max-width:560px;margin:0 auto;padding:4px 16px 20px}
 .row:last-child{border-bottom:0}
 .l1{font:600 14px var(--mono);letter-spacing:.05em}.l2{font:12px var(--mono);color:var(--muted);margin-top:3px}
 .r{text-align:right;font:600 14.5px var(--mono);white-space:nowrap}
+.pill.paper{background:rgba(120,170,255,.16);color:#9cc2ff}
+select{width:100%;min-height:44px;border-radius:12px;background:var(--card2);color:inherit;border:1px solid var(--line);padding:0 10px;font:500 13px var(--sans)}
 .pill{font:600 10.5px var(--mono);letter-spacing:.1em;padding:4px 9px;border-radius:99px;background:var(--card2);color:var(--muted)}
 .chips{display:flex;gap:8px;margin-bottom:14px;overflow-x:auto}
 .chip{padding:9px 15px;border-radius:99px;background:var(--card);border:1px solid var(--line);font:13px var(--mono);white-space:nowrap}
@@ -122,7 +124,7 @@ nav svg{width:22px;height:22px}nav button.on{color:var(--lime)}
 
 <script>
 {
-let TOKEN = "", BASE = "", S = null, PAGE = "home", HF = "all", BT = null, lastOk = 0, seen = 0;
+let HM = "all", TOKEN = "", BASE = "", S = null, PAGE = "home", HF = "all", BT = null, lastOk = 0, seen = 0;
 try { TOKEN = localStorage.getItem("pulse_token") || ""; BASE = localStorage.getItem("pulse_base") || ""; if (BASE && !/\.[a-z]+\/functions/.test(BASE)) BASE = serverUrl(BASE); seen = Number(localStorage.getItem("pulse_seen") || 0); } catch (e) {}
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -218,7 +220,7 @@ function missionCard(kind, title) {
   const wallet = S.wallets[kind];
   return `<div class="eyebrow">${title}</div>
   <div class="card">
-    <div class="status ${sc}"><span class="dot ${sc === "run" ? "ok" : sc === "pause" ? "warn" : ""}"></span>${st}${m.pending ? ' <span class="pill">tx en cours</span>' : ""}</div>
+    <div class="status ${sc}"><span class="dot ${sc === "run" ? "ok" : sc === "pause" ? "warn" : ""}"></span>${st}${m.pending ? ' <span class="pill">tx en cours</span>' : ""}${b.paper?.on ? ' <span class="pill paper">PAPER · argent fictif</span>' : ""}</div>
     <div class="big">${nf(value)}<small>$</small></div>
     <div class="sub">sur un objectif de ${nf(goal, 0)} $${start ? ` · départ ${nf(start)} $` : ""}</div>
     <div class="bar"><i style="width:${prog}%"></i></div>
@@ -241,7 +243,7 @@ function missionCard(kind, title) {
   </div>
   <div class="card">
     <div class="v txt" style="font-weight:600">${kind === "spot" ? "Portefeuille du robot" : "Portefeuille perps"}</div>
-    ${wallet ? `<div class="addr">${esc(wallet)}</div><button class="btn sm" data-copy="${esc(wallet)}">Copier l'adresse</button>
+    ${b.paper?.on ? `<p class="sub" style="margin:8px 0 0">Mode paper : portefeuille fictif de ${nf(b.paper.startUsd, 0)} $ au départ. Mêmes décisions qu'en réel, ordres simulés aux vrais prix de Jupiter (frais et impact inclus, avec une marge de prudence). Aucune transaction, aucun fonds engagé. Change de mode dans Réglages.</p>` : wallet ? `<div class="addr">${esc(wallet)}</div><button class="btn sm" data-copy="${esc(wallet)}">Copier l'adresse</button>
       <p class="sub" style="margin:12px 0 0">Dépose des USDC (Solana) + environ 0,03 SOL pour les frais. ${kind === "perps" ? "Minimum 10 $ d'USDC pour ouvrir une position." : ""}</p>`
       : `<p class="sub" style="margin:8px 0 0">Secret ${kind === "spot" ? "BOT_WALLET_PRIVATE_KEY" : "PERPS_WALLET_PRIVATE_KEY"} absent dans Supabase (Edge Functions → Secrets).</p>`}
   </div>`;
@@ -303,13 +305,14 @@ function rulesNote() {
 }
 
 function renderHist() {
-  const rows = ["spot", "perps"].flatMap(k => S.bots[k].trades.map(t => ({...t, k}))).filter(t => HF === "all" || t.k === HF)
+  const rows = ["spot", "perps"].flatMap(k => S.bots[k].trades.map(t => ({...t, k}))).filter(t => (HF === "all" || t.k === HF) && (HM === "all" || (HM === "paper") === !!t.paper))
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   const closes = rows.filter(t => t.pnl_usd != null), wins = closes.filter(t => t.pnl_usd > 0);
   const gw = wins.reduce((s, t) => s + t.pnl_usd, 0), gl = -closes.filter(t => t.pnl_usd <= 0).reduce((s, t) => s + t.pnl_usd, 0);
   const net = gw - gl, pf = gl ? gw / gl : gw ? Infinity : 0;
   $("#p-hist").innerHTML = `<div class="eyebrow">Historique</div>
     <div class="chips">${[["all", "Tout"], ["spot", "Spot"], ["perps", "Perps"]].map(([k, l]) => `<button class="chip ${HF === k ? "on" : ""}" data-hf="${k}">${l}</button>`).join("")}</div>
+    <div class="chips">${[["all", "Réel + paper"], ["real", "Réel"], ["paper", "Paper"]].map(([k, l]) => `<button class="chip ${HM === k ? "on" : ""}" data-hm="${k}">${l}</button>`).join("")}</div>
     <div class="card"><div class="grid" style="margin-top:0">
       <div><div class="k">Trades clôturés</div><div class="v">${closes.length}</div></div>
       <div><div class="k">Gagnants</div><div class="v">${closes.length ? nf(wins.length / closes.length * 100, 0) + " %" : "—"}</div></div>
@@ -319,7 +322,7 @@ function renderHist() {
     <div class="card">${rows.map(t => { const act = (t.side || t.action || "").toUpperCase(), sell = act === "SELL" || act === "CLOSE";
       const label = {BUY: "ACHAT", SELL: "VENTE", OPEN: "OUVRE", CLOSE: "FERME"}[act] || act;
       const amt = t.amount_usd ?? t.collateral_usd;
-      return `<div class="row"><div><div class="l1"><span class="${sell ? "amber" : "up"}">${label}</span> ${t.k === "perps" && t.side ? esc(t.side.toUpperCase()) + " " : ""}${esc(t.symbol || t.asset)}</div>
+      return `<div class="row"><div><div class="l1"><span class="${sell ? "amber" : "up"}">${label}</span> ${t.k === "perps" && t.side ? esc(t.side.toUpperCase()) + " " : ""}${esc(t.symbol || t.asset)}${t.paper ? ' <span class="pill paper">PAPER</span>' : ""}</div>
         <div class="l2">${new Date(t.created_at).toLocaleString("fr-FR", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"})} · ${esc(t.reason || "")}</div></div>
         <div class="r">${amt != null ? nf(amt) + " $" : ""}${t.pnl_usd != null ? `<div class="${cl(t.pnl_usd)}">${sg(t.pnl_usd)} $</div>` : ""}
         ${t.signature ? `<div class="l2"><a href="https://solscan.io/tx/${esc(t.signature)}" target="_blank" rel="noopener">tx ↗</a></div>` : ""}</div></div>`; }).join("") || `<div class="sub">Aucun trade pour l'instant.</div>`}</div>`;
@@ -351,7 +354,13 @@ function renderSet() {
     ${["spot", "perps"].map(k => `<div class="card"><div class="v txt" style="font-weight:600">${k === "spot" ? "Bot 1 · Spot" : "Bot 2 · Perps"}</div>
       <label class="field"><span>Objectif ($)</span><input type="number" inputmode="decimal" id="goal-${k}" value="${g(k).goal_usd}"></label>
       <label class="field"><span>Échéance dans (jours)</span><input type="number" inputmode="numeric" id="days-${k}" placeholder="${g(k).end_at ? Math.max(0, Math.ceil((new Date(g(k).end_at) - Date.now()) / 86400000)) : 30}"></label>
-      <button class="btn sm" style="width:100%;margin-top:12px" data-goal="${k}">Enregistrer</button></div>`).join("")}
+      <button class="btn sm" style="width:100%;margin-top:12px" data-goal="${k}">Enregistrer</button>
+      <div class="sep"></div>
+      <div class="k">Mode de trading</div>
+      <div class="chips" style="margin:8px 0 0"><button class="chip ${g(k).paper?.on ? "on" : ""}" data-pp="${k}" data-on="1">Paper (fictif)</button><button class="chip ${g(k).paper?.on ? "" : "on"}" data-pp="${k}" data-on="0">Réel</button></div>
+      <label class="field"><span>Capital fictif ($)</span><input type="number" inputmode="decimal" id="pusd-${k}" value="${g(k).paper?.startUsd ?? 100}"></label>
+      <p class="sub" style="margin:6px 0 0">Changer de mode n'est possible que bot arrêté. Le capital fictif est remis à neuf à chaque nouvelle mission paper.</p>
+      <button class="btn sm" style="width:100%;margin-top:10px" id="paperSave-${k}" data-papersave="${k}" data-on="${g(k).paper?.on ? "1" : "0"}">Enregistrer le mode</button></div>`).join("")}
     ${strategyCard()}
     ${perpsCard()}
     <div class="eyebrow">Connexions</div>
@@ -387,9 +396,22 @@ function strategyCard() {
 }
 
 // ---------------------------------------------------------------- agent chercheur
-let AG = null, AGS = null, CHAT = [], AG_BUSY = false, SW_BUSY = false;
+let PC = null, AG = null, AGS = null, CHAT = [], AG_BUSY = false, SW_BUSY = false;
 try { CHAT = JSON.parse(localStorage.getItem("pulse_chat") || "[]"); } catch (e) {}
-async function loadAg() { try { [AG, AGS] = await Promise.all([api("/api/research"), api("/api/agents")]); } catch (e) {} if (PAGE === "ag") renderAg(); }
+async function loadAg() { try { [AG, AGS, PC] = await Promise.all([api("/api/research"), api("/api/agents"), api("/api/paper/candidates").then(r => r.list)]); } catch (e) {} if (PAGE === "ag") renderAg(); }
+function paperCard() {
+  if (!PC) return "";
+  const prev = $("#paperPick")?.value || "";
+  const opt = r => `<option value="${r.id}" ${String(r.id) === prev ? "selected" : ""}>#${r.id} · ${esc(r.market)} · ${r.family === "rsi" ? "RSI" : "tendance"} · PF ${nf(r.test?.profitFactor)}${r.origin === "mathématicien" ? " · ∑" : ""} · ${esc(r.verdict)}${r.paper ? ` · paper ${sg(r.paper.pnlUsd)} $` : ""}</option>`;
+  const group = (k, label) => { const l = PC.filter(r => r.kind === k); return l.length ? `<optgroup label="${label}">${l.map(opt).join("")}</optgroup>` : ""; };
+  const tests = ["spot", "perps"].filter(k => S?.bots[k].paper?.on && (S.bots[k].status === "running" || S.bots[k].status === "paused"));
+  return `<div class="eyebrow">Tester en paper</div><div class="card">
+    <p class="sub" style="margin:0 0 10px">Choisis une stratégie trouvée par le chercheur ou le mathématicien : le bot la trade avec de l'argent fictif, aux vrais prix, pour voir ce qu'elle donne en conditions réelles sans rien risquer.</p>
+    ${PC.length ? `<select id="paperPick"><option value="">Choisir une stratégie…</option>${group("spot", "Bot spot")}${group("perps", "Bot perps")}</select>
+    <button class="btn go sm" style="width:100%;margin-top:10px" id="paperTest">Tester en paper</button>` : `<p class="sub">Aucune stratégie disponible pour l'instant.</p>`}
+    ${tests.length ? `<p class="sub" style="margin:10px 0 0">En test paper : ${tests.map(k => `bot ${k} (${esc((k === "spot" ? (S.bots.spot.config.plans || []).map(p => p.source).join(", ") : S.bots.perps.config.plan?.source) || "réglages")})`).join(" · ")}</p>` : ""}
+  </div>`;
+}
 function mathCard() {
   const m = AGS?.math; if (!m) return "";
   const pct = x => x == null ? "—" : `${nf(x, 1)} %`;
@@ -447,9 +469,10 @@ function renderAg() {
         <div><div class="k">Pire baisse</div><div class="v">${nf(r.test.maxDrawdownPct, 1)} %</div></div>
       </div>
       ${r.live ? `<div class="sep"></div><div class="k">En réel (trades des bots)</div><div class="v ${cl(r.live.pnlUsd)}" style="font-size:15px">${r.live.trades} trades · ${sg(r.live.pnlUsd)} $ · PF ${nf(r.live.profitFactor)}</div>` : ""}
+      ${r.paper ? `<div class="sep"></div><div class="k">En paper (argent fictif)</div><div class="v ${cl(r.paper.pnlUsd)}" style="font-size:15px">${r.paper.trades} trades · ${sg(r.paper.pnlUsd)} $ · PF ${nf(r.paper.profitFactor)}</div>` : ""}
       ${r.verdict === "déçue en réel" ? `<p class="sub" style="margin:8px 0 0">${esc(r.why)}</p>` : ""}
       <button class="btn sm" style="width:100%;margin-top:14px" data-apply="${r.id}" data-desc="${esc(r.description)}" data-kind="${r.kind}">${r.kind === "spot" ? "Ajouter au bot spot" : "Appliquer au bot perps"}</button></div>`).join("");
-  el.innerHTML = `${mathCard()}${swapCard()}<div class="eyebrow">Le Chercheur</div>
+  el.innerHTML = `${paperCard()}${mathCard()}${swapCard()}<div class="eyebrow">Le Chercheur</div>
     <div class="card"><div class="status run"><span class="dot ok"></span>Recherche en continu</div>
       <div class="big" style="font-size:40px">${AG ? nf(AG.tested, 0) : "…"}<small>stratégies testées</small></div>
       <div class="sub">Toutes les 5 minutes, il invente et teste de nouvelles stratégies, puis les juge sur 30 jours qu'il n'a jamais vus.${AG?.lastAt ? ` Dernière recherche il y a ${ago(AG.lastAt)}.` : ""}</div>
@@ -480,6 +503,20 @@ document.addEventListener("click", async e => {
   const t = e.target.closest("button"); if (!t) return;
   if (t.dataset.copy) { try { await navigator.clipboard.writeText(t.dataset.copy); toast("Adresse copiée"); } catch (err) { toast("Copie impossible"); } return; }
   if (t.dataset.hf) { HF = t.dataset.hf; renderHist(); return; }
+  if (t.dataset.hm) { HM = t.dataset.hm; renderHist(); return; }
+  if (t.dataset.pp) { document.querySelectorAll(`[data-pp="${t.dataset.pp}"]`).forEach(x => x.classList.toggle("on", x === t)); $("#paperSave-" + t.dataset.pp).dataset.on = t.dataset.on; return; }
+  if (t.dataset.papersave) { const k = t.dataset.papersave, on = t.dataset.on === "1";
+    if (!on && S.bots[k].paper?.on && !confirm("Passer en RÉEL ? Le bot tradera avec les vrais fonds du wallet à la prochaine mission.")) return;
+    try { const r = await api(`/api/${k}/paper`, {method: "POST", body: JSON.stringify({on, startUsd: Number($("#pusd-" + k).value)})});
+      toast(r.paper.on ? `Paper activé · ${nf(r.paper.startUsd, 0)} $ fictifs` : "Mode réel activé"); } catch (e) {}
+    await refresh(); renderSet(); return; }
+  if (t.id === "paperTest") { const id = +$("#paperPick").value; if (!id) return toast("Choisis une stratégie");
+    const c = (PC || []).find(x => x.id === id);
+    sheet(`<h3>Tester en paper la stratégie #${id} ?</h3><p>${esc(c?.market || "")} · ${esc(c?.description || "")}</p><p>Le bot ${c?.kind === "spot" ? "spot" : "perps"} passe en paper (argent fictif) si besoin, trade uniquement cette stratégie et démarre s'il était arrêté. Le pilote automatique de ce bot est coupé pendant le test. Impossible si ce bot est en mission réelle.</p>
+      <div class="btns"><button class="btn" id="sheetCancel">Annuler</button><button class="btn go" data-dopaper="${id}">Tester</button></div>`); return; }
+  if (t.dataset.dopaper) { closeSheet();
+    try { const r = await api("/api/paper/test", {method: "POST", body: JSON.stringify({id: +t.dataset.dopaper})}); toast(`Test paper lancé sur le bot ${r.kind}`); } catch (e) {}
+    await refresh(); loadAg(); return; }
   if (t.id === "chatSend") return sendChat();
   if (t.id === "swapRun") { if (SW_BUSY) return; SW_BUSY = true; renderAg();
     try { const r = await api("/api/agents/swap/run", {method: "POST"});
@@ -529,7 +566,7 @@ document.addEventListener("click", async e => {
   if (act === "start") {
     const b = S.bots[k];
     if (b.status === "paused") { await api(`/api/${k}/start`, {method: "POST", body: "{}"}); toast("Mission reprise"); refresh(); return; }
-    sheet(`<h3>Lancer la mission</h3><p>Le bot va trader avec les fonds du portefeuille ${k === "spot" ? "spot" : "perps"}.</p>
+    sheet(`<h3>Lancer la mission</h3>${b.paper?.on ? `<p><span class="pill paper">PAPER</span> Le bot va trader avec un portefeuille fictif de ${nf(b.paper.startUsd, 0)} $ : aucun vrai fonds engagé.</p>` : `<p><b>Mode RÉEL :</b> le bot va trader avec les vrais fonds du portefeuille ${k === "spot" ? "spot" : "perps"}.</p>`}
       <label class="field"><span>Objectif ($)</span><input type="number" id="sg" value="${b.goal_usd}"></label>
       <label class="field"><span>Échéance (jours)</span><input type="number" id="sd" value="30"></label>
       <div class="btns" style="margin-top:16px"><button class="btn" id="sheetCancel">Annuler</button><button class="btn go" data-act="go" data-k="${k}">Lancer</button></div>`);
