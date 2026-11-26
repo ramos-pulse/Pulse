@@ -249,7 +249,6 @@ function render() {
   fresh(); if (!S) return;
   let a = "";
   if (!S.secrets.customRpc) a += `<div class="warnbox">RPC Solana public utilisé : ajoute le secret SOLANA_RPC_URL (ton lien Helius) dans Supabase.</div>`;
-  if (!S.secrets.telegram && PAGE === "home") a += `<div class="warnbox">Ajoute les secrets TELEGRAM_BOT_TOKEN et TELEGRAM_CHAT_ID dans Supabase pour être prévenu même téléphone verrouillé.</div>`;
   $("#alerts").innerHTML = a;
   const sc = S.bots.spot.config || {};
   const spotStrat = sc.autopilot ? `Pilote auto${sc.plans?.length ? " · " + sc.plans.map(p => p.symbol + (p.interval === "15m" ? " 15m" : "")).join(", ") : " · en attente"}`
