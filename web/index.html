@@ -110,7 +110,7 @@ nav svg{width:22px;height:22px}nav button.on{color:var(--lime)}
 <script>
 {
 let TOKEN = "", BASE = "", S = null, PAGE = "home", HF = "all", BT = null, lastOk = 0, seen = 0;
-try { TOKEN = localStorage.getItem("pulse_token") || ""; BASE = localStorage.getItem("pulse_base") || ""; seen = Number(localStorage.getItem("pulse_seen") || 0); } catch (e) {}
+try { TOKEN = localStorage.getItem("pulse_token") || ""; BASE = localStorage.getItem("pulse_base") || ""; if (BASE && !/\.[a-z]+\/functions/.test(BASE)) BASE = serverUrl(BASE); seen = Number(localStorage.getItem("pulse_seen") || 0); } catch (e) {}
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const nf = (n, d = 2) => n == null || !isFinite(n) ? "—" : Number(n).toLocaleString("fr-FR", {minimumFractionDigits: d, maximumFractionDigits: d});
@@ -140,9 +140,11 @@ async function api(path, opts = {}) {
 function showLogin(err) { $("#login").style.display = "flex"; $("#app").style.display = "none";
   const box = $("#loginErr"); if (box) { box.style.display = err ? "block" : "none"; box.textContent = err || ""; } if (BASE) $("#srv").value = BASE.replace(/\/functions\/v1\/pulse$/, ""); }
 /** Accepte « abcd1234 », « abcd1234.supabase.co » ou l'URL complète. */
-function serverUrl(v) { v = v.trim().replace(/\/+$/, ""); if (!v) return "";
-  if (!/^https?:\/\//.test(v)) v = "https://" + (v.includes(".") ? v : v + ".supabase.co");
-  return v.includes("/functions/v1/pulse") ? v : v + "/functions/v1/pulse"; }
+function serverUrl(v) {
+  v = v.trim().replace(/\s+/g, "").replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  if (!v) return "";
+  if (!v.includes(".")) v += ".supabase.co";          // « abcd » → « abcd.supabase.co », avec ou sans https://
+  return "https://" + v + "/functions/v1/pulse"; }
 $("#loginBtn").onclick = () => { BASE = serverUrl($("#srv").value); TOKEN = $("#tok").value.trim();
   if (!BASE || !TOKEN) return toast("Remplis les deux champs");
   try { localStorage.setItem("pulse_token", TOKEN); localStorage.setItem("pulse_base", BASE); } catch (e) {}
