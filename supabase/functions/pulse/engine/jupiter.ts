@@ -122,3 +122,31 @@ export async function perpsClose(pubkey: string, slippageBps: number, keyPair: K
   if (!res.ok || !json.serializedTxBase64) throw new Error(`Fermeture refusée (${res.status}) : ${json.message ?? json.error ?? "réponse vide"}`);
   return perpsExecute(json.serializedTxBase64, "decrease-position", keyPair);
 }
+
+// ------------------------------------ Contrôle des tokens ------------------------------------
+const verified = new Map<string, { ok: boolean; at: number; why: string }>();
+
+/**
+ * Vérifie sur Jupiter qu'une adresse correspond bien au token attendu (symbole + décimales) avant tout achat.
+ * Résultat gardé 6 h. En cas de doute (API muette, symbole ou décimales différents), le token est refusé.
+ */
+export async function verifyToken(t: { symbol: string; mint: string; decimals: number; verify: boolean }): Promise<{ ok: boolean; why: string }> {
+  if (!t.verify) return { ok: true, why: "token d'origine" };
+  const hit = verified.get(t.mint);
+  if (hit && Date.now() - hit.at < 6 * 3_600_000) return hit;
+  let res = { ok: false, why: "contrôle Jupiter indisponible" };
+  try {
+    const r = await fetch(`${JUP}/tokens/v2/search?query=${t.mint}`, { signal: AbortSignal.timeout(8_000) });
+    if (r.ok) {
+      const list = (await r.json()) as { id?: string; symbol?: string; decimals?: number }[];
+      const info = Array.isArray(list) ? list.find((x) => x.id === t.mint) : undefined;
+      if (!info) res = { ok: false, why: "adresse inconnue de Jupiter" };
+      else if (String(info.symbol).toUpperCase() !== t.symbol.toUpperCase()) res = { ok: false, why: `symbole ${info.symbol} au lieu de ${t.symbol}` };
+      else if (info.decimals !== t.decimals) res = { ok: false, why: `décimales ${info.decimals} au lieu de ${t.decimals}` };
+      else res = { ok: true, why: "vérifié sur Jupiter" };
+    }
+  } catch { /* res reste « indisponible » : on n'achète pas ce token pour l'instant */ }
+  // un refus définitif (mauvais symbole/décimales) est gardé 6 h ; une panne d'API est retentée au prochain tick
+  if (res.ok || res.why !== "contrôle Jupiter indisponible") verified.set(t.mint, { ...res, at: Date.now() });
+  return res;
+}

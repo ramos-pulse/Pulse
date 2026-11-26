@@ -64,6 +64,7 @@ table{width:100%;border-collapse:collapse;font:12.5px var(--mono)}th,td{padding:
 .note{font-size:13px;color:var(--muted);text-align:center;margin:6px 10px 18px}
 .warnbox{border:1px solid rgba(242,181,79,.4);background:rgba(242,181,79,.08);color:#f6d79a;border-radius:16px;padding:12px 14px;font-size:14px;margin-bottom:14px}
 .field{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}.field:last-child{border-bottom:0}
+input[type=checkbox]{accent-color:var(--lime)}
 input[type=range]{width:100%;accent-color:var(--lime);padding:0;border:0;background:none;height:36px}
 input{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:12px;padding:12px;font:16px var(--mono);width:130px;text-align:right}
 .bubble{max-width:86%;padding:11px 14px;border-radius:16px;margin:8px 0;white-space:pre-wrap;line-height:1.45;font-size:15px}
@@ -250,7 +251,9 @@ function render() {
   if (!S.secrets.customRpc) a += `<div class="warnbox">RPC Solana public utilisé : ajoute le secret SOLANA_RPC_URL (ton lien Helius) dans Supabase.</div>`;
   if (!S.secrets.telegram && PAGE === "home") a += `<div class="warnbox">Ajoute les secrets TELEGRAM_BOT_TOKEN et TELEGRAM_CHAT_ID dans Supabase pour être prévenu même téléphone verrouillé.</div>`;
   $("#alerts").innerHTML = a;
-  const spotStrat = S.bots.spot.config?.strategy === "rsi" ? (S.bots.spot.config.rsi.naive ? "RSI naïf" : "RSI") : "Tendance";
+  const sc = S.bots.spot.config || {};
+  const spotStrat = sc.autopilot ? `Pilote auto${sc.plans?.length ? " · " + sc.plans.map(p => p.symbol + (p.interval === "15m" ? " 15m" : "")).join(", ") : " · en attente"}`
+    : sc.plans?.length ? `Chercheur · ${sc.plans.map(p => p.symbol).join(", ")}` : sc.strategy === "rsi" ? (sc.rsi.naive ? "RSI naïf" : "RSI") : "Tendance";
   if (PAGE === "home") $("#p-home").innerHTML = missionCard("spot", `Bot 1 · Spot Solana · ${spotStrat}`) + missionCard("perps", `Bot 2 · Perps SOL · ${perpsLabel()}`) + rulesNote();
   if (PAGE === "hist") renderHist();
   if (PAGE === "bt") renderBt();
@@ -265,8 +268,9 @@ function biasText(b) {
   return b > 0 ? `Longs à 100 %, shorts à ${100 - b} %` : `Shorts à 100 %, longs à ${100 + b} %`;
 }
 function perpsLabel() {
-  const c = S.bots.perps.config || {mode: "normal", bias: 0}, ag = c.mode === "agressif";
-  return `${ag ? `Agressif x${S.rules.aggressive?.maxLeverage ?? 5}` : `x${S.rules.perps.maxLeverage} max`}${c.bias ? " · " + biasText(c.bias) : ""}`;
+  const c = S.bots.perps.config || {mode: "normal", bias: 0}, ag = c.mode === "agressif" && !c.autopilot;
+  const plan = c.plan ? ` · ${c.plan.asset}${c.plan.interval === "15m" ? " 15m" : ""}` : "";
+  return `${c.autopilot ? "Pilote auto" + (plan || " · en attente") : (ag ? `Agressif x${S.rules.aggressive?.maxLeverage ?? 5}` : `x${S.rules.perps.maxLeverage} max`) + plan}${c.bias ? " · " + biasText(c.bias) : ""}`;
 }
 function perpsCard() {
   const c = S.bots.perps.config || {mode: "normal", bias: 0}, ag = c.mode === "agressif", A = S.rules.aggressive || {};
@@ -388,10 +392,19 @@ async function loadAg() { try { AG = await api("/api/research"); } catch (e) {} 
 function renderAg() {
   const el = $("#p-ag"); if (!el) return;
   const keepDraft = $("#chatIn")?.value || "";
-  const active = ["spot", "perps"].map(k => ({k, c: S?.bots[k]?.config})).filter(x => x.c?.source);
+  const sc = S?.bots.spot.config || {}, pc = S?.bots.perps.config || {};
+  const planLine = p => `<div class="row"><div><div class="l1">${esc(p.symbol || p.asset)} <span class="mut" style="font-weight:400">${p.interval === "15m" ? "scalping 15 min" : "1 h"}</span></div><div class="l2">${esc(p.source)}</div></div></div>`;
+  const manual = (!sc.autopilot && sc.plans?.length) || (!pc.autopilot && pc.plan) || sc.source || pc.source;
+  const pilot = `<div class="card"><div class="v txt" style="font-weight:600">Pilote automatique</div>
+      <p class="sub" style="margin:6px 0 4px">Il choisit lui-même tokens et stratégies parmi ses découvertes validées (≥ 5 trades, profit factor ≥ 1,3 et baisse ≤ 10 % sur la période jamais vue). En perps, toujours en mode normal.</p>
+      <label class="field"><span>Bot spot</span><input type="checkbox" data-pilot="spot" ${sc.autopilot ? "checked" : ""} style="width:26px;height:26px"></label>
+      <label class="field"><span>Bot perps</span><input type="checkbox" data-pilot="perps" ${pc.autopilot ? "checked" : ""} style="width:26px;height:26px"></label>
+      ${(sc.plans?.length || pc.plan) ? `<div class="k" style="margin-top:12px">Plans en cours</div>${(sc.plans || []).map(planLine).join("")}${pc.plan ? planLine(pc.plan) : ""}` : (sc.autopilot || pc.autopilot) ? `<p class="sub" style="margin:10px 0 0">Aucune stratégie ne passe encore les critères : les bots attendent.</p>` : ""}
+      ${manual ? `<button class="btn sm" style="margin-top:12px;width:100%" data-auto="all">Revenir aux réglages automatiques du cerveau</button>` : ""}
+    </div>`;
   const cards = (AG?.best || []).map(r => `<div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div class="l1">#${r.id} · ${esc(r.market)}</div>
-        <span class="pill ${r.verdict === "prometteuse" ? "ok" : "mid"}">${esc(r.verdict)}</span></div>
+        <span class="pill ${r.verdict === "prometteuse" ? "ok" : "mid"}">${r.qualifies ? "✓ pilote" : esc(r.verdict)}</span></div>
       <div class="l2" style="margin-top:6px;line-height:1.5">${esc(r.description)}</div>
       <div class="grid" style="margin-top:14px">
         <div><div class="k">Période jamais vue</div><div class="v ${cl(r.test.returnPct)}">${sg(r.test.returnPct, 1)} %</div></div>
@@ -399,13 +412,13 @@ function renderAg() {
         <div><div class="k">Entraînement (PF)</div><div class="v">${nf(r.train.profitFactor)}</div></div>
         <div><div class="k">Pire baisse</div><div class="v">${nf(r.test.maxDrawdownPct, 1)} %</div></div>
       </div>
-      <button class="btn sm" style="width:100%;margin-top:14px" data-apply="${r.id}" data-desc="${esc(r.description)}" data-kind="${r.kind}">Appliquer au bot ${r.kind === "spot" ? "spot" : "perps"}</button></div>`).join("");
+      <button class="btn sm" style="width:100%;margin-top:14px" data-apply="${r.id}" data-desc="${esc(r.description)}" data-kind="${r.kind}">${r.kind === "spot" ? "Ajouter au bot spot" : "Appliquer au bot perps"}</button></div>`).join("");
   el.innerHTML = `<div class="eyebrow">Le Chercheur</div>
     <div class="card"><div class="status run"><span class="dot ok"></span>Recherche en continu</div>
       <div class="big" style="font-size:40px">${AG ? nf(AG.tested, 0) : "…"}<small>stratégies testées</small></div>
       <div class="sub">Toutes les 5 minutes, il invente et teste de nouvelles stratégies, puis les juge sur 30 jours qu'il n'a jamais vus.${AG?.lastAt ? ` Dernière recherche il y a ${ago(AG.lastAt)}.` : ""}</div>
       <button class="btn sm" style="width:100%;margin-top:14px" id="agRun">${AG_BUSY ? "Recherche en cours…" : "Chercher maintenant"}</button></div>
-    ${active.map(({k, c}) => `<div class="warnbox">Le bot ${k === "spot" ? "spot" : "perps"} utilise une stratégie du chercheur (${esc(c.source)}). <button class="btn sm" style="margin-top:8px;width:100%" data-auto="${k}">Revenir aux réglages automatiques</button></div>`).join("")}
+    ${pilot}
     <div class="eyebrow">Ses meilleures découvertes</div>
     ${cards || `<div class="card"><p class="sub" style="margin:0">Aucune stratégie n'a encore passé la validation sur une période jamais vue. C'est normal au début : il faut quelques heures de recherche.</p></div>`}
     <div class="eyebrow">Parler au chercheur</div>
@@ -437,11 +450,12 @@ document.addEventListener("click", async e => {
     try { const r = await api("/api/research/run", {method: "POST"}); toast(`${r.tested} stratégies testées sur ${r.market}`); } catch (e) {}
     AG_BUSY = false; await loadAg(); return; }
   if (t.dataset.apply) { const id = t.dataset.apply, kind = t.dataset.kind;
-    sheet(`<h3>Appliquer la stratégie #${esc(id)} ?</h3><p>${esc(t.dataset.desc)}</p><p>Le bot ${kind === "spot" ? "spot" : "perps"} l'utilisera pour ses prochaines entrées. Une position déjà ouverte garde ses règles. Tu pourras revenir aux réglages automatiques à tout moment.</p>
+    sheet(`<h3>Appliquer la stratégie #${esc(id)} ?</h3><p>${esc(t.dataset.desc)}</p><p>${kind === "spot" ? "Elle rejoint les plans du bot spot (3 maximum, une par token)." : "Elle remplace le plan du bot perps."} Une position déjà ouverte garde ses règles. Tu pourras revenir aux réglages automatiques à tout moment.</p>
       <div class="btns"><button class="btn" id="sheetCancel">Annuler</button><button class="btn go" data-doapply="${esc(id)}">Appliquer</button></div>`); return; }
   if (t.dataset.doapply) { closeSheet(); const r = await api("/api/research/apply", {method: "POST", body: JSON.stringify({id: +t.dataset.doapply})});
     toast(`Stratégie appliquée au bot ${r.kind}`); await refresh(); loadAg(); return; }
-  if (t.dataset.auto) { await api(`/api/${t.dataset.auto}/config`, {method: "POST", body: JSON.stringify({trend: null})}); toast("Retour aux réglages automatiques"); await refresh(); loadAg(); return; }
+  if (t.dataset.auto) { for (const k of t.dataset.auto === "all" ? ["spot", "perps"] : [t.dataset.auto]) await api(`/api/${k}/config`, {method: "POST", body: JSON.stringify({trend: null})});
+    toast("Retour aux réglages automatiques"); await refresh(); loadAg(); return; }
   if (t.dataset.strat) { document.querySelectorAll("[data-strat]").forEach(x => x.classList.toggle("on", x === t));
     $("#rsiFields").style.display = t.dataset.strat === "rsi" ? "" : "none"; $("#saveStrat").dataset.sel = t.dataset.strat; return; }
   if (t.dataset.pmode) {
@@ -485,6 +499,13 @@ document.addEventListener("click", async e => {
   if (act === "kill") { closeSheet(); toast("Fermeture en cours… (jusqu'à 1 min)"); try { await api(`/api/${k}/stop`, {method: "POST"}); toast("Arrêté"); } catch (err) {} refresh(); }
 });
 
+document.addEventListener("change", async e => {
+  const k = e.target.dataset?.pilot; if (!k) return;
+  const on = e.target.checked;
+  try { const r = await api("/api/autopilot", {method: "POST", body: JSON.stringify({[k]: on})});
+    toast(on ? `Pilote automatique activé (${k}) : ${r.pilot}` : `Pilote automatique coupé (${k})`); } catch (err) { e.target.checked = !on; }
+  await refresh(); loadAg();
+});
 document.addEventListener("input", e => { if (e.target.id === "pbias") $("#pbiasTxt").textContent = biasText(+e.target.value); });
 setInterval(() => { if (PAGE === "ag" && !document.hidden && !AG_BUSY) loadAg(); }, 60000);
 document.addEventListener("keydown", e => { if (e.target.id === "chatIn" && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });

@@ -17,14 +17,33 @@
 export const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-/** `candles` = produit Coinbase utilisé pour l'historique horaire du jeton. */
+/**
+ * Univers de tokens « établis » que les bots et le chercheur peuvent trader (jamais de memecoin de quelques heures).
+ * `candles` = produit Coinbase pour l'historique. `verify` = l'adresse est contrôlée sur Jupiter (symbole + décimales)
+ * avant tout achat : si le contrôle échoue, le token est simplement ignoré.
+ */
 export const TOKENS = [
-  { symbol: "SOL", mint: SOL_MINT, decimals: 9, candles: "SOL-USD" },
-  { symbol: "JUP", mint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", decimals: 6, candles: "JUP-USD" },
-  { symbol: "BONK", mint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", decimals: 5, candles: "BONK-USD" },
-  { symbol: "WBTC", mint: "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh", decimals: 8, candles: "BTC-USD" },
-  { symbol: "WETH", mint: "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs", decimals: 8, candles: "ETH-USD" },
+  { symbol: "SOL", mint: SOL_MINT, decimals: 9, candles: "SOL-USD", verify: false },
+  { symbol: "JUP", mint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", decimals: 6, candles: "JUP-USD", verify: false },
+  { symbol: "BONK", mint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", decimals: 5, candles: "BONK-USD", verify: false },
+  { symbol: "WBTC", mint: "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh", decimals: 8, candles: "BTC-USD", verify: false },
+  { symbol: "WETH", mint: "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs", decimals: 8, candles: "ETH-USD", verify: false },
+  { symbol: "WIF", mint: "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", decimals: 6, candles: "WIF-USD", verify: true },
+  { symbol: "JTO", mint: "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL", decimals: 9, candles: "JTO-USD", verify: true },
+  { symbol: "PYTH", mint: "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3", decimals: 6, candles: "PYTH-USD", verify: true },
+  { symbol: "RENDER", mint: "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof", decimals: 8, candles: "RENDER-USD", verify: true },
+  { symbol: "RAY", mint: "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R", decimals: 6, candles: "RAY-USD", verify: true },
+  { symbol: "POPCAT", mint: "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr", decimals: 9, candles: "POPCAT-USD", verify: true },
 ] as const;
+
+/** Unités de temps des bougies : 1 h (suivi de tendance classique) ou 15 min (scalping prudent). */
+export type Interval = "1h" | "15m";
+export const INTERVAL_MS: Record<Interval, number> = { "1h": 3_600_000, "15m": 900_000 };
+export const asInterval = (v: unknown): Interval => (v === "15m" ? "15m" : "1h");
+
+/** Un « plan » choisi par le chercheur : quel token, quelle stratégie, quels réglages, quelle unité de temps. */
+export interface SpotPlan { symbol: string; family: "tendance" | "rsi"; params: Params | RsiParams; interval: Interval; source: string; score: number }
+export interface PerpsPlan { asset: string; params: Params; interval: Interval; source: string; score: number }
 
 export interface Params { breakout: number; trailAtr: number; minTrend: number }
 /** Jeux de paramètres testés chaque jour par le cerveau du bot (peu nombreux pour éviter la sur-optimisation). */
@@ -76,7 +95,12 @@ export const PERPS_RULES = {
   takeProfit: 0, stopLoss: -STRATEGY.stopAtr, entryMomentum: 0, window: 0, trailActivate: 0, trailGap: 0,
 };
 
-export const PERPS_ASSETS = [{ asset: "SOL", mint: SOL_MINT, candles: "SOL-USD" }] as const;
+/** Marchés Jupiter Perps : SOL, ETH et BTC. */
+export const PERPS_ASSETS = [
+  { asset: "SOL", mint: SOL_MINT, candles: "SOL-USD" },
+  { asset: "ETH", mint: "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs", candles: "ETH-USD" },
+  { asset: "BTC", mint: "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh", candles: "BTC-USD" },
+] as const;
 export type PerpsAsset = (typeof PERPS_ASSETS)[number]["asset"];
 export type PerpsSide = "long" | "short";
 export type Side = PerpsSide;
@@ -194,7 +218,7 @@ export function perpsSizing(equity: number, usdc: number, entry: number, stop: n
 // Réglages du bot perps : mode agressif et biais longs / shorts
 // ---------------------------------------------------------------------------------------------------
 export type PerpsMode = "normal" | "agressif";
-export interface PerpsConfig { mode: PerpsMode; bias: number; trend: Params | null; source?: string } // bias : -100 = shorts seulement, 0 = équilibré, +100 = longs seulement
+export interface PerpsConfig { mode: PerpsMode; bias: number; trend: Params | null; source?: string; autopilot: boolean; plan: PerpsPlan | null } // bias : -100 = shorts seulement, 0 = équilibré, +100 = longs seulement
 
 /** Mode agressif : risque doublé (plafond 3 %), levier jusqu'à x5, perte max 8 %/jour, trade même sans réglage validé. */
 export const AGGRESSIVE = { riskMult: 2, maxRisk: 0.03, maxLeverage: 5, dailyLoss: 0.08 };
@@ -203,7 +227,17 @@ export function loadPerpsConfig(raw: unknown): PerpsConfig {
   const o = (raw && typeof raw === "object" ? raw : {}) as Partial<PerpsConfig>;
   const bias = Number(o.bias);
   return { mode: o.mode === "agressif" ? "agressif" : "normal", bias: Number.isFinite(bias) ? Math.round(Math.min(100, Math.max(-100, bias))) : 0,
-    trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}) };
+    trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}),
+    autopilot: o.autopilot === true, plan: sanitizePerpsPlan(o.plan) };
+}
+
+export function sanitizePerpsPlan(raw: unknown): PerpsPlan | null {
+  if (!raw || typeof raw !== "object") return null;
+  const x = raw as Partial<PerpsPlan>;
+  if (!PERPS_ASSETS.some((a) => a.asset === x.asset)) return null;
+  const params = sanitizeTrend(x.params);
+  if (!params) return null;
+  return { asset: String(x.asset), params, interval: asInterval(x.interval), source: String(x.source ?? "").slice(0, 120), score: Number(x.score) || 0 };
 }
 
 /** Part de la taille normale accordée à un côté (1 = 100 %, 0 = côté désactivé). Le côté favorisé garde 100 %. */
@@ -227,6 +261,9 @@ export interface Memory {
   stopCandle?: number;      // dernière bougie ayant servi à remonter le stop
   side?: Side;
   strategy?: SpotStrategy;  // stratégie qui a ouvert la position (gérée jusqu'au bout avec ses propres règles)
+  posParams?: Params | RsiParams; // réglages exacts de la position en cours (venant d'un plan du chercheur)
+  posInterval?: Interval;   // unité de temps de la position en cours
+  seen?: Record<string, number>; // dernière bougie analysée par plan (« SOL|15m » → horodatage)
   openedAt?: number;
   costUsd?: number;         // spot : USDC réellement dépensés (frais compris)
   openValueUsd?: number;    // perps : valeur du portefeuille juste avant l'ouverture
@@ -368,7 +405,7 @@ export const RSI_DEFAULTS: RsiParams = { rsiPeriod: 14, entry: 30, exit: 50, sma
 export const NAIVE_EXIT = 70;
 
 export type SpotStrategy = "tendance" | "rsi";
-export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams; trend: Params | null; source?: string }
+export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams; trend: Params | null; source?: string; autopilot: boolean; plans: SpotPlan[] }
 
 /** Réglages de tendance personnalisés (appliqués depuis le chercheur) ; null = le cerveau choisit chaque jour. */
 export function sanitizeTrend(t: unknown): Params | null {
@@ -401,7 +438,23 @@ export function sanitizeRsi(p: Partial<RsiParams> | null | undefined): RsiParams
 
 export function loadConfig(raw: unknown): SpotConfig {
   const o = (raw && typeof raw === "object" ? raw : {}) as Partial<SpotConfig>;
-  return { strategy: o.strategy === "rsi" ? "rsi" : "tendance", rsi: sanitizeRsi(o.rsi), trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}) };
+  return { strategy: o.strategy === "rsi" ? "rsi" : "tendance", rsi: sanitizeRsi(o.rsi), trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}),
+    autopilot: o.autopilot === true, plans: sanitizeSpotPlans(o.plans) };
+}
+
+const SYMBOLS = new Set<string>(TOKENS.map((t) => t.symbol));
+export function sanitizeSpotPlans(raw: unknown): SpotPlan[] {
+  if (!Array.isArray(raw)) return [];
+  const out: SpotPlan[] = [];
+  for (const x of raw as Partial<SpotPlan>[]) {
+    if (out.length >= 3) break; // 3 plans maximum, comptés après avoir écarté les tokens inconnus
+    if (!x || !SYMBOLS.has(String(x.symbol))) continue;
+    const family = x.family === "rsi" ? "rsi" : "tendance";
+    const params = family === "rsi" ? sanitizeRsi(x.params as Partial<RsiParams>) : sanitizeTrend(x.params);
+    if (!params) continue;
+    out.push({ symbol: String(x.symbol), family, params, interval: asInterval(x.interval), source: String(x.source ?? "").slice(0, 120), score: Number(x.score) || 0 });
+  }
+  return out;
 }
 
 /** RSI de Wilder ; NaN tant qu'il n'y a pas assez de bougies. */

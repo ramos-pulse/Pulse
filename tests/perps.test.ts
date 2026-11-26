@@ -6,8 +6,8 @@ test("barre longs/shorts", () => {
   assert.equal(sideMult(0, "long"), 1); assert.equal(sideMult(0, "short"), 1);
   assert.equal(sideMult(50, "long"), 1); assert.equal(sideMult(50, "short"), 0.5);
   assert.equal(sideMult(-100, "long"), 0); assert.equal(sideMult(-100, "short"), 1);
-  assert.deepEqual(loadPerpsConfig({ mode: "agressif", bias: 999 }), { mode: "agressif", bias: 100, trend: null });
-  assert.deepEqual(loadPerpsConfig(null), { mode: "normal", bias: 0, trend: null });
+  assert.deepEqual(loadPerpsConfig({ mode: "agressif", bias: 999 }), { mode: "agressif", bias: 100, trend: null, autopilot: false, plan: null });
+  assert.deepEqual(loadPerpsConfig(null), { mode: "normal", bias: 0, trend: null, autopilot: false, plan: null });
 });
 test("mode agressif : levier plafonné à x5, jamais plus", () => {
   const p = perpsSizing(100, 100, 100, 99, AGGRESSIVE.maxRisk, AGGRESSIVE.maxLeverage)!;

@@ -5,17 +5,19 @@
 //  - puis sur le dernier tiers, qu'aucun réglage n'a « vu » (« validation »).
 // Une stratégie qui ne gagne que sur l'entraînement a appris le passé par cœur : elle est rejetée.
 // Les meilleures servent de parents : le chercheur les fait muter légèrement pour trouver mieux.
-import { backtest, backtestRsi, type BacktestResult, type Candle, type Params, type RsiParams } from "./strategy.ts";
+import { backtest, backtestRsi, type BacktestResult, type Candle, type Interval, type Params, type RsiParams } from "./strategy.ts";
 
 export type Family = "tendance" | "rsi";
 export type BotKind = "spot" | "perps";
 
-export interface Market { name: string; product: string; kind: BotKind; feePct: number; hourlyCost: number; cap: number }
+export interface Market { name: string; product: string; symbol: string; kind: BotKind; interval: Interval; feePct: number; hourlyCost: number; cap: number }
 
 export interface Candidate {
   market: string;            // nom affiché, ex. « Spot SOL »
   product: string;           // historique Coinbase, ex. « SOL-USD »
+  symbol: string;            // token (spot) ou marché perps (SOL, ETH, BTC)
   kind: BotKind;
+  interval: Interval;        // 1 h, ou 15 min pour le scalping
   family: Family;
   params: Params | RsiParams;
 }
@@ -33,7 +35,7 @@ export const SPACE = {
 /** Une stratégie au hasard dans l'espace de recherche. Le RSI n'existe qu'en spot (achat uniquement). */
 export function randomCandidate(rnd: () => number, m: Market): Candidate {
   const family: Family = m.kind === "spot" && rnd() < 0.5 ? "rsi" : "tendance";
-  return { market: m.name, product: m.product, kind: m.kind, family, params: randomParams(rnd, family) };
+  return { market: m.name, product: m.product, symbol: m.symbol, kind: m.kind, interval: m.interval, family, params: randomParams(rnd, family) };
 }
 
 function randomParams(rnd: () => number, family: Family): Params | RsiParams {
@@ -65,7 +67,7 @@ export function mutate(rnd: () => number, c: Candidate): Candidate {
 /** Signature unique pour ne jamais tester deux fois la même stratégie. */
 export function candidateKey(c: Candidate): string {
   const p = c.params as unknown as Record<string, unknown>;
-  return `${c.product}|${c.kind}|${c.family}|` + Object.keys(p).sort().filter((k) => k !== "riskPct" && k !== "naive").map((k) => `${k}=${p[k]}`).join(",");
+  return `${c.product}|${c.kind}|${c.interval}|${c.family}|` + Object.keys(p).sort().filter((k) => k !== "riskPct" && k !== "naive").map((k) => `${k}=${p[k]}`).join(",");
 }
 
 function segment(log: BacktestResult["log"]): SegmentStats {
@@ -102,13 +104,15 @@ export function evaluate(c: Candidate, candles: Candle[], m: Market): Evaluation
 }
 
 /** Résumé lisible des réglages d'une stratégie. */
-export function describe(c: Candidate): string {
+export function describe(c: Pick<Candidate, "family" | "params" | "kind"> & { interval?: Interval }): string {
+  const iv = c.interval === "15m" ? "scalping 15 min" : "bougies 1 h";
   if (c.family === "rsi") {
     const p = c.params as RsiParams;
-    return `RSI(${p.rsiPeriod}) sous ${p.entry} au-dessus de la MM${p.smaPeriod}, sortie RSI > ${p.exit}, stop creux ${p.swingBars} bougies`;
+    return `${iv} · RSI(${p.rsiPeriod}) sous ${p.entry} au-dessus de la MM${p.smaPeriod}, sortie RSI > ${p.exit}, stop creux ${p.swingBars} bougies`;
   }
   const p = c.params as Params;
-  return `Tendance : cassure ${p.breakout} h, force ≥ ${p.minTrend} ATR, stop suiveur ${p.trailAtr} ATR${c.kind === "perps" ? ", long et short" : ""}`;
+  const span = c.interval === "15m" ? `${p.breakout} bougies (${Math.round(p.breakout / 4)} h)` : `${p.breakout} h`;
+  return `${iv} · tendance : cassure ${span}, force ≥ ${p.minTrend} ATR, stop suiveur ${p.trailAtr} ATR${c.kind === "perps" ? ", long et short" : ""}`;
 }
 
 /** Générateur pseudo-aléatoire reproductible (graine = numéro de cycle de recherche). */

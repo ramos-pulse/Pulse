@@ -5,11 +5,11 @@
 //   GET  /pulse/api/backtest?market=N
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { riskPerTrade } from "./engine/brain.ts";
-import { hourlyCandles } from "./engine/candles.ts";
+import { candles as getCandles, hourlyCandles } from "./engine/candles.ts";
 import { env } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { AGGRESSIVE, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, type RsiParams } from "./engine/strategy.ts";
+import { AGGRESSIVE, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, type BotKind, type BotState } from "./store.ts";
 
@@ -166,25 +166,33 @@ async function backtestMarket(i: number) {
 }
 
 // ------------------------------------------------------------------ agent chercheur
-const RESEARCH_MARKETS: Market[] = [
-  ...TOKENS.filter((t) => t.symbol !== "JUP").map((t) => ({ name: `Spot ${t.symbol}`, product: t.candles, kind: "spot" as const, feePct: 0.003, hourlyCost: 0, cap: RISK.maxSpotFraction })),
-  { name: "Perps SOL", product: "SOL-USD", kind: "perps", feePct: 0.0012, hourlyCost: 0.00008, cap: PERPS_RULES.maxLeverage },
-];
+type ResearchRow = { id: number; created_at: string; market: string; product: string; symbol?: string | null; interval?: string | null; kind: "spot" | "perps"; family: "tendance" | "rsi"; params: Candidate["params"]; train: Record<string, number>; test: Record<string, number>; score: number; verdict: string; why: string };
+const INTERVALS: Interval[] = ["1h", "15m"];
+const RESEARCH_MARKETS: Market[] = INTERVALS.flatMap((interval) => [
+  ...TOKENS.filter((t) => t.symbol !== "JUP").map((t) => ({ name: `Spot ${t.symbol}${interval === "15m" ? " · 15 min" : ""}`, product: t.candles, symbol: t.symbol,
+    kind: "spot" as const, interval, feePct: 0.003, hourlyCost: 0, cap: RISK.maxSpotFraction })),
+  ...PERPS_ASSETS.map((a) => ({ name: `Perps ${a.asset}${interval === "15m" ? " · 15 min" : ""}`, product: a.candles, symbol: a.asset,
+    kind: "perps" as const, interval, feePct: 0.0012, hourlyCost: 0.00008, cap: PERPS_RULES.maxLeverage })),
+]);
+/** Historique utilisé : 90 jours en 1 h, 30 jours en 15 min (2/3 pour régler, 1/3 jamais vu pour valider). */
+const HISTORY: Record<Interval, number> = { "1h": 2160, "15m": 2880 };
 const RESEARCH_BUDGET_MS = 1000; // sous la limite de 2 s de calcul des fonctions Supabase
 const RESEARCH_MAX = 40;
 
 async function runResearch() {
   const cycle = Math.floor(Date.now() / 300_000);
   const m = RESEARCH_MARKETS[cycle % RESEARCH_MARKETS.length]!;
-  const candles = await hourlyCandles(m.product, 2160); // 90 jours : 60 pour régler, 30 jamais vus pour valider
-  if (candles.length < 1000) return { market: m.name, tested: 0, note: "historique insuffisant" };
+  let candles;
+  try { candles = await getCandles(m.product, m.interval, HISTORY[m.interval]); }
+  catch (e) { return { market: m.name, tested: 0, note: `historique indisponible : ${(e as Error).message}` }; }
+  if (candles.length < HISTORY[m.interval] * 0.6) return { market: m.name, tested: 0, note: "historique insuffisant" };
   const [{ data: known }, { data: best }] = await Promise.all([
-    db.from("research").select("key").eq("product", m.product).eq("kind", m.kind).limit(20000),
-    db.from("research").select("*").eq("product", m.product).eq("kind", m.kind).order("score", { ascending: false }).limit(6),
+    db.from("research").select("key").eq("product", m.product).eq("kind", m.kind).eq("interval", m.interval).limit(20000),
+    db.from("research").select("*").eq("product", m.product).eq("kind", m.kind).eq("interval", m.interval).order("score", { ascending: false }).limit(6),
   ]);
   const seen = new Set<string>((known ?? []).map((r: { key: string }) => r.key));
   const parents: Candidate[] = (best ?? []).filter((r: { score: number }) => r.score > 0)
-    .map((r: { market: string; product: string; kind: "spot" | "perps"; family: "tendance" | "rsi"; params: Candidate["params"] }) => ({ market: r.market, product: r.product, kind: r.kind, family: r.family, params: r.params }));
+    .map((r: ResearchRow) => ({ market: r.market, product: r.product, symbol: m.symbol, kind: r.kind, interval: m.interval, family: r.family, params: r.params }));
   const rnd = seeded(cycle * 7919 + Date.now() % 1000);
   const rows = [];
   const t0 = performance.now();
@@ -197,7 +205,7 @@ async function runResearch() {
     if (seen.has(key)) continue;
     seen.add(key);
     const e = evaluate(c, candles, m);
-    rows.push({ key, market: c.market, product: c.product, kind: c.kind, family: c.family, params: c.params, train: e.train, test: e.test, score: e.score, verdict: e.verdict, why: e.why });
+    rows.push({ key, market: c.market, product: c.product, symbol: c.symbol, interval: c.interval, kind: c.kind, family: c.family, params: c.params, train: e.train, test: e.test, score: e.score, verdict: e.verdict, why: e.why });
   }
   if (rows.length) {
     const { error } = await db.from("research").upsert(rows, { onConflict: "key", ignoreDuplicates: true });
@@ -205,10 +213,56 @@ async function runResearch() {
   }
   // ménage : les stratégies rejetées depuis plus de 3 jours sont oubliées
   await db.from("research").delete().eq("verdict", "rejetée").lt("created_at", new Date(Date.now() - 3 * 86_400_000).toISOString());
-  return { market: m.name, tested: rows.length, promising: rows.filter((r) => r.verdict === "prometteuse").length };
+  const pilot = await autopilot().catch((e) => `pilote : ${(e as Error).message}`);
+  return { market: m.name, tested: rows.length, promising: rows.filter((r) => r.verdict === "prometteuse").length, pilot };
 }
 
-type ResearchRow = { id: number; created_at: string; market: string; product: string; kind: "spot" | "perps"; family: "tendance" | "rsi"; params: Candidate["params"]; train: Record<string, number>; test: Record<string, number>; score: number; verdict: string; why: string };
+// ------------------------------------------------------------------ pilote automatique
+/** Critères stricts : seule une stratégie solide sur la période jamais vue peut piloter un bot. */
+const QUALIFY = { minTestTrades: 5, minTestPF: 1.3, maxTestDD: 10, maxAgeDays: 14 };
+function qualifies(r: ResearchRow): boolean {
+  return r.verdict === "prometteuse" && (r.test.trades ?? 0) >= QUALIFY.minTestTrades && (r.test.profitFactor ?? 0) >= QUALIFY.minTestPF
+    && (r.test.maxDrawdownPct ?? 99) <= QUALIFY.maxTestDD && Date.now() - Date.parse(r.created_at) < QUALIFY.maxAgeDays * 86_400_000;
+}
+const symbolOfRow = (r: ResearchRow) => r.symbol ?? r.market.replace(/^(Spot|Perps) /, "").split(" ")[0]!;
+const toSpotPlan = (r: ResearchRow): SpotPlan => ({ symbol: symbolOfRow(r), family: r.family, params: r.family === "rsi" ? sanitizeRsi({ ...(r.params as RsiParams), riskPct: 1, naive: false }) : sanitizeTrend(r.params)!,
+  interval: r.interval === "15m" ? "15m" : "1h", source: `chercheur #${r.id} · ${r.market}`, score: r.score });
+const toPerpsPlan = (r: ResearchRow): PerpsPlan => ({ asset: symbolOfRow(r), params: sanitizeTrend(r.params) as Params, interval: r.interval === "15m" ? "15m" : "1h", source: `chercheur #${r.id} · ${r.market}`, score: r.score });
+
+/** Choisit tout seul les tokens et stratégies des bots dont le pilote est activé. Renvoie un résumé des changements. */
+async function autopilot(): Promise<string> {
+  const bots = await readBots();
+  const spotCfg = loadConfig(bots.spot.config), perpsCfg = loadPerpsConfig(bots.perps.config);
+  if (!spotCfg.autopilot && !perpsCfg.autopilot) return "désactivé";
+  const { data } = await db.from("research").select("*").eq("verdict", "prometteuse").order("score", { ascending: false }).limit(200);
+  const good = ((data ?? []) as ResearchRow[]).filter(qualifies);
+  const changes: string[] = [];
+  if (spotCfg.autopilot) {
+    const spotRows = good.filter((r) => r.kind === "spot");
+    // garde les plans actuels encore qualifiés (évite de changer d'avis toutes les 5 minutes), complète avec les meilleurs, 3 tokens max
+    const keep = spotCfg.plans.filter((p) => spotRows.slice(0, 10).some((r) => `chercheur #${r.id} · ${r.market}` === p.source));
+    const plans = [...keep];
+    for (const r of spotRows) { if (plans.length >= 3) break; const pl = toSpotPlan(r); if (!plans.some((x) => x.symbol === pl.symbol)) plans.push(pl); }
+    const before = spotCfg.plans.map((p) => p.source).join("|"), after = plans.map((p) => p.source).join("|");
+    if (before !== after) {
+      await setBot("spot", { config: { ...spotCfg, plans } });
+      changes.push(plans.length ? `spot → ${plans.map((p) => `${p.symbol} (${p.family === "rsi" ? "RSI" : "tendance"}, ${p.interval === "15m" ? "15 min" : "1 h"})`).join(", ")}` : "spot → aucune stratégie validée, en attente");
+    }
+  }
+  if (perpsCfg.autopilot) {
+    const best = good.find((r) => r.kind === "perps");
+    const stillOk = perpsCfg.plan && good.slice(0, 20).some((r) => `chercheur #${r.id} · ${r.market}` === perpsCfg.plan!.source);
+    const plan = stillOk ? perpsCfg.plan : best ? toPerpsPlan(best) : null;
+    if ((plan?.source ?? "") !== (perpsCfg.plan?.source ?? "") || perpsCfg.mode !== "normal") {
+      await setBot("perps", { config: { ...perpsCfg, plan, mode: "normal" } });
+      changes.push(plan ? `perps → ${plan.asset} (${plan.interval === "15m" ? "15 min" : "1 h"}), mode normal` : "perps → aucune stratégie validée, en attente");
+    }
+  }
+  if (changes.length) await notify(`Pilote automatique : ${changes.join(" ; ")}`);
+  return changes.join(" ; ") || "inchangé";
+}
+
+
 
 async function researchBoard() {
   const [{ count }, { data: top }, { data: last }] = await Promise.all([
@@ -218,7 +272,7 @@ async function researchBoard() {
   ]);
   return {
     tested: count ?? 0, lastAt: last?.[0]?.created_at ?? null,
-    best: ((top ?? []) as ResearchRow[]).map((r) => ({ ...r, description: describe(r) })),
+    best: ((top ?? []) as ResearchRow[]).map((r) => ({ ...r, description: describe({ ...r, interval: r.interval === "15m" ? "15m" : "1h" }), qualifies: qualifies(r) })),
   };
 }
 
@@ -227,21 +281,20 @@ async function applyResearch(id: number) {
   if (error) throw new Error(error.message);
   const r = data?.[0] as ResearchRow | undefined;
   if (!r) throw new Error("stratégie introuvable");
-  const source = `chercheur #${r.id} · ${r.market}`;
   const bots = await readBots();
+  const desc = describe({ ...r, interval: r.interval === "15m" ? "15m" : "1h" });
   if (r.kind === "spot") {
     const cur = loadConfig(bots.spot.config);
-    const config = r.family === "rsi"
-      ? { ...cur, strategy: "rsi" as const, rsi: sanitizeRsi({ ...(r.params as RsiParams), riskPct: cur.rsi.riskPct, naive: false }), source }
-      : { ...cur, strategy: "tendance" as const, trend: sanitizeTrend(r.params), source };
+    const plan = toSpotPlan(r);
+    const config = { ...cur, plans: [plan, ...cur.plans.filter((p) => p.symbol !== plan.symbol)].slice(0, 3) };
     await setBot("spot", { config });
-    await notify(`Chercheur : stratégie #${r.id} appliquée au bot spot (${describe(r)})`);
+    await notify(`Chercheur : stratégie #${r.id} ajoutée au bot spot (${plan.symbol}, ${desc})`);
     return { ok: true, kind: "spot", config };
   }
   const cur = loadPerpsConfig(bots.perps.config);
-  const config = { ...cur, trend: sanitizeTrend(r.params), source };
+  const config = { ...cur, plan: toPerpsPlan(r) };
   await setBot("perps", { config });
-  await notify(`Chercheur : stratégie #${r.id} appliquée au bot perps (${describe(r)})`);
+  await notify(`Chercheur : stratégie #${r.id} appliquée au bot perps (${config.plan.asset}, ${desc})`);
   return { ok: true, kind: "perps", config };
 }
 
@@ -269,7 +322,9 @@ Ton rôle : expliquer ce que tu as trouvé, comparer les stratégies, conseiller
 Règles :
 - Tu ne promets jamais de gains. Les backtests sont des simulations du passé.
 - Une stratégie ne compte que si elle gagne aussi sur la période de validation jamais vue ; méfie-toi des résultats fondés sur peu de trades.
-- Tu ne peux rien modifier toi-même : pour appliquer une stratégie, dis à l'utilisateur de toucher « Appliquer » sur la stratégie #id dans l'onglet Chercheur.
+- Quand le pilote automatique est activé, c'est toi qui choisis les tokens et stratégies des bots, mais seulement parmi les stratégies « prometteuses » avec au moins 5 trades, un profit factor ≥ 1,3 et une baisse max ≤ 10 % sur la période jamais vue, et toujours en mode perps normal. Les plans actuels sont dans reglages.plans (spot) et reglages.plan (perps).
+- Tu ne modifies rien pendant la discussion : pour appliquer une stratégie à la main, l'utilisateur touche « Appliquer » sur la stratégie #id, ou active le pilote automatique.
+- Le scalping est testé en bougies de 15 minutes, frais inclus ; dis-le clairement quand une stratégie 15 min est retenue ou rejetée.
 - Tu ne donnes pas de conseil d'investissement personnalisé ; rappelle de ne risquer que ce qu'on accepte de perdre si on te demande combien investir.
 - Le mode agressif du bot perps double le risque et monte le levier jusqu'à x5 : signale-le si c'est pertinent.
 Données actuelles (JSON) :
@@ -317,6 +372,16 @@ Deno.serve(async (req) => {
       return json(await applyResearch(Number(body.id)));
     }
     if (req.method === "POST" && route === "/api/research/run") return json(await runResearch()); // lancer une recherche tout de suite
+    if (req.method === "POST" && route === "/api/autopilot") {
+      const body = (await req.json().catch(() => ({}))) as { spot?: boolean; perps?: boolean };
+      const bots = await readBots();
+      const sc = loadConfig(bots.spot.config), pc = loadPerpsConfig(bots.perps.config);
+      if (typeof body.spot === "boolean") await setBot("spot", { config: { ...sc, autopilot: body.spot, ...(body.spot ? {} : { plans: [] }) } });
+      if (typeof body.perps === "boolean") await setBot("perps", { config: { ...pc, autopilot: body.perps, ...(body.perps ? {} : { plan: null }) } });
+      const on = [body.spot && "spot", body.perps && "perps"].filter(Boolean).join(" et ");
+      await notify(on ? `Pilote automatique activé (${on})` : "Pilote automatique modifié");
+      return json({ ok: true, pilot: await autopilot() });
+    }
     if (req.method === "POST" && route === "/api/agent/chat") {
       const body = (await req.json().catch(() => ({}))) as { messages?: { role: string; content: string }[] };
       return json(await agentChat(Array.isArray(body.messages) ? body.messages : []));
@@ -326,7 +391,7 @@ Deno.serve(async (req) => {
       const body = (await req.json().catch(() => ({}))) as { strategy?: string; rsi?: Record<string, unknown>; trend?: null };
       const current = loadConfig((await readBots()).spot.config);
       const config = { ...current, strategy: body.strategy === "rsi" ? "rsi" : body.strategy === "tendance" ? "tendance" : current.strategy, rsi: sanitizeRsi({ ...current.rsi, ...(body.rsi ?? {}) }) };
-      if (body.trend === null) { config.trend = null; delete config.source; } // retour aux réglages automatiques du cerveau
+      if (body.trend === null) { config.trend = null; config.plans = []; config.autopilot = false; delete config.source; } // retour aux réglages automatiques du cerveau
       await setBot("spot", { config });
       return json({ ok: true, config });
     }
@@ -334,7 +399,7 @@ Deno.serve(async (req) => {
       const body = (await req.json().catch(() => ({}))) as { mode?: string; bias?: number; trend?: null };
       const current = loadPerpsConfig((await readBots()).perps.config);
       const config = loadPerpsConfig({ ...current, mode: body.mode ?? current.mode, bias: body.bias ?? current.bias });
-      if (body.trend === null) { config.trend = null; delete config.source; }
+      if (body.trend === null) { config.trend = null; config.plan = null; config.autopilot = false; delete config.source; }
       await setBot("perps", { config });
       await notify(`Bot perps : mode ${config.mode}, ${config.bias === 0 ? "longs et shorts équilibrés" : config.bias > 0 ? `longs favorisés (shorts à ${100 - config.bias} %)` : `shorts favorisés (longs à ${100 + config.bias} %)`}`);
       return json({ ok: true, config });

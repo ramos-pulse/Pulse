@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, type Market } from "../supabase/functions/pulse/engine/research.ts";
 import type { Candle } from "../supabase/functions/pulse/engine/strategy.ts";
 
-const spot: Market = { name: "Spot SOL", product: "SOL-USD", kind: "spot", feePct: 0.003, hourlyCost: 0, cap: 0.95 };
-const perps: Market = { name: "Perps SOL", product: "SOL-USD", kind: "perps", feePct: 0.0012, hourlyCost: 0.00008, cap: 3 };
+const spot: Market = { name: "Spot SOL", product: "SOL-USD", symbol: "SOL", kind: "spot", interval: "1h", feePct: 0.003, hourlyCost: 0, cap: 0.95 };
+const perps: Market = { name: "Perps SOL", product: "SOL-USD", symbol: "SOL", kind: "perps", interval: "1h", feePct: 0.0012, hourlyCost: 0.00008, cap: 3 };
 function market(seed: number, drift: number): Candle[] {
   const rnd = seeded(seed); const c: Candle[] = []; let p = 100;
   for (let i = 0; i < 2160; i++) { const n = p * Math.exp(Math.sin(i / 250) * drift + (rnd() - 0.5) * 0.014);
@@ -38,4 +38,20 @@ test("évaluation : temps de calcul compatible avec la limite Supabase", () => {
   const ms = (performance.now() - t0) / 6;
   console.log(`   ~${ms.toFixed(0)} ms par stratégie testée (90 jours d'historique)`);
   assert.ok(ms < 400);
+});
+
+import { loadConfig, loadPerpsConfig, sanitizeSpotPlans } from "../supabase/functions/pulse/engine/strategy.ts";
+test("plans du pilote : tokens inconnus refusés, 3 plans max, réglages bornés", () => {
+  const plans = sanitizeSpotPlans([
+    { symbol: "WIF", family: "tendance", params: { breakout: 24, trailAtr: 3, minTrend: 1 }, interval: "15m", source: "#1", score: 2 },
+    { symbol: "RUGCOIN", family: "tendance", params: { breakout: 24, trailAtr: 3, minTrend: 1 } },
+    { symbol: "SOL", family: "rsi", params: { rsiPeriod: 14, entry: 30, exit: 50, smaPeriod: 200, swingBars: 10, riskPct: 9 } },
+    { symbol: "JTO", family: "tendance", params: { breakout: 24, trailAtr: 3, minTrend: 1 } },
+    { symbol: "BONK", family: "tendance", params: { breakout: 24, trailAtr: 3, minTrend: 1 } },
+  ]);
+  assert.deepEqual(plans.map((p) => p.symbol), ["WIF", "SOL", "JTO"]);
+  assert.equal(plans[0]!.interval, "15m"); assert.equal((plans[1]!.params as { riskPct: number }).riskPct, 3);
+  assert.equal(loadPerpsConfig({ plan: { asset: "DOGE", params: { breakout: 24, trailAtr: 3, minTrend: 1 } } }).plan, null);
+  assert.equal(loadPerpsConfig({ plan: { asset: "ETH", params: { breakout: 24, trailAtr: 3, minTrend: 1 }, interval: "15m" } }).plan?.asset, "ETH");
+  assert.equal(loadConfig({ autopilot: true }).autopilot, true);
 });

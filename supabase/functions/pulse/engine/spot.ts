@@ -1,12 +1,12 @@
 // Serveur uniquement : BOT 1 — spot Solana (USDC ⇄ SOL, JUP, BONK, WBTC, WETH) en suivi de tendance.
 import type { BotState, Store } from "../store.ts";
 import { isBenched, learn, mindset, newBrain, optimize, riskPerTrade } from "./brain.ts";
-import { hourlyCandles, lastClosedCandle } from "./candles.ts";
-import { executeSwap, getPrices, getQuote } from "./jupiter.ts";
+import { candles as getCandles, hourlyCandles, lastClosedCandle } from "./candles.ts";
+import { executeSwap, getPrices, getQuote, verifyToken } from "./jupiter.ts";
 import { getBalances, loadKeyPairFrom, txStatus, waitForTx, type Balances } from "./solana.ts";
 import {
-  dayKey, exitCheck, loadConfig, loadMemory, missionEnd, PRESETS, RISK, riskGate, rsiExitSignal, rsiSignal, RULES, SOL_MINT, spotSizeUsd, TOKENS,
-  trailStop, trendSignal, USDC_MINT, atr, type Memory, type Signal,
+  DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, missionEnd, PRESETS, RISK, riskGate, rsiExitSignal, rsiSignal, RULES, SOL_MINT, spotSizeUsd, TOKENS,
+  trailStop, trendSignal, USDC_MINT, atr, type Interval, type Memory, type Params, type RsiParams, type Signal, type SpotStrategy,
 } from "./strategy.ts";
 
 type Admin = Store;
@@ -146,21 +146,23 @@ export async function runTick(admin: Admin): Promise<string> {
         return "hold";
       }
       const entry = Number(patch.entry_price ?? bot.entry_price ?? livePrice);
-      const closed = lastClosedCandle(now);
+      const iv: Interval = mem.posInterval ?? "1h";               // unité de temps de la position (plan du chercheur ou 1 h)
+      const closed = lastClosedCandle(now, iv);
       const isRsi = mem.strategy === "rsi";
       let rsiExit = false;
       if (isRsi && token && mem.stopCandle !== closed) {
         // décision à la clôture de chaque bougie : RSI repassé au-dessus du seuil de sortie ?
-        const candles = await hourlyCandles(token.candles, cfg.rsi.rsiPeriod * 6 + 10, now).catch(() => []);
-        if (candles.length > cfg.rsi.rsiPeriod + 2) {
-          const r = rsiExitSignal(candles, cfg.rsi);
+        const rp = (mem.posParams as RsiParams | undefined) ?? cfg.rsi;
+        const candles = await getCandles(token.candles, iv, rp.rsiPeriod * 6 + 10, now).catch(() => []);
+        if (candles.length > rp.rsiPeriod + 2) {
+          const r = rsiExitSignal(candles, rp);
           rsiExit = r.exit;
-          mem.signal = `${token.symbol} : RSI ${r.rsi.toFixed(0)} (sortie au-dessus de ${cfg.rsi.naive ? 70 : cfg.rsi.exit})`;
+          mem.signal = `${token.symbol} : RSI ${r.rsi.toFixed(0)} (sortie au-dessus de ${rp.naive ? 70 : rp.exit})`;
           mem.stopCandle = closed;
         }
       } else if (!isRsi && token && mem.stopCandle !== closed) {
-        const params = cfg.trend ?? PRESETS[brain.preset[token.symbol] ?? "standard"];
-        const candles = await hourlyCandles(token.candles, 40, now).catch(() => []);
+        const params = (mem.posParams as Params | undefined) ?? cfg.trend ?? PRESETS[brain.preset[token.symbol] ?? "standard"];
+        const candles = await getCandles(token.candles, iv, 40, now).catch(() => []);
         if (candles.length > 20) {
           mem.best = Math.max(mem.best ?? entry, candles.at(-1)!.c);
           mem.stop = trailStop("long", mem.stop ?? entry * 0.95, mem.best, atr(candles, 14).at(-1)!, params);
@@ -190,9 +192,12 @@ export async function runTick(admin: Admin): Promise<string> {
       await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || "En pause : aucune nouvelle entrée." });
       return "paused";
     }
-    // 6. Pas de position : apprentissage quotidien (un marché par tick), puis recherche d'une entrée à chaque nouvelle bougie.
+    // 6. Pas de position. Deux façons de choisir l'entrée :
+    //    - PLANS du chercheur (pilote automatique ou stratégies appliquées) : tokens, stratégie, réglages et unité de temps choisis par lui ;
+    //    - sinon, réglages de l'app : même stratégie sur tous les tokens, réglages ajustés chaque jour par le cerveau.
+    const usePlans = cfg.autopilot || cfg.plans.length > 0;
     const today = dayKey(now);
-    const todo = cfg.strategy === "tendance" ? TOKENS.find((t) => brain.optimized?.[t.symbol] !== today) : undefined;
+    const todo = !usePlans && cfg.strategy === "tendance" ? TOKENS.find((t) => brain.optimized?.[t.symbol] !== today) : undefined;
     if (todo) {
       const hist = await hourlyCandles(todo.candles, 1440, now).catch(() => null);
       if (hist && hist.length > 500) optimize(brain, todo.symbol, hist, { allowShort: false, feePct: SPOT_COST, leverageCap: RISK.maxSpotFraction }, today);
@@ -200,37 +205,72 @@ export async function runTick(admin: Admin): Promise<string> {
     }
 
     const blocked = riskGate(mem, value, now);
-    const closed = lastClosedCandle(now);
-    if (blocked || mem.lastCandle === closed) {
+    if (usePlans && cfg.plans.length === 0) {
+      mem.signal = "Pilote automatique : aucune stratégie n'a encore passé la validation du chercheur.";
+      await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || blocked || "Pilote automatique : j'attends que le chercheur valide une stratégie." });
+      return "hold";
+    }
+    type Choice = { token: Token; sig: Signal; strategy: SpotStrategy; params: Params | RsiParams; interval: Interval; rank: number; risk: number };
+    const choices: Choice[] = [];
+    const notes: string[] = [];
+    let analysed = 0;
+    if (!blocked && usePlans) {
+      mem.seen = mem.seen ?? {};
+      for (const plan of cfg.plans) {
+        const token = TOKENS.find((t) => t.symbol === plan.symbol);
+        if (!token) continue;
+        const key = `${plan.symbol}|${plan.interval}`, closedP = lastClosedCandle(now, plan.interval);
+        if (mem.seen[key] === closedP) continue; // chaque bougie n'est analysée qu'une fois
+        mem.seen[key] = closedP;
+        analysed++;
+        if ((brain.benched[token.symbol] ?? 0) > now) { notes.push(`${token.symbol} : sur le banc après des pertes`); continue; }
+        const check = await verifyToken(token);
+        if (!check.ok) { notes.push(`${token.symbol} : refusé (${check.why})`); continue; }
+        try {
+          const rsi = plan.family === "rsi";
+          const rp = plan.params as RsiParams;
+          const c = await getCandles(token.candles, plan.interval, rsi ? Math.max(rp.smaPeriod, rp.rsiPeriod * 6) + 40 : 400, now);
+          const sig = rsi ? rsiSignal(c, rp) : trendSignal(c, false, plan.params as Params);
+          const tag = `${token.symbol} ${plan.interval === "15m" ? "15 min" : "1 h"}`;
+          if (sig.side === "long") choices.push({ token, sig, strategy: plan.family, params: plan.params, interval: plan.interval, rank: plan.score, risk: rsi ? rp.riskPct / 100 : riskPerTrade(brain) });
+          else notes.push(`${tag} : ${sig.reason}`);
+        } catch { notes.push(`${token.symbol} : historique indisponible`); }
+      }
+    } else if (!blocked && mem.lastCandle !== lastClosedCandle(now)) {
+      mem.lastCandle = lastClosedCandle(now);
+      analysed++;
+      for (const token of TOKENS) {
+        // réglages validés par le chercheur : on ignore « aucun réglage rentable », mais pas la mise sur le banc après des pertes
+        const benched = cfg.trend ? (brain.benched[token.symbol] ?? 0) > now : isBenched(brain, token.symbol, now);
+        if (cfg.strategy === "tendance" && benched) { notes.push(`${token.symbol} : sur le banc`); continue; }
+        if (token.verify && !(await verifyToken(token)).ok) { notes.push(`${token.symbol} : non vérifié`); continue; }
+        try {
+          const c = await hourlyCandles(token.candles, cfg.strategy === "rsi" ? Math.max(cfg.rsi.smaPeriod, cfg.rsi.rsiPeriod * 6) + 40 : 400, now);
+          const params: Params | RsiParams = cfg.strategy === "rsi" ? cfg.rsi : cfg.trend ?? PRESETS[brain.preset[token.symbol] ?? "standard"] ?? DEFAULT_PARAMS;
+          const sig = cfg.strategy === "rsi" ? rsiSignal(c, cfg.rsi) : trendSignal(c, false, params as Params);
+          if (sig.side === "long") choices.push({ token, sig, strategy: cfg.strategy, params, interval: "1h", rank: sig.score, risk: cfg.strategy === "rsi" ? cfg.rsi.riskPct / 100 : riskPerTrade(brain) });
+          else notes.push(`${token.symbol} : ${sig.reason}`);
+        } catch { notes.push(`${token.symbol} : historique indisponible`); }
+      }
+    }
+    if (blocked || analysed === 0) {
       mem.mindset = mindset(brain, { inPosition: false, blocked, goalPct: (value / Number(bot.goal_usd)) * 100 });
       await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || blocked || mem.signal || "En attente de la prochaine bougie." });
       return "hold";
     }
-    mem.lastCandle = closed;
-
-    const signals: { token: Token; sig: Signal }[] = [];
-    const notes: string[] = [];
-    for (const token of TOKENS) {
-      // réglages validés par le chercheur : on ignore « aucun réglage rentable », mais pas la mise sur le banc après des pertes
-      const benched = cfg.trend ? (brain.benched[token.symbol] ?? 0) > now : isBenched(brain, token.symbol, now);
-      if (cfg.strategy === "tendance" && benched) { notes.push(`${token.symbol} : sur le banc`); continue; }
-      try {
-        const candles = await hourlyCandles(token.candles, cfg.strategy === "rsi" ? Math.max(cfg.rsi.smaPeriod, cfg.rsi.rsiPeriod * 6) + 40 : 400, now);
-        const sig = cfg.strategy === "rsi" ? rsiSignal(candles, cfg.rsi) : trendSignal(candles, false, cfg.trend ?? PRESETS[brain.preset[token.symbol] ?? "standard"]);
-        if (sig.side === "long") signals.push({ token, sig }); else notes.push(`${token.symbol} : ${sig.reason}`);
-      } catch { notes.push(`${token.symbol} : historique indisponible`); }
-    }
-    signals.sort((a, c) => c.sig.score - a.sig.score);
-    const pick = signals[0];
+    choices.sort((a, c) => c.rank - a.rank);
+    const pick = choices[0];
     if (!pick) {
       mem.signal = notes.join(" · ");
       mem.mindset = mindset(brain, { inPosition: false, blocked: null, goalPct: (value / Number(bot.goal_usd)) * 100 });
-      await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || (cfg.strategy === "rsi" ? `Aucun excès de baisse (RSI sous ${cfg.rsi.entry}) : j'attends.` : "Aucune cassure en tendance : j'attends, patience = argent.") });
+      await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || (usePlans ? `Plans du chercheur : aucun signal pour l'instant (${cfg.plans.map((x) => x.symbol).join(", ")}).`
+        : cfg.strategy === "rsi" ? `Aucun excès de baisse (RSI sous ${cfg.rsi.entry}) : j'attends.` : "Aucune cassure en tendance : j'attends, patience = argent.") });
       return "hold";
     }
+    const closed = lastClosedCandle(now, pick.interval);
 
     // 7. Entrée : taille au risque, cotation vérifiée, swap, confirmation.
-    const risk = cfg.strategy === "rsi" ? cfg.rsi.riskPct / 100 : riskPerTrade(brain); // RSI : risque fixe choisi dans les réglages
+    const risk = pick.risk; // RSI : risque fixe de ses réglages ; tendance : risque adaptatif du cerveau
     const sizeUsd = spotSizeUsd(value, b.usdc, pick.sig.price, pick.sig.stop, risk);
     if (sizeUsd <= 0) {
       await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: `Signal ${pick.token.symbol} mais pas assez d'USDC pour un ordre (min ${RISK.minOrderUsd} $).` });
@@ -246,7 +286,8 @@ export async function runTick(admin: Admin): Promise<string> {
     const sig = await executeSwap(quote, address, keyPair);
     Object.assign(mem, {
       pending: { kind: "buy", sig, at: now, mint: pick.token.mint, usdcBefore: b.usdc },
-      stop: pick.sig.stop, best: fillPrice, initialRisk: fillPrice - pick.sig.stop, openedAt: now, asset: pick.token.symbol, side: "long", strategy: cfg.strategy,
+      stop: pick.sig.stop, best: fillPrice, initialRisk: fillPrice - pick.sig.stop, openedAt: now, asset: pick.token.symbol, side: "long",
+      strategy: pick.strategy, posParams: pick.params, posInterval: pick.interval,
       signal: `${pick.token.symbol} : ${pick.sig.reason}`, stopCandle: closed,
     });
     const r = (await waitForTx(sig)) === "pending" ? "pending" : await settle(admin, bot, mem, patch, address, value);
@@ -336,7 +377,7 @@ export async function liquidate(admin: Admin, bot: BotRow, outcome: "success" | 
 
 // ------------------------------------------------------------------------------------------------
 function clearPosition(mem: Memory) {
-  for (const k of ["stop", "best", "initialRisk", "openedAt", "costUsd", "asset", "side", "stopCandle", "live", "strategy"] as const) delete mem[k];
+  for (const k of ["stop", "best", "initialRisk", "openedAt", "costUsd", "asset", "side", "stopCandle", "live", "strategy", "posParams", "posInterval"] as const) delete mem[k];
 }
 async function save(admin: Admin, bot: BotRow, mem: Memory, fields: Partial<BotRow>) {
   void bot;
