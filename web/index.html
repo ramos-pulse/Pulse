@@ -244,7 +244,7 @@ function render() {
   if (PAGE === "home") $("#p-home").innerHTML = missionCard("spot", "Bot 1 · Spot Solana") + missionCard("perps", `Bot 2 · Perps SOL x${S.rules.perps.maxLeverage} max`) + rulesNote();
   if (PAGE === "hist") renderHist();
   if (PAGE === "bt") renderBt();
-  if (PAGE === "set") renderSet();
+  if (PAGE === "set" && !(document.activeElement && document.activeElement.tagName === "INPUT")) renderSet(); // ne pas effacer une saisie en cours
 }
 
 function rulesNote() {
@@ -350,7 +350,7 @@ addEventListener("beforeinstallprompt", e => { e.preventDefault(); window.__inst
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 if (!TOKEN || !BASE) showLogin(); else refresh();
-setInterval(() => { if (!lastOk) return; if (!document.hidden && !$("#sheet").classList.contains("on") && PAGE !== "set") refresh(); else fresh(); }, 5000);
+setInterval(() => { if (!lastOk) return; if (!document.hidden && !$("#sheet").classList.contains("on")) refresh(); else fresh(); }, 5000);
 }
 </script>
 </body>
