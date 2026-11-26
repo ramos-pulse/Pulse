@@ -9,7 +9,8 @@ import { hourlyCandles } from "./engine/candles.ts";
 import { env } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { backtest, backtestRsi, loadConfig, loadMemory, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, STRATEGY, TOKENS } from "./engine/strategy.ts";
+import { AGGRESSIVE, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, type RsiParams } from "./engine/strategy.ts";
+import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, type BotKind, type BotState } from "./store.ts";
 
 const SUPABASE_URL = env("SUPABASE_URL") ?? "";
@@ -128,7 +129,7 @@ async function state() {
     const mem = loadMemory(b.price_history);
     const { data: trades } = await db.from("trades").select("*").eq("bot", k).order("created_at", { ascending: false }).limit(60);
     out[k] = {
-      ...b, price_history: undefined, lock_until: undefined, config: loadConfig(b.config),
+      ...b, price_history: undefined, lock_until: undefined, config: k === "spot" ? loadConfig(b.config) : loadPerpsConfig(b.config),
       memory: { strategy: mem.strategy, stop: mem.stop, best: mem.best, signal: mem.signal, mindset: mem.mindset, live: mem.live, asset: mem.asset, side: mem.side, openedAt: mem.openedAt, costUsd: mem.costUsd, pending: mem.pending ? { kind: mem.pending.kind, at: mem.pending.at } : null },
       brain: mem.brain ? { risk: riskPerTrade(mem.brain), streak: mem.brain.streak, benched: mem.brain.benched, disabled: mem.brain.disabled, report: mem.brain.report ?? {}, preset: mem.brain.preset } : null,
       trades: trades ?? [],
@@ -137,8 +138,8 @@ async function state() {
   const [spotWallet, perpsWallet] = await Promise.all([getWalletAddress(), getPerpsWalletAddress()]);
   return {
     now: new Date().toISOString(), wallets: { spot: spotWallet, perps: perpsWallet }, bots: out, markets: MARKETS.map((m) => m.name),
-    secrets: { spotWallet: !!env("BOT_WALLET_PRIVATE_KEY"), perpsWallet: !!env("PERPS_WALLET_PRIVATE_KEY"), customRpc: !!env("SOLANA_RPC_URL"), telegram: !!(env("TELEGRAM_BOT_TOKEN") && env("TELEGRAM_CHAT_ID")), cron: cronReady },
-    rules: { strategy: STRATEGY, risk: RISK, perps: PERPS_RULES, rules: RULES, presets: PRESETS },
+    secrets: { anthropic: !!env("ANTHROPIC_API_KEY"), spotWallet: !!env("BOT_WALLET_PRIVATE_KEY"), perpsWallet: !!env("PERPS_WALLET_PRIVATE_KEY"), customRpc: !!env("SOLANA_RPC_URL"), telegram: !!(env("TELEGRAM_BOT_TOKEN") && env("TELEGRAM_CHAT_ID")), cron: cronReady },
+    rules: { strategy: STRATEGY, risk: RISK, perps: PERPS_RULES, rules: RULES, presets: PRESETS, aggressive: AGGRESSIVE },
   };
 }
 
@@ -149,14 +150,142 @@ async function backtestMarket(i: number) {
   const candles = await hourlyCandles(m.product, 1440);
   type R = ReturnType<typeof backtest>;
   const row = (name: string, r: R) => ({ name, trades: r.trades, winRate: r.winRate, profitFactor: Number.isFinite(r.profitFactor) ? r.profitFactor : null, returnPct: r.returnPct, maxDrawdownPct: r.maxDrawdownPct });
+  const bots = await readBots();
+  const pc = loadPerpsConfig(bots.perps.config);
+  const bias = m.allowShort ? pc.bias : 0; // la barre longs/shorts s'applique au bot perps
   const presets = Object.entries(PRESETS).map(([name, params]) =>
-    row(name, backtest(candles, { allowShort: m.allowShort, feePct: m.feePct, hourlyCost: m.hourlyCost, leverageCap: m.cap, params })));
+    row(name, backtest(candles, { allowShort: m.allowShort, feePct: m.feePct, hourlyCost: m.hourlyCost, leverageCap: m.cap, params, bias })));
+  if (m.allowShort) presets.push(row("agressif", backtest(candles, { allowShort: true, feePct: m.feePct, hourlyCost: m.hourlyCost,
+    leverageCap: AGGRESSIVE.maxLeverage, params: PRESETS.rapide, risk: AGGRESSIVE.maxRisk, bias })));
   if (!m.allowShort) { // marchés spot : on compare aussi la stratégie RSI (tes réglages) et sa version naïve
-    const rsi = loadConfig((await readBots()).spot.config).rsi;
+    const rsi = loadConfig(bots.spot.config).rsi;
     presets.push(row("RSI", backtestRsi(candles, { ...rsi, naive: false }, m.feePct)));
     presets.push(row("RSI naïf", backtestRsi(candles, { ...rsi, naive: true }, m.feePct)));
   }
   return { market: m.name, days: Math.round(candles.length / 24), presets };
+}
+
+// ------------------------------------------------------------------ agent chercheur
+const RESEARCH_MARKETS: Market[] = [
+  ...TOKENS.filter((t) => t.symbol !== "JUP").map((t) => ({ name: `Spot ${t.symbol}`, product: t.candles, kind: "spot" as const, feePct: 0.003, hourlyCost: 0, cap: RISK.maxSpotFraction })),
+  { name: "Perps SOL", product: "SOL-USD", kind: "perps", feePct: 0.0012, hourlyCost: 0.00008, cap: PERPS_RULES.maxLeverage },
+];
+const RESEARCH_BUDGET_MS = 1000; // sous la limite de 2 s de calcul des fonctions Supabase
+const RESEARCH_MAX = 40;
+
+async function runResearch() {
+  const cycle = Math.floor(Date.now() / 300_000);
+  const m = RESEARCH_MARKETS[cycle % RESEARCH_MARKETS.length]!;
+  const candles = await hourlyCandles(m.product, 2160); // 90 jours : 60 pour régler, 30 jamais vus pour valider
+  if (candles.length < 1000) return { market: m.name, tested: 0, note: "historique insuffisant" };
+  const [{ data: known }, { data: best }] = await Promise.all([
+    db.from("research").select("key").eq("product", m.product).eq("kind", m.kind).limit(20000),
+    db.from("research").select("*").eq("product", m.product).eq("kind", m.kind).order("score", { ascending: false }).limit(6),
+  ]);
+  const seen = new Set<string>((known ?? []).map((r: { key: string }) => r.key));
+  const parents: Candidate[] = (best ?? []).filter((r: { score: number }) => r.score > 0)
+    .map((r: { market: string; product: string; kind: "spot" | "perps"; family: "tendance" | "rsi"; params: Candidate["params"] }) => ({ market: r.market, product: r.product, kind: r.kind, family: r.family, params: r.params }));
+  const rnd = seeded(cycle * 7919 + Date.now() % 1000);
+  const rows = [];
+  const t0 = performance.now();
+  let tries = 0;
+  while (rows.length < RESEARCH_MAX && performance.now() - t0 < RESEARCH_BUDGET_MS && tries < RESEARCH_MAX * 5) {
+    tries++;
+    // moitié améliorations des meilleures, moitié idées nouvelles
+    const c = parents.length && rnd() < 0.5 ? mutate(rnd, parents[Math.floor(rnd() * parents.length)]!) : randomCandidate(rnd, m);
+    const key = candidateKey(c);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const e = evaluate(c, candles, m);
+    rows.push({ key, market: c.market, product: c.product, kind: c.kind, family: c.family, params: c.params, train: e.train, test: e.test, score: e.score, verdict: e.verdict, why: e.why });
+  }
+  if (rows.length) {
+    const { error } = await db.from("research").upsert(rows, { onConflict: "key", ignoreDuplicates: true });
+    if (error) throw new Error(`recherche : ${error.message}`);
+  }
+  // ménage : les stratégies rejetées depuis plus de 3 jours sont oubliées
+  await db.from("research").delete().eq("verdict", "rejetée").lt("created_at", new Date(Date.now() - 3 * 86_400_000).toISOString());
+  return { market: m.name, tested: rows.length, promising: rows.filter((r) => r.verdict === "prometteuse").length };
+}
+
+type ResearchRow = { id: number; created_at: string; market: string; product: string; kind: "spot" | "perps"; family: "tendance" | "rsi"; params: Candidate["params"]; train: Record<string, number>; test: Record<string, number>; score: number; verdict: string; why: string };
+
+async function researchBoard() {
+  const [{ count }, { data: top }, { data: last }] = await Promise.all([
+    db.from("research").select("id", { count: "exact", head: true }),
+    db.from("research").select("*").neq("verdict", "rejetée").order("score", { ascending: false }).limit(12),
+    db.from("research").select("created_at").order("created_at", { ascending: false }).limit(1),
+  ]);
+  return {
+    tested: count ?? 0, lastAt: last?.[0]?.created_at ?? null,
+    best: ((top ?? []) as ResearchRow[]).map((r) => ({ ...r, description: describe(r) })),
+  };
+}
+
+async function applyResearch(id: number) {
+  const { data, error } = await db.from("research").select("*").eq("id", id).limit(1);
+  if (error) throw new Error(error.message);
+  const r = data?.[0] as ResearchRow | undefined;
+  if (!r) throw new Error("stratégie introuvable");
+  const source = `chercheur #${r.id} · ${r.market}`;
+  const bots = await readBots();
+  if (r.kind === "spot") {
+    const cur = loadConfig(bots.spot.config);
+    const config = r.family === "rsi"
+      ? { ...cur, strategy: "rsi" as const, rsi: sanitizeRsi({ ...(r.params as RsiParams), riskPct: cur.rsi.riskPct, naive: false }), source }
+      : { ...cur, strategy: "tendance" as const, trend: sanitizeTrend(r.params), source };
+    await setBot("spot", { config });
+    await notify(`Chercheur : stratégie #${r.id} appliquée au bot spot (${describe(r)})`);
+    return { ok: true, kind: "spot", config };
+  }
+  const cur = loadPerpsConfig(bots.perps.config);
+  const config = { ...cur, trend: sanitizeTrend(r.params), source };
+  await setBot("perps", { config });
+  await notify(`Chercheur : stratégie #${r.id} appliquée au bot perps (${describe(r)})`);
+  return { ok: true, kind: "perps", config };
+}
+
+// ------------------------------------------------------------------ discussion avec le chercheur
+async function agentChat(messages: { role: string; content: string }[]) {
+  const board = await researchBoard();
+  const st = await state();
+  const bots = st.bots as Record<string, { status: string; last_value_usd: number | null; last_message: string | null; config: unknown; memory: { mindset?: string; signal?: string } }>;
+  const context = {
+    date: new Date().toISOString(),
+    bots: Object.fromEntries(Object.entries(bots).map(([k, b]) => [k, { statut: b.status, valeur_usd: b.last_value_usd, derniere_action: b.last_message, pensee: b.memory?.mindset, analyse: b.memory?.signal, reglages: b.config }])),
+    recherche: { strategies_testees: board.tested, meilleures: board.best.slice(0, 8).map((r) => ({ id: r.id, marche: r.market, type: r.family, description: r.description, verdict: r.verdict, entrainement: r.train, validation_jamais_vue: r.test, score: r.score })) },
+  };
+  const key = env("ANTHROPIC_API_KEY");
+  if (!key) {
+    const top = board.best.slice(0, 3);
+    return { reply: `Je cherche en continu : ${board.tested} stratégies testées pour l'instant. ` +
+      (top.length ? `Mes meilleures pistes : ${top.map((r) => `#${r.id} ${r.market} (${r.description}) : validation ${r.test.returnPct?.toFixed(1)} %, PF ${r.test.profitFactor?.toFixed(2)}, ${r.verdict}`).join(" ; ")}.`
+        : "Aucune stratégie n'a encore passé la validation sur une période jamais vue : je continue de chercher.") +
+      ` Pour discuter librement avec moi, ajoute le secret ANTHROPIC_API_KEY dans Supabase.`, ai: false };
+  }
+  const system = `Tu es « le Chercheur », l'agent de recherche de stratégies de l'app Pulse (bots de trading Solana : un bot spot et un bot perps SOL).
+Tu parles uniquement en français, de façon directe et concise (moins de 150 mots sauf demande contraire), comme sur un téléphone.
+Ton rôle : expliquer ce que tu as trouvé, comparer les stratégies, conseiller laquelle essayer, et rester honnête.
+Règles :
+- Tu ne promets jamais de gains. Les backtests sont des simulations du passé.
+- Une stratégie ne compte que si elle gagne aussi sur la période de validation jamais vue ; méfie-toi des résultats fondés sur peu de trades.
+- Tu ne peux rien modifier toi-même : pour appliquer une stratégie, dis à l'utilisateur de toucher « Appliquer » sur la stratégie #id dans l'onglet Chercheur.
+- Tu ne donnes pas de conseil d'investissement personnalisé ; rappelle de ne risquer que ce qu'on accepte de perdre si on te demande combien investir.
+- Le mode agressif du bot perps double le risque et monte le levier jusqu'à x5 : signale-le si c'est pertinent.
+Données actuelles (JSON) :
+${JSON.stringify(context)}`;
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+    signal: AbortSignal.timeout(60_000),
+    body: JSON.stringify({
+      model: env("ANTHROPIC_MODEL") ?? "claude-sonnet-5-5", max_tokens: 700, system,
+      messages: messages.slice(-12).map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: String(m.content).slice(0, 2000) })),
+    }),
+  });
+  const j = (await res.json()) as { content?: { type: string; text?: string }[]; error?: { message?: string } };
+  if (!res.ok) throw new Error(`Claude : ${j.error?.message ?? res.status}`);
+  return { reply: (j.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n").trim() || "…", ai: true };
 }
 
 // ------------------------------------------------------------------ routeur
@@ -166,6 +295,10 @@ Deno.serve(async (req) => {
   const route = url.pathname.replace(/^.*?\/pulse/, "") || "/";
   if (!db) return json({ error: "Clé service Supabase introuvable : ajoute le secret PULSE_SERVICE_KEY (Project Settings → API Keys → clé secret/service_role)." }, 500);
   try {
+    if (route === "/research" && req.method === "POST") {
+      if (!TOKEN || !safeEqual(req.headers.get("x-cron-secret") ?? "", await cronSecret())) return json({ error: "interdit" }, 403);
+      return json(await runResearch());
+    }
     if (route === "/tick" && req.method === "POST") {
       if (!TOKEN || !safeEqual(req.headers.get("x-cron-secret") ?? "", await cronSecret())) return json({ error: "interdit" }, 403);
       // les deux bots tournent en parallèle et indépendamment : la panne de l'un ne bloque jamais l'autre
@@ -178,12 +311,32 @@ Deno.serve(async (req) => {
     await ensureCron();
 
     if (req.method === "GET" && route === "/api/state") return json(await state());
+    if (req.method === "GET" && route === "/api/research") return json(await researchBoard());
+    if (req.method === "POST" && route === "/api/research/apply") {
+      const body = (await req.json().catch(() => ({}))) as { id?: number };
+      return json(await applyResearch(Number(body.id)));
+    }
+    if (req.method === "POST" && route === "/api/research/run") return json(await runResearch()); // lancer une recherche tout de suite
+    if (req.method === "POST" && route === "/api/agent/chat") {
+      const body = (await req.json().catch(() => ({}))) as { messages?: { role: string; content: string }[] };
+      return json(await agentChat(Array.isArray(body.messages) ? body.messages : []));
+    }
     if (req.method === "GET" && route === "/api/backtest") return json(await backtestMarket(Number(url.searchParams.get("market") ?? 0)));
     if (req.method === "POST" && route === "/api/spot/config") {
-      const body = (await req.json().catch(() => ({}))) as { strategy?: string; rsi?: Record<string, unknown> };
+      const body = (await req.json().catch(() => ({}))) as { strategy?: string; rsi?: Record<string, unknown>; trend?: null };
       const current = loadConfig((await readBots()).spot.config);
-      const config = { strategy: body.strategy === "rsi" ? "rsi" : body.strategy === "tendance" ? "tendance" : current.strategy, rsi: sanitizeRsi({ ...current.rsi, ...(body.rsi ?? {}) }) };
+      const config = { ...current, strategy: body.strategy === "rsi" ? "rsi" : body.strategy === "tendance" ? "tendance" : current.strategy, rsi: sanitizeRsi({ ...current.rsi, ...(body.rsi ?? {}) }) };
+      if (body.trend === null) { config.trend = null; delete config.source; } // retour aux réglages automatiques du cerveau
       await setBot("spot", { config });
+      return json({ ok: true, config });
+    }
+    if (req.method === "POST" && route === "/api/perps/config") {
+      const body = (await req.json().catch(() => ({}))) as { mode?: string; bias?: number; trend?: null };
+      const current = loadPerpsConfig((await readBots()).perps.config);
+      const config = loadPerpsConfig({ ...current, mode: body.mode ?? current.mode, bias: body.bias ?? current.bias });
+      if (body.trend === null) { config.trend = null; delete config.source; }
+      await setBot("perps", { config });
+      await notify(`Bot perps : mode ${config.mode}, ${config.bias === 0 ? "longs et shorts équilibrés" : config.bias > 0 ? `longs favorisés (shorts à ${100 - config.bias} %)` : `shorts favorisés (longs à ${100 + config.bias} %)`}`);
       return json({ ok: true, config });
     }
     const m = route.match(/^\/api\/(spot|perps)\/(start|pause|stop|goal)$/);

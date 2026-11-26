@@ -159,7 +159,7 @@ export async function runTick(admin: Admin): Promise<string> {
           mem.stopCandle = closed;
         }
       } else if (!isRsi && token && mem.stopCandle !== closed) {
-        const params = PRESETS[brain.preset[token.symbol] ?? "standard"];
+        const params = cfg.trend ?? PRESETS[brain.preset[token.symbol] ?? "standard"];
         const candles = await hourlyCandles(token.candles, 40, now).catch(() => []);
         if (candles.length > 20) {
           mem.best = Math.max(mem.best ?? entry, candles.at(-1)!.c);
@@ -211,10 +211,12 @@ export async function runTick(admin: Admin): Promise<string> {
     const signals: { token: Token; sig: Signal }[] = [];
     const notes: string[] = [];
     for (const token of TOKENS) {
-      if (cfg.strategy === "tendance" && isBenched(brain, token.symbol, now)) { notes.push(`${token.symbol} : sur le banc`); continue; }
+      // réglages validés par le chercheur : on ignore « aucun réglage rentable », mais pas la mise sur le banc après des pertes
+      const benched = cfg.trend ? (brain.benched[token.symbol] ?? 0) > now : isBenched(brain, token.symbol, now);
+      if (cfg.strategy === "tendance" && benched) { notes.push(`${token.symbol} : sur le banc`); continue; }
       try {
         const candles = await hourlyCandles(token.candles, cfg.strategy === "rsi" ? Math.max(cfg.rsi.smaPeriod, cfg.rsi.rsiPeriod * 6) + 40 : 400, now);
-        const sig = cfg.strategy === "rsi" ? rsiSignal(candles, cfg.rsi) : trendSignal(candles, false, PRESETS[brain.preset[token.symbol] ?? "standard"]);
+        const sig = cfg.strategy === "rsi" ? rsiSignal(candles, cfg.rsi) : trendSignal(candles, false, cfg.trend ?? PRESETS[brain.preset[token.symbol] ?? "standard"]);
         if (sig.side === "long") signals.push({ token, sig }); else notes.push(`${token.symbol} : ${sig.reason}`);
       } catch { notes.push(`${token.symbol} : historique indisponible`); }
     }

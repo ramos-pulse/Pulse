@@ -64,8 +64,15 @@ table{width:100%;border-collapse:collapse;font:12.5px var(--mono)}th,td{padding:
 .note{font-size:13px;color:var(--muted);text-align:center;margin:6px 10px 18px}
 .warnbox{border:1px solid rgba(242,181,79,.4);background:rgba(242,181,79,.08);color:#f6d79a;border-radius:16px;padding:12px 14px;font-size:14px;margin-bottom:14px}
 .field{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}.field:last-child{border-bottom:0}
+input[type=range]{width:100%;accent-color:var(--lime);padding:0;border:0;background:none;height:36px}
 input{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:12px;padding:12px;font:16px var(--mono);width:130px;text-align:right}
-nav{position:fixed;left:0;right:0;bottom:0;z-index:20;background:rgba(8,16,12,.95);backdrop-filter:blur(14px);border-top:1px solid var(--line);display:grid;grid-template-columns:repeat(4,1fr);padding:8px 6px calc(8px + var(--sb))}
+.bubble{max-width:86%;padding:11px 14px;border-radius:16px;margin:8px 0;white-space:pre-wrap;line-height:1.45;font-size:15px}
+.bubble.me{margin-left:auto;background:var(--lime);color:#0b1405;border-bottom-right-radius:5px}
+.bubble.ai{background:var(--card2);border:1px solid var(--line);border-bottom-left-radius:5px}
+.chatbox{display:flex;gap:8px;margin-top:12px;align-items:flex-end}
+.chatbox textarea{flex:1;min-height:48px;max-height:140px;resize:none;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:14px;padding:12px;font:16px var(--sans)}
+.pill.ok{background:rgba(74,222,128,.15);color:var(--green)}.pill.mid{background:rgba(242,181,79,.14);color:var(--amber)}
+nav{position:fixed;left:0;right:0;bottom:0;z-index:20;background:rgba(8,16,12,.95);backdrop-filter:blur(14px);border-top:1px solid var(--line);display:grid;grid-template-columns:repeat(5,1fr);padding:8px 6px calc(8px + var(--sb))}
 nav button{display:flex;flex-direction:column;align-items:center;gap:3px;font:11px var(--mono);color:var(--muted);min-height:44px}
 nav svg{width:22px;height:22px}nav button.on{color:var(--lime)}
 .sheet-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:30;display:none;align-items:flex-end}.sheet-bg.on{display:flex}
@@ -96,12 +103,14 @@ nav svg{width:22px;height:22px}nav button.on{color:var(--lime)}
     <section class="page on" id="p-home"></section>
     <section class="page" id="p-hist"></section>
     <section class="page" id="p-bt"></section>
+    <section class="page" id="p-ag"></section>
     <section class="page" id="p-set"></section>
   </main>
   <nav id="nav">
     <button data-p="home" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12l9-8 9 8M5 10v10h14V10"/></svg>Missions</button>
     <button data-p="hist"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Historique</button>
     <button data-p="bt"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 20h18M6 16l4-5 4 3 5-7"/></svg>Backtest</button>
+    <button data-p="ag"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M8 11h6M11 8v6"/></svg>Chercheur</button>
     <button data-p="set"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>Réglages</button>
   </nav>
 </div>
@@ -153,7 +162,7 @@ $("#loginBtn").onclick = () => { BASE = serverUrl($("#srv").value); TOKEN = $("#
   const box = $("#loginErr"); box.style.display = "block"; box.textContent = "Connexion…"; refresh(); };
 
 $("#nav").onclick = e => { const b = e.target.closest("button"); if (b) go(b.dataset.p); };
-function go(p) { PAGE = p; if (p === "set") $("#p-set").innerHTML = ""; document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
+function go(p) { PAGE = p; if (p === "set") $("#p-set").innerHTML = ""; if (p === "ag") loadAg(); document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
   document.querySelectorAll(".page").forEach(x => x.classList.toggle("on", x.id === "p-" + p)); render(); scrollTo(0, 0); }
 
 async function refresh() {
@@ -242,12 +251,45 @@ function render() {
   if (!S.secrets.telegram && PAGE === "home") a += `<div class="warnbox">Ajoute les secrets TELEGRAM_BOT_TOKEN et TELEGRAM_CHAT_ID dans Supabase pour être prévenu même téléphone verrouillé.</div>`;
   $("#alerts").innerHTML = a;
   const spotStrat = S.bots.spot.config?.strategy === "rsi" ? (S.bots.spot.config.rsi.naive ? "RSI naïf" : "RSI") : "Tendance";
-  if (PAGE === "home") $("#p-home").innerHTML = missionCard("spot", `Bot 1 · Spot Solana · ${spotStrat}`) + missionCard("perps", `Bot 2 · Perps SOL x${S.rules.perps.maxLeverage} max`) + rulesNote();
+  if (PAGE === "home") $("#p-home").innerHTML = missionCard("spot", `Bot 1 · Spot Solana · ${spotStrat}`) + missionCard("perps", `Bot 2 · Perps SOL · ${perpsLabel()}`) + rulesNote();
   if (PAGE === "hist") renderHist();
   if (PAGE === "bt") renderBt();
+  if (PAGE === "ag" && !$("#p-ag").innerHTML) renderAg();
   if (PAGE === "set" && !$("#p-set").innerHTML) renderSet(); // dessinée une seule fois : une saisie en cours n'est jamais effacée
 }
 
+function biasText(b) {
+  if (b === 0) return "Longs et shorts à égalité";
+  if (b === 100) return "Longs seulement";
+  if (b === -100) return "Shorts seulement";
+  return b > 0 ? `Longs à 100 %, shorts à ${100 - b} %` : `Shorts à 100 %, longs à ${100 + b} %`;
+}
+function perpsLabel() {
+  const c = S.bots.perps.config || {mode: "normal", bias: 0}, ag = c.mode === "agressif";
+  return `${ag ? `Agressif x${S.rules.aggressive?.maxLeverage ?? 5}` : `x${S.rules.perps.maxLeverage} max`}${c.bias ? " · " + biasText(c.bias) : ""}`;
+}
+function perpsCard() {
+  const c = S.bots.perps.config || {mode: "normal", bias: 0}, ag = c.mode === "agressif", A = S.rules.aggressive || {};
+  return `<div class="eyebrow">Bot perps · mode et direction</div><div class="card">
+    <div class="chips" style="margin-bottom:6px">
+      <button class="chip ${!ag ? "on" : ""}" data-pmode="normal">Normal</button>
+      <button class="chip ${ag ? "on" : ""}" data-pmode="agressif">Agressif</button></div>
+    <p class="sub" id="pmodeTxt" style="margin:8px 0 4px">${modeText(ag ? "agressif" : "normal")}</p>
+    <div class="sep"></div>
+    <div class="k">Longs / shorts</div>
+    <input type="range" id="pbias" min="-100" max="100" step="25" value="${c.bias}">
+    <div class="rl"><span>Shorts</span><span>Équilibré</span><span>Longs</span></div>
+    <div class="v txt" id="pbiasTxt" style="margin-top:10px;text-align:center">${biasText(c.bias)}</div>
+    <p class="sub" style="margin:8px 0 0">Le côté favorisé garde sa taille normale, l'autre est réduit, ou coupé à fond de barre. Le bot n'entre toujours que sur un vrai signal.</p>
+    <button class="btn go sm" style="width:100%;margin-top:14px" id="savePerps" data-mode="${c.mode}">Enregistrer</button>
+  </div>`;
+}
+function modeText(m) {
+  const A = S.rules.aggressive || {maxRisk: .03, maxLeverage: 5, dailyLoss: .08};
+  return m === "agressif"
+    ? `⚠ Risque doublé (jusqu'à ${A.maxRisk * 100} % par trade), levier jusqu'à x${A.maxLeverage}, perte max ${A.dailyLoss * 100} % par jour. Il trade même quand aucun réglage n'a fait ses preuves sur 60 jours. Gains et pertes plus gros et plus fréquents.`
+    : `Risque 0,5 à 2 % par trade selon la forme, levier x${S.rules.perps.maxLeverage} max, perte max ${S.rules.risk.dailyLoss * 100} % par jour. Il attend quand aucun réglage ne marche.`;
+}
 function rulesNote() {
   const st = S.rules.strategy, r = S.rules.risk, c = S.bots.spot.config;
   if (c?.strategy === "rsi") { const p = c.rsi;
@@ -306,6 +348,7 @@ function renderSet() {
       <label class="field"><span>Échéance dans (jours)</span><input type="number" inputmode="numeric" id="days-${k}" placeholder="${g(k).end_at ? Math.max(0, Math.ceil((new Date(g(k).end_at) - Date.now()) / 86400000)) : 30}"></label>
       <button class="btn sm" style="width:100%;margin-top:12px" data-goal="${k}">Enregistrer</button></div>`).join("")}
     ${strategyCard()}
+    ${perpsCard()}
     <div class="eyebrow">Connexions</div>
     <div class="card" style="font:14px/2 var(--mono)">${ok(s.spotWallet)} Wallet spot<br>${ok(s.perpsWallet)} Wallet perps<br>${ok(s.customRpc)} RPC Solana privé<br>${ok(s.telegram)} Telegram<br>${ok(s.cron)} Tick automatique chaque minute</div>
     <div class="eyebrow">Application</div>
@@ -338,13 +381,76 @@ function strategyCard() {
   </div>`;
 }
 
+// ---------------------------------------------------------------- agent chercheur
+let AG = null, CHAT = [], AG_BUSY = false;
+try { CHAT = JSON.parse(localStorage.getItem("pulse_chat") || "[]"); } catch (e) {}
+async function loadAg() { try { AG = await api("/api/research"); } catch (e) {} if (PAGE === "ag") renderAg(); }
+function renderAg() {
+  const el = $("#p-ag"); if (!el) return;
+  const keepDraft = $("#chatIn")?.value || "";
+  const active = ["spot", "perps"].map(k => ({k, c: S?.bots[k]?.config})).filter(x => x.c?.source);
+  const cards = (AG?.best || []).map(r => `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div class="l1">#${r.id} · ${esc(r.market)}</div>
+        <span class="pill ${r.verdict === "prometteuse" ? "ok" : "mid"}">${esc(r.verdict)}</span></div>
+      <div class="l2" style="margin-top:6px;line-height:1.5">${esc(r.description)}</div>
+      <div class="grid" style="margin-top:14px">
+        <div><div class="k">Période jamais vue</div><div class="v ${cl(r.test.returnPct)}">${sg(r.test.returnPct, 1)} %</div></div>
+        <div><div class="k">PF jamais vue · trades</div><div class="v">${nf(r.test.profitFactor)} · ${r.test.trades}</div></div>
+        <div><div class="k">Entraînement (PF)</div><div class="v">${nf(r.train.profitFactor)}</div></div>
+        <div><div class="k">Pire baisse</div><div class="v">${nf(r.test.maxDrawdownPct, 1)} %</div></div>
+      </div>
+      <button class="btn sm" style="width:100%;margin-top:14px" data-apply="${r.id}" data-desc="${esc(r.description)}" data-kind="${r.kind}">Appliquer au bot ${r.kind === "spot" ? "spot" : "perps"}</button></div>`).join("");
+  el.innerHTML = `<div class="eyebrow">Le Chercheur</div>
+    <div class="card"><div class="status run"><span class="dot ok"></span>Recherche en continu</div>
+      <div class="big" style="font-size:40px">${AG ? nf(AG.tested, 0) : "…"}<small>stratégies testées</small></div>
+      <div class="sub">Toutes les 5 minutes, il invente et teste de nouvelles stratégies, puis les juge sur 30 jours qu'il n'a jamais vus.${AG?.lastAt ? ` Dernière recherche il y a ${ago(AG.lastAt)}.` : ""}</div>
+      <button class="btn sm" style="width:100%;margin-top:14px" id="agRun">${AG_BUSY ? "Recherche en cours…" : "Chercher maintenant"}</button></div>
+    ${active.map(({k, c}) => `<div class="warnbox">Le bot ${k === "spot" ? "spot" : "perps"} utilise une stratégie du chercheur (${esc(c.source)}). <button class="btn sm" style="margin-top:8px;width:100%" data-auto="${k}">Revenir aux réglages automatiques</button></div>`).join("")}
+    <div class="eyebrow">Ses meilleures découvertes</div>
+    ${cards || `<div class="card"><p class="sub" style="margin:0">Aucune stratégie n'a encore passé la validation sur une période jamais vue. C'est normal au début : il faut quelques heures de recherche.</p></div>`}
+    <div class="eyebrow">Parler au chercheur</div>
+    <div class="card">
+      <div id="chatLog">${CHAT.length ? CHAT.map(m => `<div class="bubble ${m.role === "user" ? "me" : "ai"}">${esc(m.content)}</div>`).join("") : `<div class="bubble ai">Salut Ramos. Pose-moi une question : « quelle est ta meilleure piste ? », « pourquoi le bot n'achète pas ? », « le mode agressif vaut le coup ? »…</div>`}
+        ${AG_BUSY === "chat" ? `<div class="bubble ai">…</div>` : ""}</div>
+      <div class="chatbox"><textarea id="chatIn" rows="1" placeholder="Écris ton message…">${esc(keepDraft)}</textarea><button class="btn go sm" id="chatSend" style="min-height:48px">Envoyer</button></div>
+      ${CHAT.length ? `<button class="btn sm" style="margin-top:10px" id="chatClear">Effacer la discussion</button>` : ""}
+      ${S?.secrets && !S.secrets.anthropic ? `<p class="sub" style="margin:12px 0 0;font-size:13px">Sans le secret ANTHROPIC_API_KEY dans Supabase, il ne peut que résumer ses résultats. Avec, il discute vraiment.</p>` : ""}
+    </div>`;
+}
+async function sendChat() {
+  const txt = $("#chatIn").value.trim(); if (!txt || AG_BUSY) return;
+  CHAT.push({role: "user", content: txt}); $("#chatIn").value = ""; AG_BUSY = "chat"; renderAg();
+  try { const r = await api("/api/agent/chat", {method: "POST", body: JSON.stringify({messages: CHAT})}); CHAT.push({role: "assistant", content: r.reply}); }
+  catch (e) { CHAT.push({role: "assistant", content: "Je n'ai pas pu répondre : " + e.message}); }
+  CHAT = CHAT.slice(-30); try { localStorage.setItem("pulse_chat", JSON.stringify(CHAT)); } catch (e) {}
+  AG_BUSY = false; renderAg(); const log = $("#chatLog"); log?.lastElementChild?.scrollIntoView({block: "end"});
+}
+
 // ---------------------------------------------------------------- actions
 document.addEventListener("click", async e => {
   const t = e.target.closest("button"); if (!t) return;
   if (t.dataset.copy) { try { await navigator.clipboard.writeText(t.dataset.copy); toast("Adresse copiée"); } catch (err) { toast("Copie impossible"); } return; }
   if (t.dataset.hf) { HF = t.dataset.hf; renderHist(); return; }
+  if (t.id === "chatSend") return sendChat();
+  if (t.id === "chatClear") { CHAT = []; try { localStorage.removeItem("pulse_chat"); } catch (e) {} renderAg(); return; }
+  if (t.id === "agRun") { if (AG_BUSY) return; AG_BUSY = true; renderAg();
+    try { const r = await api("/api/research/run", {method: "POST"}); toast(`${r.tested} stratégies testées sur ${r.market}`); } catch (e) {}
+    AG_BUSY = false; await loadAg(); return; }
+  if (t.dataset.apply) { const id = t.dataset.apply, kind = t.dataset.kind;
+    sheet(`<h3>Appliquer la stratégie #${esc(id)} ?</h3><p>${esc(t.dataset.desc)}</p><p>Le bot ${kind === "spot" ? "spot" : "perps"} l'utilisera pour ses prochaines entrées. Une position déjà ouverte garde ses règles. Tu pourras revenir aux réglages automatiques à tout moment.</p>
+      <div class="btns"><button class="btn" id="sheetCancel">Annuler</button><button class="btn go" data-doapply="${esc(id)}">Appliquer</button></div>`); return; }
+  if (t.dataset.doapply) { closeSheet(); const r = await api("/api/research/apply", {method: "POST", body: JSON.stringify({id: +t.dataset.doapply})});
+    toast(`Stratégie appliquée au bot ${r.kind}`); await refresh(); loadAg(); return; }
+  if (t.dataset.auto) { await api(`/api/${t.dataset.auto}/config`, {method: "POST", body: JSON.stringify({trend: null})}); toast("Retour aux réglages automatiques"); await refresh(); loadAg(); return; }
   if (t.dataset.strat) { document.querySelectorAll("[data-strat]").forEach(x => x.classList.toggle("on", x === t));
     $("#rsiFields").style.display = t.dataset.strat === "rsi" ? "" : "none"; $("#saveStrat").dataset.sel = t.dataset.strat; return; }
+  if (t.dataset.pmode) {
+    if (t.dataset.pmode === "agressif" && $("#savePerps").dataset.mode !== "agressif") toast("Mode agressif : risque et levier plus élevés");
+    document.querySelectorAll("[data-pmode]").forEach(x => x.classList.toggle("on", x === t));
+    $("#savePerps").dataset.mode = t.dataset.pmode; $("#pmodeTxt").textContent = modeText(t.dataset.pmode); return; }
+  if (t.id === "savePerps") {
+    const r = await api("/api/perps/config", {method: "POST", body: JSON.stringify({mode: t.dataset.mode, bias: +$("#pbias").value})});
+    toast(`Perps : ${r.config.mode === "agressif" ? "mode agressif" : "mode normal"} · ${biasText(r.config.bias)}`); BT = null; await refresh(); renderSet(); return; }
   if (t.id === "saveStrat") {
     const body = {strategy: t.dataset.sel, rsi: {rsiPeriod: +$("#r-period").value, entry: +$("#r-entry").value, exit: +$("#r-exit").value,
       smaPeriod: +$("#r-sma").value, swingBars: +$("#r-swing").value, riskPct: +String($("#r-risk").value).replace(",", "."), naive: $("#r-naive").checked}};
@@ -379,6 +485,9 @@ document.addEventListener("click", async e => {
   if (act === "kill") { closeSheet(); toast("Fermeture en cours… (jusqu'à 1 min)"); try { await api(`/api/${k}/stop`, {method: "POST"}); toast("Arrêté"); } catch (err) {} refresh(); }
 });
 
+document.addEventListener("input", e => { if (e.target.id === "pbias") $("#pbiasTxt").textContent = biasText(+e.target.value); });
+setInterval(() => { if (PAGE === "ag" && !document.hidden && !AG_BUSY) loadAg(); }, 60000);
+document.addEventListener("keydown", e => { if (e.target.id === "chatIn" && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });
 addEventListener("beforeinstallprompt", e => { e.preventDefault(); window.__inst = e; });
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });

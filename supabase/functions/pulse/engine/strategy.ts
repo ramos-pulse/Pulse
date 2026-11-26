@@ -177,17 +177,38 @@ export function spotSizeUsd(equity: number, usdc: number, entry: number, stop: n
   return size >= RISK.minOrderUsd ? size : 0;
 }
 
-/** Perps : collatéral et levier pour risquer RISK.perTrade du capital, levier plafonné. */
-export function perpsSizing(equity: number, usdc: number, entry: number, stop: number, risk = RISK.perTrade) {
+/** Perps : collatéral et levier pour risquer `risk` du capital, levier plafonné à `maxLev`. */
+export function perpsSizing(equity: number, usdc: number, entry: number, stop: number, risk = RISK.perTrade, maxLev: number = PERPS_RULES.maxLeverage) {
   const dist = Math.abs(entry - stop) / entry;
   if (!(dist > 0)) return null;
   const notional = (equity * risk) / dist;
-  let collateral = Math.max(PERPS_RULES.minCollateralUsd, notional / PERPS_RULES.maxLeverage);
+  let collateral = Math.max(PERPS_RULES.minCollateralUsd, notional / maxLev);
   if (collateral > usdc) return null;
   let leverage = notional / collateral;
   if (leverage < 1.1) { leverage = 1.1; collateral = notional / leverage; }
   if (collateral < PERPS_RULES.minCollateralUsd) return null; // capital trop faible pour respecter le risque
-  return { collateral, leverage: Math.min(leverage, PERPS_RULES.maxLeverage), notional };
+  return { collateral, leverage: Math.min(leverage, maxLev), notional };
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Réglages du bot perps : mode agressif et biais longs / shorts
+// ---------------------------------------------------------------------------------------------------
+export type PerpsMode = "normal" | "agressif";
+export interface PerpsConfig { mode: PerpsMode; bias: number; trend: Params | null; source?: string } // bias : -100 = shorts seulement, 0 = équilibré, +100 = longs seulement
+
+/** Mode agressif : risque doublé (plafond 3 %), levier jusqu'à x5, perte max 8 %/jour, trade même sans réglage validé. */
+export const AGGRESSIVE = { riskMult: 2, maxRisk: 0.03, maxLeverage: 5, dailyLoss: 0.08 };
+
+export function loadPerpsConfig(raw: unknown): PerpsConfig {
+  const o = (raw && typeof raw === "object" ? raw : {}) as Partial<PerpsConfig>;
+  const bias = Number(o.bias);
+  return { mode: o.mode === "agressif" ? "agressif" : "normal", bias: Number.isFinite(bias) ? Math.round(Math.min(100, Math.max(-100, bias))) : 0,
+    trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}) };
+}
+
+/** Part de la taille normale accordée à un côté (1 = 100 %, 0 = côté désactivé). Le côté favorisé garde 100 %. */
+export function sideMult(bias: number, side: Side): number {
+  return side === "long" ? (bias >= 0 ? 1 : 1 + bias / 100) : (bias <= 0 ? 1 : 1 - bias / 100);
 }
 
 export function perpsChange(side: Side, entry: number, current: number): number {
@@ -229,10 +250,10 @@ export function loadMemory(raw: unknown): Memory {
 export const dayKey = (now: number) => new Date(now).toISOString().slice(0, 10);
 
 /** Met à jour le capital de début de journée et dit si les entrées sont bloquées. */
-export function riskGate(mem: Memory, valueUsd: number, now: number): string | null {
+export function riskGate(mem: Memory, valueUsd: number, now: number, dailyLoss: number = RISK.dailyLoss): string | null {
   const today = dayKey(now);
   if (mem.day !== today || !mem.dayStartValue) { mem.day = today; mem.dayStartValue = valueUsd; }
-  if (valueUsd <= mem.dayStartValue * (1 - RISK.dailyLoss)) return `perte du jour > ${RISK.dailyLoss * 100} % : plus d'entrée aujourd'hui`;
+  if (valueUsd <= mem.dayStartValue * (1 - dailyLoss)) return `perte du jour > ${Math.round(dailyLoss * 100)} % : plus d'entrée aujourd'hui`;
   if (mem.cooldownUntil && now < mem.cooldownUntil) return `pause après une perte (encore ${Math.ceil((mem.cooldownUntil - now) / 60_000)} min)`;
   return null;
 }
@@ -260,7 +281,7 @@ export interface BacktestResult {
 }
 
 /** feePct = coût par côté (frais + slippage), en fraction. hourlyCost = coût de portage par heure (perps). */
-export function backtest(candles: Candle[], o: { allowShort: boolean; feePct: number; hourlyCost?: number; leverageCap?: number; params?: Params }): BacktestResult {
+export function backtest(candles: Candle[], o: { allowShort: boolean; feePct: number; hourlyCost?: number; leverageCap?: number; params?: Params; risk?: number; bias?: number }): BacktestResult {
   const P = o.params ?? DEFAULT_PARAMS;
   let equity = 1, peak = 1, maxDd = 0;
   const log: BacktestResult["log"] = [];
@@ -296,9 +317,10 @@ export function backtest(candles: Candle[], o: { allowShort: boolean; feePct: nu
     }
     if (!pos && c.t >= cooldownUntil) {
       const sig = trendSignal(candles.slice(Math.max(0, i - 400), i + 1), o.allowShort, P);
-      if (sig.side) {
+      const mult = sig.side ? sideMult(o.bias ?? 0, sig.side) : 0;
+      if (sig.side && mult > 0) {
         const dist = Math.abs(sig.price - sig.stop) / sig.price;
-        const size = Math.min(RISK.perTrade / dist, o.leverageCap ?? RISK.maxSpotFraction); // fraction du capital exposée
+        const size = Math.min(((o.risk ?? RISK.perTrade) * mult) / dist, o.leverageCap ?? RISK.maxSpotFraction); // fraction du capital exposée
         pos = { side: sig.side, entry: sig.price, stop: sig.stop, best: sig.price, risk: Math.abs(sig.price - sig.stop), openedAt: c.t, size };
       }
     }
@@ -346,7 +368,16 @@ export const RSI_DEFAULTS: RsiParams = { rsiPeriod: 14, entry: 30, exit: 50, sma
 export const NAIVE_EXIT = 70;
 
 export type SpotStrategy = "tendance" | "rsi";
-export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams }
+export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams; trend: Params | null; source?: string }
+
+/** Réglages de tendance personnalisés (appliqués depuis le chercheur) ; null = le cerveau choisit chaque jour. */
+export function sanitizeTrend(t: unknown): Params | null {
+  if (!t || typeof t !== "object") return null;
+  const x = t as Partial<Params>;
+  const b = Number(x.breakout), a = Number(x.trailAtr), m = Number(x.minTrend);
+  if (![b, a, m].every(Number.isFinite)) return null;
+  return { breakout: Math.round(Math.min(168, Math.max(6, b))), trailAtr: Math.min(6, Math.max(1, a)), minTrend: Math.min(4, Math.max(0, m)) };
+}
 
 const clamp = (v: unknown, lo: number, hi: number, def: number) => {
   const n = Number(v);
@@ -370,7 +401,7 @@ export function sanitizeRsi(p: Partial<RsiParams> | null | undefined): RsiParams
 
 export function loadConfig(raw: unknown): SpotConfig {
   const o = (raw && typeof raw === "object" ? raw : {}) as Partial<SpotConfig>;
-  return { strategy: o.strategy === "rsi" ? "rsi" : "tendance", rsi: sanitizeRsi(o.rsi) };
+  return { strategy: o.strategy === "rsi" ? "rsi" : "tendance", rsi: sanitizeRsi(o.rsi), trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}) };
 }
 
 /** RSI de Wilder ; NaN tant qu'il n'y a pas assez de bougies. */

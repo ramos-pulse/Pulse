@@ -6,7 +6,7 @@ import { hourlyCandles, lastClosedCandle } from "./candles.ts";
 import { perpsClose, perpsOpen, perpsPositions, perpsPrice, type PerpPosition } from "./jupiter.ts";
 import { getBalances, loadKeyPairFrom, type Balances } from "./solana.ts";
 import {
-  atr, dayKey, exitCheck, loadMemory, missionEnd, PERPS_ASSETS, PERPS_RULES, perpsChange, perpsSizing, PRESETS, RISK,
+  AGGRESSIVE, atr, dayKey, exitCheck, loadMemory, loadPerpsConfig, missionEnd, PERPS_ASSETS, PERPS_RULES, perpsChange, perpsSizing, PRESETS, RISK, sideMult,
   riskGate, RULES, trailStop, trendSignal, type Memory,
 } from "./strategy.ts";
 
@@ -40,6 +40,9 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
   if (!(bot.status === "running" || (paused && (bot.position_side || loadMemory(bot.price_history).pending)))) return "idle";
   const now = Date.now();
   const mem: Memory = loadMemory(bot.price_history);
+  const cfg = loadPerpsConfig(bot.config);
+  const aggressive = cfg.mode === "agressif";
+  const maxLev = aggressive ? AGGRESSIVE.maxLeverage : PERPS_RULES.maxLeverage;
   const patch: Partial<PerpsRow> = {};
 
   // 1. Données : prix, soldes ET positions réelles. Sinon on ne touche à rien (le stop on-chain protège).
@@ -101,7 +104,7 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
   }
 
   try {
-    const params = PRESETS[brain.preset[ASSET.asset] ?? "standard"];
+    const params = cfg.trend ?? PRESETS[brain.preset[ASSET.asset] ?? "standard"];
     const closed = lastClosedCandle(now);
 
     // 4. Position ouverte : stop suiveur à chaque bougie, sortie vérifiée chaque minute.
@@ -139,10 +142,14 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
     const today = dayKey(now);
     if (brain.optimized?.[ASSET.asset] !== today) {
       const hist = await hourlyCandles(ASSET.candles, 1440, now).catch(() => null);
-      if (hist && hist.length > 500) optimize(brain, ASSET.asset, hist, { allowShort: true, feePct: PERPS_COST, hourlyCost: BORROW_PER_HOUR, leverageCap: PERPS_RULES.maxLeverage }, today);
+      if (hist && hist.length > 500) optimize(brain, ASSET.asset, hist, { allowShort: true, feePct: PERPS_COST, hourlyCost: BORROW_PER_HOUR, leverageCap: maxLev }, today);
       else brain.optimized = { ...brain.optimized, [ASSET.asset]: today };
     }
-    const blocked = riskGate(mem, value, now) ?? (isBenched(brain, ASSET.asset, now) ? (brain.disabled[ASSET.asset] ?? "SOL sur le banc après une série difficile") : null);
+    // Mode agressif : il trade même quand aucun réglage n'a été validé sur 60 jours, mais respecte toujours la perte max du jour
+    // et la mise sur le banc après une série de pertes.
+    const benched = aggressive || cfg.trend ? (brain.benched[ASSET.asset] ?? 0) > now : isBenched(brain, ASSET.asset, now);
+    const blocked = riskGate(mem, value, now, aggressive ? AGGRESSIVE.dailyLoss : RISK.dailyLoss)
+      ?? (benched ? ((!aggressive && brain.disabled[ASSET.asset]) || "SOL sur le banc après une série difficile") : null);
     if (blocked || mem.lastCandle === closed) {
       mem.mindset = mindset(brain, { inPosition: false, blocked, goalPct: (value / Number(bot.goal_usd)) * 100 });
       await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || blocked || mem.signal || "En attente de la prochaine bougie." });
@@ -150,8 +157,13 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
     }
     mem.lastCandle = closed;
     const candles = await hourlyCandles(ASSET.candles, 400, now);
-    const sig = trendSignal(candles, true, params);
+    const sig = trendSignal(candles, sideMult(cfg.bias, "short") > 0, params);
     mem.signal = `${ASSET.asset} : ${sig.reason}`;
+    const mult = sig.side ? sideMult(cfg.bias, sig.side) : 0;
+    if (sig.side && mult === 0) {
+      await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || `Signal ${sig.side} ignoré : les ${sig.side === "long" ? "longs" : "shorts"} sont désactivés par ta barre longs/shorts.` });
+      return "hold";
+    }
     if (!sig.side) {
       mem.mindset = mindset(brain, { inPosition: false, blocked: null, goalPct: (value / Number(bot.goal_usd)) * 100 });
       await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: message || `Pas d'entrée : ${sig.reason}.` });
@@ -160,7 +172,8 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
     // le stop reste à la même distance que sur la bougie, recalé sur le prix réel
     const dist = Math.abs(sig.price - sig.stop);
     const stop = sig.side === "long" ? price - dist : price + dist;
-    const size = perpsSizing(value, b.usdc, price, stop, riskPerTrade(brain));
+    const baseRisk = aggressive ? Math.min(AGGRESSIVE.maxRisk, riskPerTrade(brain) * AGGRESSIVE.riskMult) : riskPerTrade(brain);
+    const size = perpsSizing(value, b.usdc, price, stop, baseRisk * mult, maxLev);
     if (!size) {
       await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: `Signal ${sig.side} mais capital insuffisant pour respecter le risque (min ${PERPS_RULES.minCollateralUsd} $ de collatéral).` });
       return "hold";
@@ -169,7 +182,7 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
       leverage: size.leverage, stop, slippageBps: PERPS_RULES.slippageBps }, keyPair);
     Object.assign(mem, { pending: { kind: "open", sig: txid, at: now }, stop, best: price, initialRisk: dist, openedAt: now, openValueUsd: value, side: sig.side, asset: ASSET.asset, stopCandle: closed });
     await save(admin, bot, mem, { ...patch, last_value_usd: value,
-      last_message: `${sig.side === "long" ? "Long" : "Short"} ${ASSET.asset} demandé : ${size.collateral.toFixed(2)} $ x${size.leverage.toFixed(1)}, stop ${stop.toFixed(2)} $ (${sig.reason}).` });
+      last_message: `${sig.side === "long" ? "Long" : "Short"} ${ASSET.asset} demandé${aggressive ? " (mode agressif)" : ""} : ${size.collateral.toFixed(2)} $ x${size.leverage.toFixed(1)}, risque ${(baseRisk * mult * 100).toFixed(1)} %, stop ${stop.toFixed(2)} $ (${sig.reason}).` });
     return "open";
   } catch (e) {
     await save(admin, bot, mem, { ...patch, last_value_usd: value, last_message: `Erreur : ${(e as Error).message}`.slice(0, 300) + " — je réessaie au prochain tick." });
