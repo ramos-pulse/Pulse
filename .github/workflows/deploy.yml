@@ -26,11 +26,11 @@ jobs:
       SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
       PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Vérifier les secrets
         run: |
           for v in SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD PROJECT_REF; do
-            if [ -z "${!v}" ]; then echo "::error::Secret GitHub manquant : $v (voir README, étape 4)"; exit 1; fi
+            if [ -z "${!v}" ]; then echo "::error::Secret GitHub manquant : $v (Settings → Secrets and variables → Actions)"; exit 1; fi
           done
       - uses: supabase/setup-cli@v1
         with:
@@ -42,17 +42,23 @@ jobs:
       - name: Fonction des bots
         run: supabase functions deploy pulse --project-ref "$PROJECT_REF" --no-verify-jwt
 
+  app-build:
+    name: App mobile (préparation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: web
+
   app:
     name: App mobile (GitHub Pages)
+    needs: app-build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: web
       - id: deploy
         uses: actions/deploy-pages@v4
