@@ -286,7 +286,9 @@ function alerts(kind, b) {
   if ((b.status === "running" || b.status === "paused") && c.autopilot && !plans.length)
     out.push(`Pilote automatique sans stratégie : aucune ne passe tes réglages, ce bot ne tradera pas.${sc.nerve === 3 ? " Ton réglage « Très nerveux » écarte toutes les stratégies lentes : essaie « Nerveux »." : sc.researchAggressive ? "" : " Le mode agressif des agents (Agents) accepterait plus de stratégies, mais moins sûres."}`);
   const v = Number(b.last_value_usd) - Number(b.vault || 0), n = c.maxPositions || 3;
-  if (v > 0 && kind === "perps") {
+  if (v > 0 && kind === "perps" && S.perpsVenue === "hyperliquid") { // Hyperliquid : 10 $ de TAILLE minimum (et non de collatéral)
+    if (v < 4) out.push(`Capital très faible : ${nf(v)} $. Hyperliquid exige 10 $ de taille par position : seules des positions avec un stop serré seront possibles.`);
+  } else if (v > 0 && kind === "perps") {
     const min = S.rules.perps?.minCollateralUsd ?? 10, fit = Math.floor(v / min);
     if (fit < Math.min(n, Math.max(1, plans.length || 1))) out.push(fit < 1 ? `Capital trop faible : Jupiter exige ${min} $ de collatéral par position, il n'y a que ${nf(v)} $. Aucune position perps possible.` : `Capital : ${nf(v)} $ permet au plus ${fit} position(s) perps (${min} $ de collatéral minimum chacune), pas ${n}.`);
   }
@@ -322,6 +324,7 @@ function spark(c) {
 
 function missionCard(kind, title) {
   const b = S.bots[kind], m = b.memory, br = b.brain, [sc, st] = STATUS[b.status] || ["off", b.status];
+  const hlBot = kind === "perps" && S.perpsVenue === "hyperliquid";
   const value = b.last_value_usd, start = b.start_value_usd, goal = b.goal_usd;
   const gain = value != null && start ? value - start : null;
   const prog = value != null && goal ? Math.min(100, value / goal * 100) : 0;
@@ -379,10 +382,12 @@ function missionCard(kind, title) {
   </div>
   <div class="card" style="padding:10px 16px"><details data-d="wallet-${kind}" style="margin:0"><summary>▸ ${kind === "spot" ? "PORTEFEUILLE DU ROBOT" : "PORTEFEUILLE PERPS"}</summary>
     ${wallet ? `<div class="addr">${esc(wallet)}</div><button class="btn sm" data-copy="${esc(wallet)}">Copier l'adresse</button>
-      <a class="btn sm" style="margin-top:8px;display:block;text-align:center;text-decoration:none" href="https://solscan.io/account/${encodeURIComponent(wallet)}#portfolio" target="_blank" rel="noopener">Voir ses jetons sur Solscan</a>
+      ${hlBot ? `<a class="btn sm" style="margin-top:8px;display:block;text-align:center;text-decoration:none" href="https://app.hyperliquid.xyz/portfolio" target="_blank" rel="noopener">Voir le compte sur Hyperliquid</a>`
+        : `<a class="btn sm" style="margin-top:8px;display:block;text-align:center;text-decoration:none" href="https://solscan.io/account/${encodeURIComponent(wallet)}#portfolio" target="_blank" rel="noopener">Voir ses jetons sur Solscan</a>`}
       <button class="btn sm" style="margin-top:8px" data-rebase="${kind}">Remettre le gain à zéro</button>
-      <p class="sub" style="margin:12px 0 0">Dépose des USDC (Solana) + environ 0,03 SOL pour les frais. ${kind === "perps" ? "Minimum 10 $ d'USDC pour ouvrir une position." : ""}</p>`
-      : `<p class="sub" style="margin:8px 0 0">Secret ${kind === "spot" ? "BOT_WALLET_PRIVATE_KEY" : "PERPS_WALLET_PRIVATE_KEY"} absent dans Supabase (Edge Functions → Secrets).</p>`}
+      <p class="sub" style="margin:12px 0 0">${hlBot ? "Compte Hyperliquid : garde les USDC côté « Perps ». Le bot signe avec un portefeuille API qui ne peut pas retirer d'argent. Minimum 10 $ de taille par position, stops posés chez Hyperliquid."
+        : `Dépose des USDC (Solana) + environ 0,03 SOL pour les frais. ${kind === "perps" ? "Minimum 10 $ d'USDC pour ouvrir une position." : ""}`}</p>`
+      : `<p class="sub" style="margin:8px 0 0">${hlBot ? "Secrets HL_ACCOUNT_ADDRESS et HL_AGENT_PRIVATE_KEY absents" : `Secret ${kind === "spot" ? "BOT_WALLET_PRIVATE_KEY" : "PERPS_WALLET_PRIVATE_KEY"} absent`} dans Supabase (Edge Functions → Secrets).</p>`}
   </details></div>`;
 }
 
@@ -394,7 +399,7 @@ function render() {
   const sc = S.bots.spot.config || {};
   const spotStrat = sc.autopilot ? `Pilote auto${sc.plans?.length ? " · " + sc.plans.map(p => p.symbol + (p.interval === "15m" ? " 15m" : "")).join(", ") : " · en attente"}`
     : sc.plans?.length ? `Chercheur · ${sc.plans.map(p => p.symbol).join(", ")}` : sc.strategy === "rsi" ? (sc.rsi.naive ? "RSI naïf" : "RSI") : "Tendance";
-  if (PAGE === "home") { $("#p-home").innerHTML = summary() + missionCard("spot", `Bot 1 · Spot Solana · ${spotStrat}`) + missionCard("perps", `Bot 2 · Perps · ${perpsLabel()}`) + bilanCard() + rulesNote();
+  if (PAGE === "home") { $("#p-home").innerHTML = summary() + missionCard("spot", `Bot 1 · Spot Solana · ${spotStrat}`) + missionCard("perps", `Bot 2 · Perps${S.perpsVenue === "hyperliquid" ? " Hyperliquid" : ""} · ${perpsLabel()}`) + bilanCard() + rulesNote();
     document.querySelectorAll("#p-home details[data-d]").forEach(d => { d.open = OPEN.has(d.dataset.d); }); // volets ouverts conservés au rafraîchissement
     rolls(); bindChart(); }
   if (PAGE === "hist") renderHist();
@@ -529,7 +534,7 @@ function renderSet() {
     ${strategyCard()}
     ${perpsCard()}
     <div class="eyebrow">Connexions</div>
-    <div class="card" style="font:14px/2 var(--mono)">${ok(s.spotWallet)} Wallet spot<br>${ok(s.perpsWallet)} Wallet perps<br>${ok(s.customRpc)} RPC Solana privé<br>${ok(s.telegram)} Telegram<br>${ok(s.cron)} Tick automatique chaque minute</div>
+    <div class="card" style="font:14px/2 var(--mono)">${ok(s.spotWallet)} Wallet spot<br>${S.perpsVenue === "hyperliquid" ? `${ok(s.hyperliquid)} Compte Hyperliquid (portefeuille API)` : `${ok(s.perpsWallet)} Wallet perps`}<br>${ok(s.customRpc)} RPC Solana privé<br>${ok(s.telegram)} Telegram<br>${ok(s.cron)} Tick automatique chaque minute</div>
     <div class="eyebrow">Apparence</div>
     <div class="card"><div class="chips" style="margin:0">${[["dark", "Sombre"], ["light", "Clair"], ["oled", "Noir pur (OLED)"]].map(([k, l]) => `<button class="chip ${THEME === k ? "on" : ""}" data-th="${k}">${l}</button>`).join("")}</div>
       <p class="sub" style="margin:8px 0 0">Noir pur : idéal sur les écrans OLED, économise la batterie.</p></div>

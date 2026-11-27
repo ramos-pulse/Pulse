@@ -9,7 +9,7 @@ import { fundingHistory } from "./funding.ts";
 import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type Extra, type SetupParams } from "./setups.ts";
 import {
   addToVault, applyTransfer, detectTransfer, AGGR_AGGRESSIVE, AGGR_LEVELS, effectiveAggr, atr, dayKey, exitCheck, loadMemory, loadPerpsConfig, migratePositions, missionEnd, PARTIAL, PERPS_ASSETS, PERPS_RULES,
-  perpsChange, perpsSizing, PRESETS, RISK, EXTRA_SOFT, riskFactor, cooldownMs, floorOf, solReserveAlert, volScale, sampleCurve, sideMult, riskGate, RULES, TOTAL_RISK, tradable, trailStop, trendSignal, DEFAULT_PARAMS,
+  perpsChange, perpsSizing, conviction, PRESETS, RISK, EXTRA_SOFT, riskFactor, cooldownMs, floorOf, solReserveAlert, volScale, sampleCurve, sideMult, riskGate, RULES, TOTAL_RISK, tradable, trailStop, trendSignal, DEFAULT_PARAMS,
   type Interval, type Memory, type Params, type PerpsConfig, type PerpsPlan, type Position,
 } from "./strategy.ts";
 
@@ -86,6 +86,12 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
   const brain = mem.brain;
   const realOf = (asset: string) => real.find((p) => p.asset === asset) ?? null;
   let message = "";
+  if (mem.venue === "hyperliquid") { // retour sur Jupiter : compteurs remis à la valeur du portefeuille Solana
+    if (bot.start_value_usd != null && value > 0) patch.start_value_usd = value;
+    mem.curve = []; mem.dayStartValue = value; mem.lastCandleBy = {}; brain.equityHigh = value;
+    message = `Bot perps revenu sur Jupiter : point de départ remis à ${value.toFixed(2)} $ (ni gain ni perte).`;
+  }
+  mem.venue = "jupiter";
 
   // 2. Ordre en attente (les keepers Jupiter exécutent en différé).
   if (mem.pending) {
@@ -254,7 +260,8 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
       const stop = sig.side === "long" ? price - dist : price + dist;
       const confidence = (plan ? riskFactor(plan.confidence) : 1) * (cfg.extraSoft ? EXTRA_SOFT.riskMult : 1); // stratégie pas encore confirmée en réel : 75 % ; extra souple : ×0,5
       const vol = volScale(c); // marché agité : risque réduit (les stops sautent plus souvent)
-      const wanted = Math.min(L.maxRisk, riskPerTrade(brain) * L.riskMult) * mult * confidence * vol;
+      const conv = plan ? conviction(plan.score) : 1; // mise selon la confiance dans la stratégie
+      const wanted = Math.min(L.maxRisk, riskPerTrade(brain) * L.riskMult * conv) * mult * confidence * vol;
       const room = L.maxRisk * TOTAL_RISK.perpsMult - openRisk(held, value); // risque total plafonné
       const risk = Math.min(wanted, room);
       if (risk < 0.002) { notes.push(`${A.asset} : risque total des positions déjà au plafond`); continue; }
@@ -267,7 +274,7 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
         key: A.asset, symbol: A.asset, side: sig.side, stop, best: price, initialRisk: dist, openedAt: now, stopCandle: closed, posParams: isRangePlan ? plan!.params : params, posInterval: iv, source,
         ...(setup ? { strategy: setup } : {}), ...("target" in sig && sig.target != null ? { target: (sig.target as number) + (price - sig.price) } : {}),
         collateralUsd: size.collateral, sizeUsd: size.notional,
-        why: `${sig.reason} · stratégie : ${source} · ${L.name.toLowerCase()}, risque ${(size.risk * 100).toFixed(1)} %${size.risk > risk * 1.05 ? " (position minimale de Jupiter : 10 $ de collatéral)" : ""}, levier x${size.leverage.toFixed(1)}${vol < 1 ? `, taille réduite (marché agité ×${vol})` : ""}${mem.vault ? ` (coffre de ${mem.vault.toFixed(2)} $ exclu)` : ""}`,
+        why: `${sig.reason} · stratégie : ${source} · ${L.name.toLowerCase()}, risque ${(size.risk * 100).toFixed(1)} %${size.risk > risk * 1.05 ? " (position minimale de Jupiter : 10 $ de collatéral)" : ""}, levier x${size.leverage.toFixed(1)}${conv !== 1 ? `, confiance ×${conv}` : ""}${vol < 1 ? `, taille réduite (marché agité ×${vol})` : ""}${mem.vault ? ` (coffre de ${mem.vault.toFixed(2)} $ exclu)` : ""}`,
       } };
       await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value,
         last_message: `${sig.side === "long" ? "Long" : "Short"} ${A.asset} demandé (${L.name.toLowerCase()}) : ${size.collateral.toFixed(2)} $ x${size.leverage.toFixed(1)}, risque ${(size.risk * 100).toFixed(1)} %, stop ${stop.toFixed(2)} $ (${sig.reason}).` });

@@ -129,6 +129,13 @@ export const PERPS_ASSETS = [
   { asset: "BTC", mint: "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh", candles: "BTC-USD" },
 ] as const;
 export type PerpsAsset = (typeof PERPS_ASSETS)[number]["asset"];
+/** Marchés perps tradés : Jupiter = SOL, ETH, BTC ; Hyperliquid = les marchés choisis chaque jour (bougies « hl:<marché> »). */
+export interface PerpsMarket { asset: string; candles: string; mint?: string; maxLeverage?: number }
+let PERPS_MARKETS: PerpsMarket[] = PERPS_ASSETS.map((a) => ({ ...a }));
+export const perpsMarkets = (): readonly PerpsMarket[] => PERPS_MARKETS;
+export function setPerpsMarkets(list: PerpsMarket[]) { if (list.length) PERPS_MARKETS = list.filter((m, i, a) => a.findIndex((x) => x.asset === m.asset) === i); }
+/** Nombre maximum de marchés surveillés en même temps par le bot perps (les positions restent limitées par maxPositions). */
+export const PERPS_PLANS_MAX = 8;
 export type PerpsSide = "long" | "short";
 export type Side = PerpsSide;
 
@@ -448,18 +455,18 @@ export function loadPerpsConfig(raw: unknown): PerpsConfig {
     autopilot: o.autopilot === true, extraSoft: o.extraSoft === true, dailyStop: o.dailyStop === true, ...plansOf(o), ...protections(o) };
 }
 
-/** Une stratégie par marché, 3 au maximum. Reprend l'ancien champ `plan` s'il n'y a pas encore de liste. */
+/** Une stratégie par marché, PERPS_PLANS_MAX au maximum. Reprend l'ancien champ `plan` s'il n'y a pas encore de liste. */
 function plansOf(o: Partial<PerpsConfig>): { plans: PerpsPlan[]; plan: PerpsPlan | null } {
   const raw = Array.isArray(o.plans) ? o.plans : o.plan ? [o.plan] : [];
   const plans: PerpsPlan[] = [];
-  for (const x of raw) { const p = sanitizePerpsPlan(x); if (p && !plans.some((q) => q.asset === p.asset) && plans.length < 3) plans.push(p); }
+  for (const x of raw) { const p = sanitizePerpsPlan(x); if (p && !plans.some((q) => q.asset === p.asset) && plans.length < PERPS_PLANS_MAX) plans.push(p); }
   return { plans, plan: plans[0] ?? null };
 }
 
 export function sanitizePerpsPlan(raw: unknown): PerpsPlan | null {
   if (!raw || typeof raw !== "object") return null;
   const x = raw as Partial<PerpsPlan>;
-  if (!PERPS_ASSETS.some((a) => a.asset === x.asset)) return null;
+  if (!perpsMarkets().some((a) => a.asset === x.asset)) return null;
   const fam = isSetup(x.family) ? x.family : isRange(x.params) ? "range" : null;
   const params = fam ? sanitizeSetup(fam, x.params) : sanitizeTrend(x.params);
   if (!params) return null;
@@ -494,6 +501,9 @@ export interface Position {
   sizeUsd?: number;          // perps : taille de la position
   lastValueUsd?: number;     // perps : dernière valeur vue (collatéral + PnL)
   pubkey?: string;
+  stopOid?: number;          // Hyperliquid : numéro de l'ordre stop posé chez Hyperliquid
+  stopPx?: number;           // Hyperliquid : niveau de ce stop
+  coinSize?: number;         // Hyperliquid : taille en unités du marché
   partialDone?: boolean;     // prise de bénéfices partielle déjà faite (ou stop remonté au prix d'entrée)
   missing?: number;          // nombre de ticks où la position n'a pas été vue (on attend 2 ticks avant de la croire fermée)
   why?: string;              // raison de l'entrée (affichée dans « Pourquoi ce trade ? »)
@@ -532,6 +542,9 @@ export interface Memory {
   lastSol?: number;          // SOL vus au tick précédent (détection des dépôts et retraits)
   solWarnDay?: string;       // dernière alerte « réserve de SOL basse »
   jitoMissAt?: number;
+  hlLedgerAt?: number;       // Hyperliquid : dernier dépôt / retrait déjà pris en compte
+  hlOrphanAt?: number;       // Hyperliquid : dernier nettoyage des stops orphelins
+  venue?: "jupiter" | "hyperliquid"; // plateforme du bot perps lors du dernier tick (changement = compteurs remis à zéro)
   fresh?: Record<string, string>; // agent nouveaux tokens : tokens déjà achetés (mint → jour), jamais rachetés       // dernier envoi privé (Jito) non exécuté : voie normale pendant 15 min
   errStreak?: number;        // erreurs consécutives (chien de garde)
 }
@@ -1000,4 +1013,15 @@ export function researchSide(cycle: number, perpsPct: number): "spot" | "perps" 
 }
 
 /** Mode « extra souple » : chaque trade ne prend que la moitié du risque normal (les stratégies sont moins prouvées). */
+/**
+ * MISE SELON LA CONFIANCE : une stratégie solide (score élevé du chercheur, confirmée en réel) prend une mise plus grosse,
+ * une stratégie fragile une mise plus petite. ×0,5 à ×1,5, toujours sous le plafond de risque du niveau choisi.
+ * score 0,5 → ×0,78 · 1 → ×0,9 · 2 → ×1,08 · 3 → ×1,2 · 5 → ×1,38 · 7 et plus → ×1,5 ; sans score (réglage manuel) → ×1.
+ */
+export const CONVICTION = { min: 0.5, max: 1.5 };
+export function conviction(score: number | undefined | null): number {
+  if (score == null || !Number.isFinite(score)) return 1;
+  if (score <= 0) return CONVICTION.min;
+  return Math.round(Math.min(CONVICTION.max, Math.max(CONVICTION.min, 0.6 + 0.3 * Math.log2(1 + score))) * 100) / 100;
+}
 export const EXTRA_SOFT = { riskMult: 0.5, minTestTrades: 3, minTestPF: 1.0, maxTestDD: 25, minTrainPF: 1.0 }; // minTrainPF : une stratégie qui perd sur l'entraînement n'a gagné sur la période jamais vue que par chance

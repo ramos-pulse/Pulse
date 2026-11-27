@@ -8,8 +8,10 @@ import { riskPerTrade } from "./engine/brain.ts";
 import { candles as getCandles, hourlyCandles } from "./engine/candles.ts";
 import { env, token2022Danger } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
+import { currentHlValue, getHlAddress, liquidateHl, runHlTick } from "./engine/perpsHl.ts";
+import { hlMarkets } from "./engine/hyperliquid.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, type TokenInfo, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
+import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, perpsMarkets, setPerpsMarkets, PERPS_PLANS_MAX, type PerpsMarket, type TokenInfo, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, simulate, tempo, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, pushHook, type BotKind, type BotState } from "./store.ts";
 import { arbScan, bestPools, FRESH, freshCandidates, freshRefusal, impersonates, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
@@ -55,12 +57,20 @@ function safeEqual(a: string, b: string) {
   return d === 0;
 }
 
+// ------------------------------------------------------------------ plateforme du bot perps
+/** Bot perps sur Hyperliquid quand le secret PERPS_VENUE vaut « hyperliquid » ; sinon Jupiter (comportement actuel). */
+const onHl = () => env("PERPS_VENUE")?.trim().toLowerCase() === "hyperliquid";
+const perpsTick = (s: DbStore) => (onHl() ? runHlTick(s) : runPerpsTick(s));
+const perpsValueNow = () => (onHl() ? currentHlValue() : currentPerpsValue());
+const perpsAddress = () => (onHl() ? getHlAddress() : getPerpsWalletAddress());
+const perpsLiquidate = (s: DbStore, b: Parameters<typeof liquidatePerps>[1], o: Parameters<typeof liquidatePerps>[2], m: string) => (onHl() ? liquidateHl(s, b, o, m) : liquidatePerps(s, b, o, m));
+
 // ------------------------------------------------------------------ tick
 async function tickBot(kind: BotKind): Promise<string> {
   const store = await DbStore.claim(db, kind);
   if (!store) return "occupé (tick précédent en cours)";
   try {
-    return kind === "spot" ? await runTick(store) : await runPerpsTick(store);
+    return kind === "spot" ? await runTick(store) : await perpsTick(store);
   } catch (e) {
     store.update(kind, { last_tick_at: new Date().toISOString(), last_message: `Erreur inattendue : ${(e as Error).message}`.slice(0, 280) + " — je réessaie." });
     return "error";
@@ -112,7 +122,7 @@ async function startMission(kind: BotKind, body: { goal_usd?: number; days?: num
   const sc0 = loadConfig((await readBots()).spot.config);
   if (sc0.breakerTrippedAt) await setBot("spot", { config: { ...sc0, breakerTrippedAt: null, breakerBase: null } });
   if (isNew) {
-    try { startValue = (kind === "spot" ? await currentValue() : await currentPerpsValue()).valueUsd; } catch { startValue = null; }
+    try { startValue = (kind === "spot" ? await currentValue() : await perpsValueNow()).valueUsd; } catch { startValue = null; }
   }
   await setBot(kind, {
     status: "running", goal_usd: goal,
@@ -153,7 +163,7 @@ async function emergencyStop(kind: BotKind) {
   if (!store) return { ok: false, error: "Un tick est encore en cours. Le bot est en pause ; réessaie l'arrêt d'urgence dans une minute." };
   try {
     if (kind === "spot") await liquidate(store, store.bot(kind), "stopped", "Arrêt d'urgence : positions vendues en USDC.");
-    else await liquidatePerps(store, store.bot(kind), "stopped", "Arrêt d'urgence : positions fermées.");
+    else await perpsLiquidate(store, store.bot(kind), "stopped", "Arrêt d'urgence : positions fermées.");
     if (store.bot(kind).status === "running") store.update(kind, { status: "paused" }); // vente impossible : on garde la position mais en pause
   } catch (e) {
     store.update(kind, { status: "paused", last_message: `Arrêt d'urgence : ${(e as Error).message}`.slice(0, 280) });
@@ -191,12 +201,13 @@ async function state() {
       trades: trades ?? [],
     };
   }
-  const [spotWallet, perpsWallet, { data: bilan }] = await Promise.all([getWalletAddress(), getPerpsWalletAddress(),
+  const [spotWallet, perpsWallet, { data: bilan }] = await Promise.all([getWalletAddress(), perpsAddress(),
     db.from("agent_log").select("created_at, detail").eq("agent", "bilan").order("created_at", { ascending: false }).limit(1)]);
   return {
     now: new Date().toISOString(), wallets: { spot: spotWallet, perps: perpsWallet }, bilan: bilan?.[0] ?? null,
     protections: (({ breakerPct, breakerTrippedAt }) => ({ breakerPct, breakerTrippedAt }))(loadConfig(bots.spot.config)), bots: out, markets: MARKETS.map((m) => m.name),
-    secrets: { anthropic: !!env("ANTHROPIC_API_KEY"), spotWallet: !!env("BOT_WALLET_PRIVATE_KEY"), perpsWallet: !!env("PERPS_WALLET_PRIVATE_KEY"), customRpc: !!env("SOLANA_RPC_URL"), telegram: !!(env("TELEGRAM_BOT_TOKEN") && env("TELEGRAM_CHAT_ID")), cron: cronReady },
+    perpsVenue: onHl() ? "hyperliquid" : "jupiter",
+    secrets: { hyperliquid: !!(env("HL_ACCOUNT_ADDRESS") && env("HL_AGENT_PRIVATE_KEY")), anthropic: !!env("ANTHROPIC_API_KEY"), spotWallet: !!env("BOT_WALLET_PRIVATE_KEY"), perpsWallet: !!env("PERPS_WALLET_PRIVATE_KEY"), customRpc: !!env("SOLANA_RPC_URL"), telegram: !!(env("TELEGRAM_BOT_TOKEN") && env("TELEGRAM_CHAT_ID")), cron: cronReady },
     rules: { strategy: STRATEGY, risk: RISK, perps: PERPS_RULES, rules: RULES, presets: PRESETS, aggressive: AGGRESSIVE, aggrLevels: AGGR_LEVELS, leverages: LEVERAGES, vaultSteps: VAULT_STEPS, breakerSteps: BREAKER_STEPS, partial: PARTIAL },
   };
 }
@@ -268,14 +279,17 @@ async function learnFromBots(): Promise<string[]> {
 }
 const INTERVALS: Interval[] = ["1h", "15m"];
 /** Marchés étudiés : liste fixe + tokens choisis par le sélectionneur (historique on-chain). */
-const researchMarkets = (): Market[] => [...RESEARCH_MARKETS, ...INTERVALS.flatMap((interval) => allTokens().filter((t) => t.extra === "selection" && t.active !== false).map((t) => ({
+const researchMarkets = (): Market[] => [...RESEARCH_MARKETS, ...perpsResearchMarkets(), ...INTERVALS.flatMap((interval) => allTokens().filter((t) => t.extra === "selection" && t.active !== false).map((t) => ({
   name: `Spot ${t.symbol}${interval === "15m" ? " · 15 min" : ""}`, product: t.candles, symbol: t.symbol, kind: "spot" as const, interval, feePct: 0.004, hourlyCost: 0, cap: RISK.maxSpotFraction })))];
 const RESEARCH_MARKETS: Market[] = INTERVALS.flatMap((interval) => [
   ...TOKENS.filter((t) => t.symbol !== "JUP").map((t) => ({ name: `Spot ${t.symbol}${interval === "15m" ? " · 15 min" : ""}`, product: t.candles, symbol: t.symbol,
     kind: "spot" as const, interval, feePct: 0.003, hourlyCost: 0, cap: RISK.maxSpotFraction })),
-  ...PERPS_ASSETS.map((a) => ({ name: `Perps ${a.asset}${interval === "15m" ? " · 15 min" : ""}`, product: a.candles, symbol: a.asset,
-    kind: "perps" as const, interval, feePct: 0.0012, hourlyCost: 0.00008, cap: PERPS_RULES.maxLeverage })),
+
 ]);
+/** Marchés perps étudiés : ceux de la plateforme active (Jupiter : SOL, ETH, BTC ; Hyperliquid : les plus échangés du jour). */
+const PERPS_COSTS = { jupiter: { feePct: 0.0012, hourlyCost: 0.00008 }, hyperliquid: { feePct: 0.0007, hourlyCost: 0.00002 } }; // HL : 0,045 % + glissement ; funding moyen
+const perpsResearchMarkets = (): Market[] => INTERVALS.flatMap((interval) => perpsMarkets().map((a) => ({ name: `Perps ${a.asset}${interval === "15m" ? " · 15 min" : ""}`, product: a.candles, symbol: a.asset,
+  kind: "perps" as const, interval, ...PERPS_COSTS[onHl() ? "hyperliquid" : "jupiter"], cap: PERPS_RULES.maxLeverage })));
 /** Historique utilisé : 90 jours en 1 h, 60 jours en 15 min (2/3 pour régler, 1/3 jamais vu pour valider : 20 jours en 15 min). */
 const HISTORY: Record<Interval, number> = { "1h": 2160, "15m": 5760 };
 /** Re-validation : chaque stratégie retenue est rejouée sur les données récentes au moins une fois par semaine. */
@@ -482,7 +496,7 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
     // une stratégie par marché (SOL, ETH, BTC) : garde celles encore qualifiées, complète avec les meilleures
     const perpsRows = good.filter((r) => r.kind === "perps");
     const plans: PerpsPlan[] = fresh ? [] : perpsRows.slice(0, 20).filter((r) => perpsCfg.plans.some((p) => p.source === `chercheur #${r.id} · ${r.market}`) && !outclassed(r, perpsRows)).map(toPerpsPlan);
-    for (const r of perpsRows) { if (plans.length >= perpsCfg.maxPositions) break; const pl = toPerpsPlan(r); if (!plans.some((x) => x.asset === pl.asset)) plans.push(pl); }
+    for (const r of perpsRows) { if (plans.length >= (onHl() ? PERPS_PLANS_MAX : perpsCfg.maxPositions)) break; /* Hyperliquid : plus de marchés surveillés que de positions possibles */ const pl = toPerpsPlan(r); if (!plans.some((x) => x.asset === pl.asset)) plans.push(pl); }
     const sig = (l: PerpsPlan[]) => l.map((p) => `${p.source}:${p.confidence}`).join("|");
     if (sig(plans) !== sig(perpsCfg.plans)) {
       await setBot("perps", { config: { ...perpsCfg, plans, plan: plans[0] ?? null } });
@@ -651,7 +665,31 @@ type UniverseRow = { mint: string; kind: "selection" | "nouveau"; symbol: string
   score?: number | null; active: boolean; why?: string | null; data?: Record<string, unknown> | null; added_at: string; updated_at: string; seen_at?: string | null; removed_at?: string | null };
 /** Source d'historique d'un token on-chain : Birdeye si la clé existe (GeckoTerminal en secours), sinon GeckoTerminal. */
 const candleSource = (r: Pick<UniverseRow, "mint" | "pool">) => (env("BIRDEYE_API_KEY") ? `be:${r.mint}|${r.pool ?? ""}` : `gt:${r.pool}`);
+/** Marchés Hyperliquid tradés : choisis une fois par jour (les plus échangés), gardés dans app_kv. */
+const HL_SELECT = { keep: 12, minDayVolume: 20_000_000, minMaxLeverage: 3, always: ["BTC", "ETH", "SOL"] };
+async function loadHlMarkets() {
+  if (!onHl()) { setPerpsMarkets(PERPS_ASSETS.map((a) => ({ ...a }))); return; }
+  const { data } = await db.from("app_kv").select("value").eq("key", "hl_markets").limit(1);
+  const list = ((data?.[0]?.value as { markets?: PerpsMarket[] } | undefined)?.markets ?? []);
+  setPerpsMarkets(list.length ? list : HL_SELECT.always.map((c) => ({ asset: c, candles: `hl:${c}` })));
+}
+async function runHlSelector(force = false): Promise<string> {
+  if (!onHl()) return "plateforme Jupiter : rien à faire";
+  const { data } = await db.from("app_kv").select("value, updated_at").eq("key", "hl_markets").limit(1);
+  const at = data?.[0]?.updated_at ? Date.parse(data[0].updated_at as string) : 0;
+  if (!force && Date.now() - at < 20 * 3_600_000) return "déjà fait aujourd'hui";
+  const all = (await hlMarkets()).filter((m) => !m.isDelisted && m.maxLeverage >= HL_SELECT.minMaxLeverage);
+  const ranked = all.filter((m) => m.dayVolume >= HL_SELECT.minDayVolume).sort((a, b) => b.dayVolume - a.dayVolume);
+  const names = [...new Set([...HL_SELECT.always.filter((c) => all.some((m) => m.name === c)), ...ranked.map((m) => m.name)])].slice(0, HL_SELECT.keep);
+  const markets: PerpsMarket[] = names.map((n) => ({ asset: n, candles: `hl:${n}`, maxLeverage: all.find((m) => m.name === n)?.maxLeverage }));
+  if (!markets.length) throw new Error("aucun marché Hyperliquid");
+  await db.from("app_kv").upsert({ key: "hl_markets", value: { markets }, updated_at: new Date().toISOString() }, { onConflict: "key" });
+  setPerpsMarkets(markets);
+  return `${markets.length} marchés Hyperliquid : ${names.join(", ")}`;
+}
+
 async function loadUniverse() {
+  await loadHlMarkets().catch(() => null); // marchés perps de la plateforme active (avant toute lecture des plans perps)
   // tokens actifs + tokens retirés depuis peu (ils peuvent encore être en portefeuille : le bot doit pouvoir les revendre)
   const since = Date.now() - 30 * 86_400_000;
   const { data } = await db.from("token_universe").select("*").limit(500);
@@ -813,7 +851,7 @@ async function strategyReport() {
 }
 
 // ------------------------------------------------------------------ graphiques (positions, mini-jeu) et backtest visuel
-const productOf = (symbol: string, kind: "spot" | "perps") => kind === "perps" ? PERPS_ASSETS.find((a) => a.asset === symbol)?.candles : allTokens().find((t) => t.symbol === symbol)?.candles;
+const productOf = (symbol: string, kind: "spot" | "perps") => kind === "perps" ? perpsMarkets().find((a) => a.asset === symbol)?.candles : allTokens().find((t) => t.symbol === symbol)?.candles;
 async function chartData(symbol: string, kind: "spot" | "perps", interval: Interval, count: number) {
   const product = productOf(symbol, kind);
   if (!product) throw new Error("marché inconnu");
@@ -829,7 +867,9 @@ async function researchSim(id: number) {
   const r = data?.[0] as ResearchRow | undefined;
   if (!r) throw new Error("stratégie introuvable");
   const iv: Interval = r.interval === "15m" ? "15m" : "1h";
-  const m = researchMarkets().find((x) => x.product === r.product && x.kind === r.kind && x.interval === iv);
+  // après un changement de plateforme perps (Jupiter → Hyperliquid), une ancienne stratégie est rejouée sur le même marché
+  const m = researchMarkets().find((x) => x.product === r.product && x.kind === r.kind && x.interval === iv)
+    ?? researchMarkets().find((x) => x.kind === r.kind && x.interval === iv && x.symbol === (r.symbol ?? r.market.replace(/^(Spot|Perps) /, "").split(" ")[0]));
   if (!m) throw new Error("marché introuvable");
   const candles = await getCandles(m.product, iv, HISTORY[iv]);
   const ctx: { extra?: Extra } = r.family === "funding" ? { extra: { funding: await fundingHistory(m.symbol, candles[0]!.t - 86_400_000).catch(() => []) } } : {};
@@ -940,7 +980,8 @@ Deno.serve(async (req) => {
       const selector = await runSelector().catch(err);
       const fresh = await runFreshScout().catch(err);
       const arb = await runArbScout().catch(err);
-      return json({ watchdog, research, swap, bilan, selector, fresh, arb });
+      const hl = onHl() ? await runHlSelector().catch(err) : undefined;
+      return json({ watchdog, research, swap, bilan, selector, fresh, arb, ...(hl ? { hl } : {}) });
     }
     if (route === "/tick" && req.method === "POST") {
       if (!TOKEN || !safeEqual(req.headers.get("x-cron-secret") ?? "", await cronSecret())) return json({ error: "interdit" }, 403);

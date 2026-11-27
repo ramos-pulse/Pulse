@@ -1,0 +1,379 @@
+// Serveur uniquement : BOT 2 sur HYPERLIQUID — perps long ET short sur les marchés les plus échangés.
+// Même cerveau que la version Jupiter (stratégies du chercheur, stop suiveur, risque plafonné), avec trois différences :
+//  - les ordres sont exécutés immédiatement (pas d'attente de « keepers ») ;
+//  - le stop est posé CHEZ Hyperliquid (ordre déclencheur) et déplacé quand le stop suiveur monte : la position reste
+//    protégée même si le serveur tombe ;
+//  - minimum 10 $ de TAILLE (et non 10 $ de collatéral) : plusieurs petites positions possibles avec peu de capital.
+// Marge ISOLÉE : chaque position a sa propre marge ; levier plafonné pour que la liquidation reste 3 fois plus loin que le stop.
+import type { BotState, Store } from "../store.ts";
+import { isBenched, learn, mindset, newBrain, riskPerTrade } from "./brain.ts";
+import { candles as getCandles, lastClosedCandle } from "./candles.ts";
+import { fundingHistory } from "./funding.ts";
+import {
+  hlAccount, hlAsset, hlCancel, hlCredentials, hlFills, hlMarketOrder, hlMids, hlOpenOrders, hlPlaceStop, hlSetLeverage, hlTransfers, HL_RULES,
+  type HlAccount, type HlAsset, type HlPosition,
+} from "./hyperliquid.ts";
+import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type Extra, type SetupParams } from "./setups.ts";
+import {
+  addToVault, applyTransfer, AGGR_AGGRESSIVE, AGGR_LEVELS, atr, conviction, cooldownMs, DEFAULT_PARAMS, effectiveAggr, exitCheck, EXTRA_SOFT, floorOf, LIQ, loadMemory, loadPerpsConfig,
+  migratePositions, missionEnd, PARTIAL, perpsChange, perpsMarkets, PRESETS, riskFactor, riskGate, RULES, sampleCurve, sideMult, TOTAL_RISK, tradable, trailStop, trendSignal, volScale,
+  type Interval, type Memory, type Params, type PerpsConfig, type PerpsPlan, type Position,
+} from "./strategy.ts";
+
+type Admin = Store;
+type PerpsRow = BotState;
+const FLOOR_USD = 5;
+
+// ---------------------------------------------------------------------------------------------------
+// Règles de taille propres à Hyperliquid (testées dans tests/perpsHl.test.ts)
+// ---------------------------------------------------------------------------------------------------
+/** Levier sans risque de liquidation avant le stop : marge de maintien Hyperliquid = moitié de la marge initiale au levier max. */
+export function hlSafeLeverage(dist: number, maxLeverage: number): number {
+  const maintenance = 1 / (2 * Math.max(1, maxLeverage));
+  return 1 / (dist / LIQ.safety + maintenance + 2 * HL_RULES.takerFee);
+}
+
+/**
+ * Taille d'une position : risque voulu → taille (USD) = capital × risque / distance du stop.
+ * Hyperliquid exige 10 $ de taille : on monte à 10 $ seulement si le risque reste sous le plafond.
+ * La marge (taille / levier) doit tenir dans les USDC disponibles.
+ */
+export function hlSizing(equity: number, available: number, price: number, stop: number, risk: number, maxLev: number, maxRisk: number) {
+  const dist = Math.abs(price - stop) / price;
+  if (!(dist > 0) || !(equity > 0) || !(price > 0)) return null;
+  const lev = Math.max(1, Math.min(maxLev, Math.floor(hlSafeLeverage(dist, maxLev))));
+  let notional = (equity * risk) / dist;
+  if (notional < HL_RULES.minNotionalUsd) {
+    if ((HL_RULES.minNotionalUsd * dist) / equity > maxRisk + 1e-9) return null;
+    notional = HL_RULES.minNotionalUsd * 1.02; // petite marge : l'arrondi de la taille ne doit pas repasser sous 10 $
+  }
+  const margin = notional / lev;
+  if (margin > available * 0.95) { notional = available * 0.95 * lev; if (notional < HL_RULES.minNotionalUsd * 1.02) return null; }
+  return { notional, margin: notional / lev, leverage: lev, coins: notional / price, risk: (notional * dist) / equity };
+}
+
+/** Perte si le stop de chaque position est touché, en part du capital. */
+function openRisk(positions: Position[], valueUsd: number) {
+  if (!(valueUsd > 0)) return 0;
+  return positions.reduce((s, p) => {
+    const price = p.live?.price ?? p.entry ?? 0, stop = p.stop ?? price;
+    if (!(price > 0)) return s;
+    const adverse = p.side === "long" ? price - stop : stop - price;
+    return s + Math.max(0, adverse / price) * (p.sizeUsd ?? 0);
+  }, 0) / valueUsd;
+}
+
+export async function getHlAddress(): Promise<string | null> {
+  try { return hlCredentials().account; } catch { return null; }
+}
+export async function currentHlValue() {
+  const { account } = hlCredentials();
+  const a = await hlAccount(account);
+  return { address: account, valueUsd: a.valueUsd, positions: a.positions };
+}
+
+/** Résultat réel d'une fermeture : gains réalisés moins frais, d'après les exécutions Hyperliquid depuis l'ouverture. */
+async function realizedPnl(account: string, coin: string, since: number): Promise<number | null> {
+  const fills = await hlFills(account, Math.max(0, since - 60_000)).catch(() => null);
+  if (!fills) return null;
+  const mine = fills.filter((f) => f.coin === coin);
+  if (!mine.length) return null;
+  return mine.reduce((s, f) => s + f.closedPnl - f.fee, 0); // les frais d'ouverture sont inclus (closedPnl = 0 à l'ouverture)
+}
+
+/** Pose (ou déplace) le stop chez Hyperliquid : le nouveau d'abord, l'ancien annulé ensuite (jamais sans stop). */
+async function syncStop(key: string, asset: HlAsset, p: Position, real: HlPosition): Promise<string | null> {
+  if (p.stop == null) return null;
+  const moved = p.stopPx == null || Math.abs(p.stop - p.stopPx) / p.stop > 0.001 || Math.abs((p.coinSize ?? 0) - real.size) / real.size > 0.001;
+  if (p.stopOid && !moved) return null;
+  const oid = await hlPlaceStop(key, asset, p.side, real.size, p.stop);
+  const old = p.stopOid;
+  p.stopOid = oid; p.stopPx = p.stop; p.coinSize = real.size;
+  if (old && old !== oid) await hlCancel(key, asset, old).catch(() => null); // un ancien stop resté en place ne peut que réduire la position (« reduce only »)
+  return `${p.key} : stop posé chez Hyperliquid à ${fmt(p.stop)} $`;
+}
+
+export async function runHlTick(admin: Admin): Promise<string> {
+  const bot = admin.bot("perps");
+  const mem: Memory = loadMemory(bot.price_history);
+  const mine = migratePositions(mem, bot);
+  const paused = bot.status === "paused";
+  if (!(bot.status === "running" || paused)) return "idle";
+  const now = Date.now();
+  const cfg = loadPerpsConfig(bot.config);
+  const level = effectiveAggr(cfg), L = AGGR_LEVELS[level]!;
+  const aggressive = level >= AGGR_AGGRESSIVE;
+  const patch: Partial<PerpsRow> = {};
+
+  // 1. Données : compte (positions réelles) et prix. Sans elles on ne touche à rien : les stops sont chez Hyperliquid.
+  let creds: ReturnType<typeof hlCredentials>, acct: HlAccount, mids: Record<string, number>;
+  try {
+    creds = hlCredentials();
+    [acct, mids] = await Promise.all([hlAccount(creds.account), hlMids()]);
+  } catch (e) {
+    errStreak(admin, mem, "Bot perps", (e as Error).message);
+    await save(admin, mem, { last_message: `Données Hyperliquid indisponibles (${(e as Error).message.slice(0, 90)}). Les stops posés chez Hyperliquid protègent les positions.` });
+    return "data_unavailable";
+  }
+  const prevErr = mem.errStreak ?? 0;
+  mem.errStreak = 0;
+  const value = acct.valueUsd;
+  patch.wallet_address = creds.account;
+  mem.brain = mem.brain ?? newBrain(value);
+  const brain = mem.brain;
+  let message = "";
+  // Premier passage sur Hyperliquid : l'argent vient d'être transféré depuis Jupiter (frais de pont compris) ;
+  // ce n'est ni un gain ni une perte : point de départ, courbe et perte du jour repartent de la valeur actuelle.
+  if (mem.venue !== "hyperliquid") {
+    mem.venue = "hyperliquid";
+    if (bot.start_value_usd != null && value > 0) patch.start_value_usd = value;
+    mem.curve = []; mem.dayStartValue = value; mem.lastCandleBy = {}; mem.hlLedgerAt = now; mem.lastUsdc = undefined; mem.lastSol = undefined;
+    brain.equityHigh = value;
+    message = `Bot perps passé sur Hyperliquid : compte de ${value.toFixed(2)} $, point de départ remis à cette valeur (ni gain ni perte).`;
+  }
+  const realOf = (coin: string) => acct.positions.find((p) => p.coin === coin) ?? null;
+  const marketOf = (coin: string) => perpsMarkets().find((m) => m.asset === coin);
+
+  // 2. Dépôts et retraits (registre Hyperliquid) : ni gain ni perte.
+  if (mem.hlLedgerAt == null) mem.hlLedgerAt = now;
+  else {
+    const moves = await hlTransfers(creds.account, mem.hlLedgerAt + 1).catch(() => null);
+    for (const t of moves ?? []) {
+      if (bot.start_value_usd != null) patch.start_value_usd = Math.max(0.01, Number(patch.start_value_usd ?? bot.start_value_usd) + t.usd);
+      applyTransfer(mem, t.usd);
+      admin.addTrade("perps", { action: t.usd > 0 ? "deposit" : "withdraw", asset: "USDC", collateral_usd: Math.abs(t.usd), reason: t.kind,
+        detail: { pourquoi: `${t.usd > 0 ? "Dépôt" : "Retrait"} de ${Math.abs(t.usd).toFixed(2)} $ sur Hyperliquid : point de départ, perte du jour et courbe ajustés, ce n'est ni un gain ni une perte.` } });
+      message = `${t.usd > 0 ? "Dépôt" : "Retrait"} de ${Math.abs(t.usd).toFixed(2)} $ détecté : compteurs ajustés (ni gain ni perte).`;
+      mem.hlLedgerAt = Math.max(mem.hlLedgerAt ?? 0, t.time);
+    }
+  }
+  if (acct.spotUsdc > 1 && acct.withdrawable < HL_RULES.minNotionalUsd) message ||= `${acct.spotUsdc.toFixed(2)} $ d'USDC sont côté « Spot » sur Hyperliquid : transfère-les vers « Perps » pour que le bot puisse les utiliser.`;
+
+  // 3. Réconciliation : position fermée par son stop Hyperliquid (ou liquidée), ou position trouvée sans mémoire.
+  for (const p of Object.values(mine)) {
+    if (realOf(p.key)) { p.missing = 0; continue; }
+    p.missing = (p.missing ?? 0) + 1;
+    if (p.missing < 2) continue; // une réponse vide isolée ne doit pas faire oublier une position
+    const pnl = await realizedPnl(creds.account, p.key, p.openedAt ?? now - 86_400_000);
+    message = recordClose(admin, mem, cfg, p.key, value, pnl, p.stopOid ? "stop_hl" : "fermee_ailleurs");
+  }
+  for (const o of acct.positions) {
+    if (mine[o.coin]) continue;
+    const fallback = o.side === "long" ? o.entryPx * 0.96 : o.entryPx * 1.04;
+    mine[o.coin] = { key: o.coin, symbol: o.coin, side: o.side, entry: o.entryPx, stop: fallback, best: o.entryPx, initialRisk: Math.abs(o.entryPx - fallback), openedAt: now,
+      collateralUsd: o.marginUsd, sizeUsd: o.size * o.entryPx, lastValueUsd: o.valueUsd, coinSize: o.size, source: "position trouvée sur Hyperliquid", why: "reprise d'une position existante (stop de sécurité ±4 %)" };
+    message = `Position ${o.side} ${o.coin} trouvée : je reprends sa gestion (stop de sécurité ±4 %).`;
+  }
+  for (const p of Object.values(mine)) { const o = realOf(p.key); if (o) { p.lastValueUsd = o.valueUsd; p.sizeUsd = o.size * (mids[o.coin] ?? o.entryPx); p.collateralUsd ??= o.marginUsd; } }
+  sampleCurve(mem, value, now);
+
+  // 4. Fin de mission (objectif, date limite, plancher).
+  const end = missionEnd({ now, endAt: RULES.destroyAtDeadline && bot.end_at ? Date.parse(bot.end_at) : Infinity,
+    goalUsd: Number(bot.goal_usd), valueUsd: value, floorUsd: floorOf(bot.start_value_usd, FLOOR_USD), complete: true });
+  if (end && !paused) {
+    const outcome = end === "success" ? "success" : end === "destroyed" ? "destroyed" : "stopped";
+    await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value });
+    await liquidateHl(admin, { ...bot, ...patch, price_history: mem } as PerpsRow, outcome,
+      end === "success" ? "Mission réussie ! Objectif atteint, gains sécurisés." : end === "destroyed" ? "Date limite atteinte." : `Capital sous ${floorOf(bot.start_value_usd, FLOOR_USD).toFixed(2)} $ (30 % du départ) : je protège ce qui reste.`);
+    return outcome;
+  }
+
+  try {
+    // 5. Positions ouvertes : stop suiveur à chaque bougie (déplacé chez Hyperliquid), sorties logicielles chaque minute.
+    for (const p of Object.values(mine)) {
+      const o = realOf(p.key), M = marketOf(p.key);
+      if (!o) continue;
+      const asset = await hlAsset(p.key);
+      const price = mids[p.key] ?? o.entryPx;
+      const entry = p.entry ?? o.entryPx;
+      const iv: Interval = p.posInterval ?? "1h";
+      const closed = lastClosedCandle(now, iv);
+      const fam = p.strategy && isSetup(p.strategy) ? p.strategy : null;
+      const isRangePos = !!fam && !TRAILING.includes(fam);
+      const params = fam ? trailParams(p.posParams as SetupParams) : (p.posParams as Params | undefined) ?? cfg.trend ?? PRESETS[brain.preset[p.key] ?? "standard"] ?? DEFAULT_PARAMS;
+      const candles = M?.candles ?? `hl:${p.key}`;
+      let rangeOut: string | null = null;
+      if (isRangePos && p.stopCandle !== closed) {
+        const c = await getCandles(candles, iv, 260, now).catch(() => []);
+        if (c.length > 40) { rangeOut = setupExit(fam!, c, p.side, p.posParams as SetupParams, Math.round((now - (p.openedAt ?? now)) / (iv === "15m" ? 900_000 : 3_600_000)), p.openedAt ?? now); p.stopCandle = closed; }
+      } else if (!isRangePos && p.stopCandle !== closed) {
+        const c = await getCandles(candles, iv, 40, now).catch(() => []);
+        if (c.length > 20) {
+          const last = c.at(-1)!.c;
+          p.best = p.side === "long" ? Math.max(p.best ?? entry, last) : Math.min(p.best ?? entry, last);
+          p.stop = trailStop(p.side, p.stop ?? entry, p.best, atr(c, 14).at(-1)!, params);
+          p.stopCandle = closed;
+        }
+      }
+      const r = p.initialRisk ? (p.side === "long" ? price - entry : entry - price) / p.initialRisk : 0;
+      if (cfg.partialTp && !isRangePos && !p.partialDone && r >= PARTIAL.atR) {
+        p.stop = p.side === "long" ? Math.max(p.stop ?? entry, entry) : Math.min(p.stop ?? entry, entry);
+        p.partialDone = true;
+        message = `${p.key} : gain de +${String(PARTIAL.atR).replace(".", ",")} fois le risque atteint, stop remonté au prix d'entrée.`;
+      }
+      // le stop chez Hyperliquid suit le stop calculé ici (posé s'il manque, déplacé s'il a bougé)
+      const stopNote = await syncStop(creds.key, asset, p, o).catch((e) => `${p.key} : stop Hyperliquid non posé (${(e as Error).message.slice(0, 80)}), je réessaie`);
+      if (stopNote && !message) message = stopNote;
+      p.live = { price, pnlPct: perpsChange(p.side, entry, price) * 100, at: now };
+      const hitTarget = p.target != null && (p.side === "long" ? price >= p.target : price <= p.target);
+      const exit = isRangePos
+        ? ((p.side === "long" ? price <= (p.stop ?? 0) : price >= (p.stop ?? Infinity)) ? "stop_loss" : hitTarget ? "objectif" : rangeOut)
+        : exitCheck({ side: p.side, entry, price, stop: p.stop ?? entry, initialRisk: p.initialRisk ?? entry * 0.03, openedAt: p.openedAt ?? now, interval: iv }, now);
+      if (exit) {
+        await hlMarketOrder(creds.key, asset, p.side === "short", o.size, price, true);
+        if (p.stopOid) await hlCancel(creds.key, asset, p.stopOid).catch(() => null);
+        const pnl = await realizedPnl(creds.account, p.key, p.openedAt ?? now - 86_400_000);
+        message = recordClose(admin, mem, cfg, p.key, value, pnl, exit);
+        await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value, last_message: message });
+        return "close";
+      }
+    }
+    // stops orphelins (position fermée, ordre resté) : nettoyés pour ne pas encombrer le compte
+    if ((!Object.keys(mine).length || Object.values(mine).some((p) => !p.stopOid)) && now - (mem.hlOrphanAt ?? 0) > 10 * 60_000) {
+      mem.hlOrphanAt = now;
+      const orders = await hlOpenOrders(creds.account).catch(() => []);
+      for (const od of orders) if (od.isTrigger && od.reduceOnly && !realOf(od.coin)) await hlCancel(creds.key, await hlAsset(od.coin), od.oid).catch(() => null);
+    }
+    const held = Object.values(mine);
+    const posText = held.map((p) => `${p.side === "long" ? "long" : "short"} ${p.key} ${p.live ? `${p.live.pnlPct >= 0 ? "+" : ""}${p.live.pnlPct.toFixed(2)} %` : ""}`).join(", ");
+    const hold = async (msg: string, blocked: string | null = null) => {
+      mem.mindset = mindset(brain, { inPosition: held.length > 0, blocked, goalPct: (value / Number(bot.goal_usd)) * 100 });
+      await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value, last_message: message || (held.length ? `${msg} · ${posText}` : msg) });
+      return "hold";
+    };
+    if (paused) return await hold("En pause : aucune nouvelle entrée.");
+
+    // 6. Entrées : une par marché, sur les stratégies validées par le chercheur.
+    if (!cfg.plans.length) return await hold(cfg.autopilot ? "Pilote automatique : j'attends que le chercheur valide une stratégie perps." : "Aucune stratégie perps choisie.");
+    if (held.length >= cfg.maxPositions) return await hold(`${held.length} position(s) ouverte(s), maximum atteint`);
+    const blocked = riskGate(mem, value, now, cfg.dailyStop ? L.dailyLoss : Infinity);
+    if (blocked) return await hold(blocked, blocked);
+    const notes: string[] = [];
+    for (const plan of cfg.plans as PerpsPlan[]) {
+      const M = marketOf(plan.asset);
+      if (!M || mine[plan.asset]) continue;
+      const setup = plan.family && isSetup(plan.family) ? plan.family : null;
+      const params = plan.params as Params;
+      const iv: Interval = plan.interval ?? "1h";
+      const closed = lastClosedCandle(now, iv);
+      mem.lastCandleBy ??= {};
+      if (mem.lastCandleBy[plan.asset] === closed) continue;
+      const benched = aggressive ? (brain.benched[plan.asset] ?? 0) > now : isBenched(brain, plan.asset, now);
+      if (benched) { mem.lastCandleBy[plan.asset] = closed; notes.push(`${plan.asset} sur le banc après une série difficile`); continue; }
+      const c = await getCandles(M.candles, iv, 400, now);
+      mem.lastCandleBy[plan.asset] = closed;
+      const extra: Extra = setup === "funding" ? { funding: await fundingHistory(plan.asset, now - 2 * 86_400_000, now).catch(() => []) } : {};
+      const sig = setup ? setupSignal(setup, c, sideMult(cfg.bias, "short") > 0, plan.params as SetupParams, extra) : trendSignal(c, sideMult(cfg.bias, "short") > 0, params);
+      const mult = sig.side ? sideMult(cfg.bias, sig.side) : 0;
+      if (!sig.side || mult === 0) { notes.push(sig.side ? `${plan.asset} : ${sig.side} désactivé par ta barre longs/shorts` : `${plan.asset} : ${sig.reason}`); continue; }
+      const price = mids[plan.asset] ?? 0;
+      if (!(price > 0)) { notes.push(`${plan.asset} : prix indisponible`); continue; }
+      const asset = await hlAsset(plan.asset);
+      const dist = Math.abs(sig.price - sig.stop);
+      const stop = sig.side === "long" ? price - dist : price + dist;
+      const conv = conviction(plan.score);
+      const confidence = riskFactor(plan.confidence) * (cfg.extraSoft ? EXTRA_SOFT.riskMult : 1);
+      const vol = volScale(c);
+      const wanted = Math.min(L.maxRisk, riskPerTrade(brain) * L.riskMult * conv) * mult * confidence * vol;
+      const room = L.maxRisk * TOTAL_RISK.perpsMult - openRisk(held, value);
+      const risk = Math.min(wanted, room);
+      if (risk < 0.002) { notes.push(`${plan.asset} : risque total des positions déjà au plafond`); continue; }
+      const T = tradable(value, acct.withdrawable, mem.vault);
+      const size = hlSizing(T.equity, T.usdc, price, stop, risk, Math.min(cfg.maxLev, asset.maxLeverage), Math.min(L.maxRisk, room));
+      if (!size) { notes.push(`${plan.asset} : signal ${sig.side} refusé — la position minimale de Hyperliquid (10 $) dépasserait ton plafond de risque, ou pas assez d'USDC disponibles`); continue; }
+      // levier (marge isolée), ordre au marché, puis stop chez Hyperliquid ; si le stop ne peut pas être posé, on referme aussitôt
+      const lev = await hlSetLeverage(creds.key, asset, size.leverage);
+      const fill = await hlMarketOrder(creds.key, asset, sig.side === "long", size.coins, price);
+      const fillStop = sig.side === "long" ? fill.avgPx - dist : fill.avgPx + dist;
+      const source = plan.source || "réglages de l'app";
+      const pos: Position = {
+        key: plan.asset, symbol: plan.asset, side: sig.side, entry: fill.avgPx, stop: fillStop, best: fill.avgPx, initialRisk: dist, openedAt: now, stopCandle: closed,
+        posParams: plan.params, posInterval: iv, source, ...(setup ? { strategy: setup } : {}), ...("target" in sig && sig.target != null ? { target: (sig.target as number) + (fill.avgPx - sig.price) } : {}),
+        collateralUsd: (fill.size * fill.avgPx) / lev, sizeUsd: fill.size * fill.avgPx, coinSize: fill.size,
+        why: `${sig.reason} · stratégie : ${source} · ${L.name.toLowerCase()}, risque ${(size.risk * 100).toFixed(1)} %, levier x${lev} (marge isolée)${conv !== 1 ? `, confiance ×${conv}` : ""}${vol < 1 ? `, taille réduite (marché agité ×${vol})` : ""}${mem.vault ? ` (coffre de ${mem.vault.toFixed(2)} $ exclu)` : ""}`,
+      };
+      try {
+        pos.stopOid = await hlPlaceStop(creds.key, asset, sig.side, fill.size, fillStop);
+        pos.stopPx = fillStop;
+      } catch (e) {
+        await hlMarketOrder(creds.key, asset, sig.side === "short", fill.size, fill.avgPx, true).catch(() => null);
+        admin.alert?.(`Bot perps : ${plan.asset} ouvert mais stop refusé par Hyperliquid (${(e as Error).message.slice(0, 100)}) : position refermée aussitôt par sécurité.`);
+        message = `${plan.asset} : stop refusé par Hyperliquid, position refermée par sécurité.`; // prioritaire sur tout autre message
+        return await hold(message);
+      }
+      mine[plan.asset] = pos;
+      admin.addTrade("perps", { action: "open", asset: plan.asset, side: sig.side, collateral_usd: pos.collateralUsd, price: fill.avgPx, reason: sig.reason, source,
+        detail: { pourquoi: pos.why, stop: fillStop, strategie: source, levier: lev, plateforme: "Hyperliquid" } });
+      mem.signal = `${plan.asset} : ${sig.reason}`;
+      await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value,
+        last_message: `${sig.side === "long" ? "Long" : "Short"} ${plan.asset} ouvert à ${fmt(fill.avgPx)} $ (${L.name.toLowerCase()}) : ${pos.sizeUsd!.toFixed(2)} $ x${lev}, risque ${(size.risk * 100).toFixed(1)} %, stop ${fmt(fillStop)} $ posé chez Hyperliquid.` });
+      return "open";
+    }
+    if (notes.length) mem.signal = notes.join(" · ");
+    return await hold(notes.length ? `Pas d'entrée : ${notes.join(" · ")}.` : mem.signal || "En attente de la prochaine bougie.");
+  } catch (e) {
+    mem.errStreak = prevErr;
+    errStreak(admin, mem, "Bot perps", (e as Error).message);
+    await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value, last_message: `Erreur : ${(e as Error).message}`.slice(0, 300) + " — je réessaie au prochain tick." });
+    return "error";
+  }
+}
+
+/** Fermeture : résultat réel (gains réalisés − frais) ; sinon dernière valeur connue. Une part du gain va au coffre. */
+function recordClose(admin: Admin, mem: Memory, cfg: PerpsConfig, coin: string, value: number, pnlUsd: number | null, reason: string) {
+  const p = mem.positions?.[coin];
+  const pnl = pnlUsd ?? ((p?.lastValueUsd ?? 0) - (p?.collateralUsd ?? 0));
+  const pnlPct = value > 0 ? (pnl / value) * 100 : 0;
+  mem.vault = addToVault(mem.vault, pnl, cfg.vaultPct);
+  admin.addTrade("perps", { action: "close", asset: coin, side: p?.side, collateral_usd: (p?.collateralUsd ?? 0) + pnl, price: p?.live?.price, pnl_usd: pnl, reason, source: p?.source,
+    detail: { pourquoi: label(reason), entree: p?.entry, stop: p?.stop, strategie: p?.source, duree_h: p?.openedAt ? Math.round((Date.now() - p.openedAt) / 360_000) / 10 : null, entree_pourquoi: p?.why, coffre: mem.vault, plateforme: "Hyperliquid", note: "résultat hors financement horaire (funding), qui s'ajoute ou se retire du compte à part",
+      ...(pnlUsd == null ? { estimation: "résultat estimé (exécutions Hyperliquid illisibles)" } : {}) } });
+  learn(mem.brain ?? newBrain(value), coin, pnlPct, value, Date.now());
+  if (pnl < 0) mem.cooldownUntil = Date.now() + cooldownMs(p?.posInterval);
+  if (mem.positions) delete mem.positions[coin];
+  return `Position ${coin} fermée (${label(reason)}) : ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ (${pnlPct.toFixed(1)} % du capital).${pnl > 0 && cfg.vaultPct ? ` ${cfg.vaultPct} % du gain mis au coffre.` : ""}`;
+}
+
+/** Ferme toutes les positions Hyperliquid (arrêt d'urgence, fin de mission) et annule les stops. */
+export async function liquidateHl(admin: Admin, bot: PerpsRow, outcome: "success" | "destroyed" | "stopped", message: string) {
+  const mem = loadMemory(bot.price_history);
+  const mine = migratePositions(mem, bot);
+  const failures: string[] = [];
+  try {
+    const { account, key } = hlCredentials();
+    const [acct, mids] = await Promise.all([hlAccount(account), hlMids()]);
+    for (const o of acct.positions) {
+      try {
+        const asset = await hlAsset(o.coin);
+        await hlMarketOrder(key, asset, o.side === "short", o.size, mids[o.coin] ?? o.entryPx, true);
+        const pnl = await realizedPnl(account, o.coin, mine[o.coin]?.openedAt ?? Date.now() - 86_400_000);
+        admin.addTrade("perps", { action: "close", asset: o.coin, side: o.side, collateral_usd: o.valueUsd, pnl_usd: pnl ?? o.pnlUsd, reason: outcome, source: mine[o.coin]?.source, detail: { pourquoi: message, plateforme: "Hyperliquid" } });
+        delete mine[o.coin];
+      } catch (e) { failures.push(`${o.coin} : ${(e as Error).message}`); }
+    }
+    for (const od of await hlOpenOrders(account).catch(() => [])) if (od.reduceOnly) await hlCancel(key, await hlAsset(od.coin), od.oid).catch(() => null);
+  } catch (e) { failures.push((e as Error).message); }
+  admin.update("perps", {
+    status: failures.length ? "running" : outcome, price_history: mem as never, last_tick_at: new Date().toISOString(), ...mirror(mine),
+    last_message: (failures.length ? `${message} Fermeture impossible (${failures.join(", ")}) : je garde la main.` : message).slice(0, 300),
+  });
+}
+
+function mirror(mine: Record<string, Position>): Partial<PerpsRow> {
+  const p = Object.values(mine)[0];
+  return { position_pubkey: null, position_asset: p?.key ?? null, position_side: p?.side ?? null, entry_price: p?.entry ?? null };
+}
+async function save(admin: Admin, mem: Memory, fields: Partial<PerpsRow>) {
+  admin.update("perps", { price_history: mem, last_tick_at: new Date().toISOString(), ...fields });
+}
+const fmt = (n: number) => (n >= 100 ? n.toFixed(2) : n >= 1 ? n.toFixed(4) : n.toPrecision(4));
+function label(reason?: string) {
+  return reason === "stop_hl" ? "stop posé chez Hyperliquid" : reason === "fermee_ailleurs" ? "fermée hors du bot (ou liquidée)" : reason === "objectif" ? "objectif atteint"
+    : reason === "trailing_stop" ? "stop suiveur, gain protégé" : reason === "stop_loss" ? "stop loss" : reason === "time_stop" ? "position sans élan"
+    : reason === "orb_temps" ? "ORB : objectif non atteint à temps" : reason === "vwap_atteint" ? "retour au prix moyen du jour (VWAP) atteint" : reason === "vwap_temps" ? "VWAP : fin de journée sans retour"
+    : reason === "funding_temps" ? "funding : délai écoulé" : reason === "range_temps" ? "range : pas de retour à la moyenne à temps" : reason ?? "sortie";
+}
+function errStreak(admin: Admin, mem: Memory, who: string, msg: string) {
+  mem.errStreak = (mem.errStreak ?? 0) + 1;
+  if (mem.errStreak === 5 || mem.errStreak % 60 === 0) admin.alert?.(`${who} : la même panne se répète depuis ${mem.errStreak} minutes (${msg.slice(0, 120)}). Les positions restent protégées par leurs stops chez Hyperliquid ; vérifie l'app.`);
+}

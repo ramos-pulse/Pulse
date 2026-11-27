@@ -2,11 +2,13 @@
 //  - Coinbase (gratuit, sans clé) pour les grands tokens : produit « SOL-USD »…
 //  - n'importe quel token Solana, à partir de son historique ON-CHAIN :
 //      « gt:<adresse du pool> »  → GeckoTerminal (gratuit, sans clé)
+//      « hl:<marché> »           → Hyperliquid (perps, gratuit, sans clé)
 //      « be:<adresse du token> » → Birdeye (clé BIRDEYE_API_KEY), plus rapide et plus complet ; si la clé manque ou si
 //                                  Birdeye échoue, on repasse par GeckoTerminal (pool fourni après « | »).
 // Format Coinbase : [time(s), low, high, open, close, volume], du plus récent au plus ancien, 300 bougies max par appel.
 import { INTERVAL_MS, type Candle, type Interval } from "./strategy.ts";
 import { env } from "./solana.ts";
+import { hlCandles } from "./hyperliquid.ts";
 
 const BASE = "https://api.exchange.coinbase.com/products";
 
@@ -56,6 +58,7 @@ export async function candles(product: string, interval: Interval, count: number
   const step = INTERVAL_MS[interval];
   const end = Math.floor(now / step) * step; // début de la bougie en cours = fin de la dernière bougie clôturée
   if (product.startsWith("gt:")) return gecko(product.slice(3), interval, count, end);
+  if (product.startsWith("hl:")) return hlCandles(product.slice(3), interval, count, end); // perps Hyperliquid (gratuit, sans clé)
   if (product.startsWith("be:")) {
     const [mint, pool] = product.slice(3).split("|");
     try { return await birdeye(mint!, interval, count, end); }
