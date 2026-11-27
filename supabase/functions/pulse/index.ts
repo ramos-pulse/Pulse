@@ -426,8 +426,14 @@ async function liveRegimes(): Promise<Map<string, string>> {
   const { data } = await db.from("math_insights").select("key, live_regime").limit(200);
   return new Map(((data ?? []) as { key: string; live_regime?: string | null }[]).filter((x) => x.live_regime).map((x) => [x.key, x.live_regime!]));
 }
+/** À score proche, la stratégie qui trade le plus souvent passe devant (×0,8 à ×1,3 selon les trades sur la période jamais vue). */
+const freqBoost = (r: ResearchRow) => Math.min(1.3, Math.max(0.8, Math.sqrt(Math.max(1, r.test.trades ?? 1) / 8)));
+/** Le pilote abandonne une stratégie en place quand une autre, sur le même marché, est nettement meilleure. */
+const UPGRADE = 1.5;
+const outclassed = (r: ResearchRow, rows: ResearchRow[]) => rows.some((x) => x.id !== r.id && x.kind === r.kind && symbolOfRow(x) === symbolOfRow(r)
+  && effScore(x) > 0 && (effScore(r) <= 0 || effScore(x) >= UPGRADE * effScore(r)) && tier(x) >= tier(r));
 const pilotRank = (a: AgentSettings, regimes = new Map<string, string>()) => (x: ResearchRow, y: ResearchRow) => {
-  const boost = (r: ResearchRow) => effScore(r) * regimeFit(r, regimes) * (a.nerve >= 2 ? 1 + (a.nerve - 1) * 0.3 * tempo(r) : 1);
+  const boost = (r: ResearchRow) => effScore(r) * regimeFit(r, regimes) * freqBoost(r) * (a.nerve >= 2 ? 1 + (a.nerve - 1) * 0.3 * tempo(r) : 1);
   return tier(y) - tier(x) || boost(y) - boost(x);
 };
 const symbolOfRow = (r: ResearchRow) => r.symbol ?? r.market.replace(/^(Spot|Perps) /, "").split(" ")[0]!;
@@ -462,7 +468,7 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
   if (spotCfg.autopilot) {
     const spotRows = good.filter((r) => r.kind === "spot");
     // garde les plans actuels encore qualifiés (évite de changer d'avis toutes les 5 minutes), complète avec les meilleurs, 3 tokens max
-    const keep = fresh ? [] : spotRows.slice(0, 10).filter((r) => spotCfg.plans.some((p) => p.source === `chercheur #${r.id} · ${r.market}`)).map(toSpotPlan);
+    const keep = fresh ? [] : spotRows.slice(0, 10).filter((r) => spotCfg.plans.some((p) => p.source === `chercheur #${r.id} · ${r.market}`) && !outclassed(r, spotRows)).map(toSpotPlan);
     const plans = [...keep];
     for (const r of spotRows) { if (plans.length >= 3) break; const pl = toSpotPlan(r); if (!plans.some((x) => x.symbol === pl.symbol)) plans.push(pl); }
     const sig = (l: SpotPlan[]) => l.map((p) => `${p.source}:${p.confidence}`).join("|");
@@ -475,7 +481,7 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
   if (perpsCfg.autopilot) {
     // une stratégie par marché (SOL, ETH, BTC) : garde celles encore qualifiées, complète avec les meilleures
     const perpsRows = good.filter((r) => r.kind === "perps");
-    const plans: PerpsPlan[] = fresh ? [] : perpsRows.slice(0, 20).filter((r) => perpsCfg.plans.some((p) => p.source === `chercheur #${r.id} · ${r.market}`)).map(toPerpsPlan);
+    const plans: PerpsPlan[] = fresh ? [] : perpsRows.slice(0, 20).filter((r) => perpsCfg.plans.some((p) => p.source === `chercheur #${r.id} · ${r.market}`) && !outclassed(r, perpsRows)).map(toPerpsPlan);
     for (const r of perpsRows) { if (plans.length >= perpsCfg.maxPositions) break; const pl = toPerpsPlan(r); if (!plans.some((x) => x.asset === pl.asset)) plans.push(pl); }
     const sig = (l: PerpsPlan[]) => l.map((p) => `${p.source}:${p.confidence}`).join("|");
     if (sig(plans) !== sig(perpsCfg.plans)) {
