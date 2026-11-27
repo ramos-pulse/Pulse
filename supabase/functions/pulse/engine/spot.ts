@@ -154,8 +154,20 @@ export async function runTick(admin: Admin): Promise<string> {
     if (holds(b, p.key, prices)) { p.missing = 0; continue; }
     // une lecture vide isolée (RPC capricieux) ne doit pas faire oublier une position et son stop : 2 ticks de suite
     p.missing = (p.missing ?? 0) + 1;
-    if (p.missing >= 2) { message = `Position ${p.symbol} introuvable dans le portefeuille : oubliée.`; delete positions[p.key]; }
+    if (p.missing >= 2) {
+      const left = b.ui[p.key] ?? 0, px = prices[p.key] ?? 0;
+      if ((b.raw[p.key] ?? 0n) > 0n) { // les jetons sont là mais ne valent presque plus rien : c'est une perte, on l'inscrit
+        const worth = left * px, cost = p.costUsd ?? 0;
+        admin.addTrade("spot", { side: "sell", symbol: p.symbol, mint: p.key, amount_usd: worth, price: px, pnl_usd: worth - cost, reason: "effondrement", source: p.source,
+          detail: { pourquoi: `Valeur tombée sous ${MIN_POSITION_USD} $ (${worth.toFixed(2)} $ restants) : token invendable ou presque, position clôturée comme perte. Les jetons restent dans le portefeuille.`, entree: p.entry, strategie: p.source } });
+        message = `${p.symbol} s'est effondré (${worth.toFixed(2)} $ restants sur ${cost.toFixed(2)} $) : position clôturée comme perte.`;
+      } else message = `Position ${p.symbol} introuvable dans le portefeuille : oubliée.`;
+      delete positions[p.key];
+      mem.signal = undefined; // plus d'analyse périmée sur ce token
+    }
   }
+  // « nouveau token repéré » alors qu'aucun nouveau token n'est détenu : message périmé
+  if (mem.signal?.endsWith("nouveau token repéré par l'agent") && !mem.pending && !Object.values(positions).some((p) => p.strategy === "nouveau")) mem.signal = undefined;
   for (const t of allTokens()) {
     if (t.mint === SOL_MINT || positions[t.mint] || !holds(b, t.mint, prices) || !prices[t.mint]) continue;
     const price = prices[t.mint]!;
@@ -521,6 +533,7 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, a
   learn(brain, sym, pnlPct, valueBefore + pnl, Date.now());
   if (pnl < 0) mem.cooldownUntil = Date.now() + cooldownMs(pos?.posInterval);
   delete positions[mint];
+  if (mem.signal?.startsWith(`${sym} `)) mem.signal = undefined; // analyse liée à la position vendue : périmée
   return `Vente ${sym} confirmée (${label(p.reason)}) : ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ (${pnlPct.toFixed(1)} %), frais inclus.${pnl > 0 && cfg.vaultPct ? ` ${cfg.vaultPct} % du gain mis au coffre.` : ""}`;
 }
 
