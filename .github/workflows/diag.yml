@@ -22,7 +22,7 @@ jobs:
           [ -z "$URL" ] && URL="postgresql://postgres.$PROJECT_REF@aws-0-eu-central-1.pooler.supabase.com:5432/postgres"
           URL=$(echo "$URL" | sed 's/:\[YOUR-PASSWORD\]//')
           q() { psql "$URL" -X -A -F ' | ' -c "$1" 2>&1 | cut -c1-4000; echo; }
-          q "select kind, jsonb_path_query_array(config->'plans', '$[*].source')::text from bot_state"
+          q "select kind, p->>'source' as src, p->>'confidence' as conf from bot_state, jsonb_array_elements(coalesce(config->'plans','[]'::jsonb)) p"
           q "select kind, status, start_value_usd, goal_usd, end_at, last_value_usd from bot_state"
           q "select jsonb_pretty(price_history - 'curve' - 'brain') from bot_state where kind='perps'"
           q "select jsonb_pretty(price_history->'brain') from bot_state where kind='perps'"
