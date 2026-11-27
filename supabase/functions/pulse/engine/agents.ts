@@ -22,7 +22,8 @@ export interface JupToken {
 export async function jupTokens(mints: string[]): Promise<Map<string, JupToken>> {
   const out = new Map<string, JupToken>();
   for (let i = 0; i < mints.length; i += 20) { // petits lots : la recherche Jupiter limite le nombre de résultats renvoyés
-    const r = await fetch(`${JUP}/tokens/v2/search?query=${mints.slice(i, i + 20).join(",")}`, { signal: AbortSignal.timeout(10_000) });
+    if (i) await new Promise((res) => setTimeout(res, 700)); // espacer les appels
+    const r = await fetchRetry(`${JUP}/tokens/v2/search?query=${mints.slice(i, i + 20).join(",")}`);
     if (!r.ok) throw new Error(`Jupiter tokens indisponible (${r.status})`);
     for (const t of (await r.json()) as JupToken[]) if (t?.id) out.set(t.id, t);
   }
@@ -34,13 +35,22 @@ interface GtPool { id: string; attributes: { address: string; name: string; rese
 async function gtPools(path: string, pages: number): Promise<GtPool[]> {
   const out: GtPool[] = [];
   for (let p = 1; p <= pages; p++) {
-    const r = await fetch(`${GT}/${path}${path.includes("?") ? "&" : "?"}page=${p}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(12_000) });
+    if (p > 1) await new Promise((res) => setTimeout(res, 600));
+    const r = await fetchRetry(`${GT}/${path}${path.includes("?") ? "&" : "?"}page=${p}`, { headers: { accept: "application/json" } });
     if (!r.ok) throw new Error(`GeckoTerminal indisponible (${r.status})`);
     out.push(...(((await r.json()) as { data?: GtPool[] }).data ?? []));
   }
   return out;
 }
 const mintOf = (id: string) => id.replace(/^solana_/, "");
+/** Les API gratuites limitent le nombre d'appels (et l'adresse de Supabase est partagée) : on patiente et on réessaie. */
+async function fetchRetry(url: string, init: RequestInit = {}, tries = 4): Promise<Response> {
+  for (let k = 0; ; k++) {
+    const r = await fetch(url, { ...init, signal: AbortSignal.timeout(12_000) });
+    if ((r.status !== 429 && r.status < 500) || k >= tries - 1) return r;
+    await new Promise((res) => setTimeout(res, 1500 * (k + 1) + Math.random() * 500));
+  }
+}
 
 // ---------------------------------------------------------------------------------------------------
 // SÉLECTIONNEUR
