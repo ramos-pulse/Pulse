@@ -220,7 +220,7 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
     const plans: (PerpsPlan | null)[] = cfg.autopilot || cfg.plans.length ? cfg.plans : [null];
     if (cfg.autopilot && !cfg.plans.length) return await hold("Pilote automatique : j'attends que le chercheur valide une stratégie perps.");
     if (held.length >= cfg.maxPositions) return await hold(`${held.length} position(s) ouverte(s), maximum atteint`);
-    const blocked = riskGate(mem, value, now, L.dailyLoss);
+    const blocked = riskGate(mem, value, now, cfg.dailyStop ? L.dailyLoss : Infinity); // perte du jour : seulement si activée
     if (blocked) return await hold(blocked, blocked);
     const notes: string[] = [];
     for (const plan of plans) {

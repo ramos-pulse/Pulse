@@ -858,11 +858,11 @@ function quickSettings(kind) {
   const seg = (attr, n, cur, label, hotFrom) => `<div class="seg" data-tip="${label}">${label.split(" ")[0].toUpperCase()}<span class="bars">${Array.from({length: n}, (_, i) => `<i class="${i <= cur ? "on" : ""}${i <= cur && cur >= hotFrom ? (cur >= n - 1 && hotFrom < n ? " red" : " hot") : ""}" data-${attr}="${i}"></i>`).join("")}</span></div>`;
   if (kind === "perps") {
     const levs = S.rules.leverages || [3, 5, 10, 100, 250];
-    return `<div class="qs"><button class="tg ${sc.extraSoft ? "on" : ""}" data-qsoft="1">Extra souple</button><div class="lev">${levs.map(l => `<button class="${pc.maxLev === l ? "on" : ""} ${l >= 100 ? "hot" : ""}" data-qlev="${l}">x${l}</button>`).join("")}</div>
+    return `<div class="qs"><button class="tg ${sc.dailyStop ? "on" : ""}" data-qday="1" data-tip="Stop du jour : plus d'entrée après une perte du jour trop forte (5 % spot). Coupé = les bots continuent ; le plancher à 30 % du départ reste toujours actif.">Stop du jour</button><button class="tg ${sc.extraSoft ? "on" : ""}" data-qsoft="1">Extra souple</button><div class="lev">${levs.map(l => `<button class="${pc.maxLev === l ? "on" : ""} ${l >= 100 ? "hot" : ""}" data-qlev="${l}">x${l}</button>`).join("")}</div>
       ${seg("qaggr", (S.rules.aggrLevels || []).length || 5, pc.aggr ?? 1, `Agressivité du bot perps : ${S.rules.aggrLevels?.[pc.aggr ?? 1]?.name || ""}. Touche une case pour changer.`, 3)}</div>`;
   }
   return `<div class="qs">${seg("qnerve", 4, sc.nerve ?? 1, `Nervosité des stratégies : ${["Calme", "Normal", "Nerveux", "Très nerveux"][sc.nerve ?? 1]}. Touche une case pour changer.`, 3)}
-    <div style="display:flex;gap:4px"><button class="tg ${sc.researchAggressive ? "on" : ""}" data-qag="1">Agents agressifs</button><button class="tg ${sc.newTokens ? "on" : ""}" data-qfresh="1">Nouveaux tokens</button></div><button class="tg ${sc.extraSoft ? "on" : ""}" data-qsoft="1">Extra souple</button></div>`;
+    <div style="display:flex;gap:4px"><button class="tg ${sc.researchAggressive ? "on" : ""}" data-qag="1">Agents agressifs</button><button class="tg ${sc.newTokens ? "on" : ""}" data-qfresh="1">Nouveaux tokens</button></div><button class="tg ${sc.dailyStop ? "on" : ""}" data-qday="1" data-tip="Stop du jour : plus d'entrée après une perte du jour trop forte (5 % spot). Coupé = les bots continuent ; le plancher à 30 % du départ reste toujours actif.">Stop du jour</button><button class="tg ${sc.extraSoft ? "on" : ""}" data-qsoft="1">Extra souple</button></div>`;
 }
 
 /** Barre stop → objectif d'une position, avec le prix actuel. */
@@ -1156,6 +1156,7 @@ async function quickApply(what, v) {
     if (what === "nerve") { await api("/api/research/settings", {method: "POST", body: JSON.stringify({nerve: v, aggressive: !!sc.researchAggressive})}); toast(`Nervosité : ${["Calme", "Normal", "Nerveux", "Très nerveux"][v]}`); }
     if (what === "agag") { await api("/api/research/settings", {method: "POST", body: JSON.stringify({aggressive: v, nerve: sc.nerve ?? 1})}); toast(v ? "Agents en mode agressif" : "Agents en mode normal"); }
     if (what === "soft") { const r = await api("/api/extra-soft", {method: "POST", body: JSON.stringify({on: v})}); toast(v ? `Extra souple activé · ${r.pilot}` : "Extra souple coupé"); }
+    if (what === "day") { await api("/api/daily-stop", {method: "POST", body: JSON.stringify({on: v})}); toast(v ? "Stop du jour activé" : "Stop du jour coupé : les bots continuent de trader"); }
     if (what === "fresh") { await api("/api/agents/fresh", {method: "POST", body: JSON.stringify({on: v})}); toast(v ? "Agent nouveaux tokens : achats activés" : "Agent nouveaux tokens : observation seulement"); }
   } catch (e) {}
   void pc; await refresh();
@@ -1181,6 +1182,7 @@ document.addEventListener("click", async e => {
   if (t.dataset.qag) { const on = !S.bots.spot.config?.researchAggressive; return on ? quickConfirm("agag", 1, "Mode agressif des agents : critères de validation assouplis et agressivité perps appliquée même en pilote automatique. Plus de trades, moins sûrs.") : quickApply("agag", false); }
   if (t.dataset.qsoft) { const on = !S.bots.spot.config?.extraSoft;
     return on ? quickConfirm("soft", 1, "Mode EXTRA SOUPLE pour les deux bots : le chercheur accepte presque toutes les stratégies positives (≥ 3 trades, PF ≥ 1), et si rien ne passe le pilote prend quand même la meilleure. Chaque trade prend la moitié du risque normal. L'agent nouveaux tokens devient moins exigeant (les contrôles anti-arnaque restent). Plus de trades, mais moins prouvés : attends-toi à des pertes.") : quickApply("soft", false); }
+  if (t.dataset.qday) { const on = !S.bots.spot.config?.dailyStop; return quickApply("day", on); }
   if (t.dataset.qfresh) { const on = !S.bots.spot.config?.newTokens; return on ? quickConfirm("fresh", 1, "Agent nouveaux tokens : il achètera (2 à 5 $ par token) des tokens lancés depuis moins de 24 h qui passent les garde-fous. Terrain très risqué.") : quickApply("fresh", false); }
   if (t.dataset.qok) { closeSheet(); const v = t.dataset.qv; return quickApply(t.dataset.qok, v === "1" && ["agag", "fresh", "soft"].includes(t.dataset.qok) ? true : +v); }
   if (t.dataset.th) { THEME = t.dataset.th; document.documentElement.dataset.theme = THEME; try { localStorage.setItem("pulse_theme", THEME); } catch (err) {}

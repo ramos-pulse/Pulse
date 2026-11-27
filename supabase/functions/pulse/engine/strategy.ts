@@ -406,7 +406,7 @@ export function perpsSizing(equity: number, usdc: number, entry: number, stop: n
 export type PerpsMode = "normal" | "agressif";
 export interface PerpsConfig { mode: PerpsMode; aggr: number; maxLev: number; pilotAggressive: boolean; bias: number; trend: Params | null; source?: string; autopilot: boolean;
   plans: PerpsPlan[]; plan: PerpsPlan | null; // plans : une stratégie par marché (SOL, ETH, BTC) ; plan = la première (compatibilité)
-  maxPositions: number; vaultPct: number; partialTp: boolean; extraSoft: boolean } // bias : -100 = shorts seulement, 0 = équilibré, +100 = longs seulement
+  maxPositions: number; vaultPct: number; partialTp: boolean; extraSoft: boolean; dailyStop: boolean } // bias : -100 = shorts seulement, 0 = équilibré, +100 = longs seulement
 
 /** Mode agressif : risque doublé (plafond 3 %), levier jusqu'à x5, perte max 8 %/jour, trade même sans réglage validé. */
 export const AGGRESSIVE = { riskMult: 2, maxRisk: 0.03, maxLeverage: 5, dailyLoss: 0.08 };
@@ -445,7 +445,7 @@ export function loadPerpsConfig(raw: unknown): PerpsConfig {
   return { mode: aggr >= AGGR_AGGRESSIVE ? "agressif" : "normal", aggr, maxLev, pilotAggressive: o.pilotAggressive === true,
     bias: Number.isFinite(bias) ? Math.round(Math.min(100, Math.max(-100, bias))) : 0,
     trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}),
-    autopilot: o.autopilot === true, extraSoft: o.extraSoft === true, ...plansOf(o), ...protections(o) };
+    autopilot: o.autopilot === true, extraSoft: o.extraSoft === true, dailyStop: o.dailyStop === true, ...plansOf(o), ...protections(o) };
 }
 
 /** Une stratégie par marché, 3 au maximum. Reprend l'ancien champ `plan` s'il n'y a pas encore de liste. */
@@ -766,6 +766,7 @@ export const NAIVE_EXIT = 70;
 export type SpotStrategy = "tendance" | "rsi";
 export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams; trend: Params | null; source?: string; autopilot: boolean; plans: SpotPlan[]; swapAuto: boolean; researchAggressive: boolean; nerve: number;
   extraSoft: boolean;     // mode « extra souple » : critères très assouplis, risque divisé par 2
+  dailyStop: boolean;     // arrêt des entrées après une perte du jour trop forte (coupé par défaut, à la demande de Ramos)
   researchPerps: number; // barre du chercheur : part des cycles de recherche pour les perps (0 = tout pour le spot, 100 = tout pour les perps)
   newTokens: boolean; // agent nouveaux tokens : achète (toute petite mise) les tokens tout juste lancés qui passent les garde-fous
   maxPositions: number; vaultPct: number; partialTp: boolean; marketFilter: boolean;
@@ -807,7 +808,7 @@ export function loadConfig(raw: unknown): SpotConfig {
   const o = (raw && typeof raw === "object" ? raw : {}) as Partial<SpotConfig>;
   return { strategy: o.strategy === "rsi" ? "rsi" : "tendance", rsi: sanitizeRsi(o.rsi), trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}),
     autopilot: o.autopilot === true, plans: sanitizeSpotPlans(o.plans), swapAuto: o.swapAuto !== false,
-    researchAggressive: o.researchAggressive === true, newTokens: o.newTokens === true, extraSoft: o.extraSoft === true, researchPerps: Number.isFinite(Number(o.researchPerps)) ? Math.round(Math.min(100, Math.max(0, Number(o.researchPerps)))) : 50, nerve: Number.isFinite(Number(o.nerve)) ? Math.round(Math.min(3, Math.max(0, Number(o.nerve)))) : 1,
+    researchAggressive: o.researchAggressive === true, newTokens: o.newTokens === true, extraSoft: o.extraSoft === true, dailyStop: o.dailyStop === true, researchPerps: Number.isFinite(Number(o.researchPerps)) ? Math.round(Math.min(100, Math.max(0, Number(o.researchPerps)))) : 50, nerve: Number.isFinite(Number(o.nerve)) ? Math.round(Math.min(3, Math.max(0, Number(o.nerve)))) : 1,
     ...protections(o),
     marketFilter: o.marketFilter !== false,
     breakerPct: (BREAKER_STEPS as readonly number[]).includes(Number(o.breakerPct)) ? Number(o.breakerPct) : BREAKER_DEFAULT,

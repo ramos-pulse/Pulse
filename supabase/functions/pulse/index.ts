@@ -983,6 +983,14 @@ Deno.serve(async (req) => {
       await notify(on ? "Mode EXTRA SOUPLE activé : critères très assouplis, risque divisé par 2 sur chaque trade" : "Mode extra souple coupé : retour aux critères normaux");
       return json({ ok: true, on, pilot: await autopilot(true).catch((e) => `pilote : ${(e as Error).message}`) });
     }
+    if (req.method === "POST" && route === "/api/daily-stop") {
+      const b = (await req.json().catch(() => ({}))) as { on?: boolean };
+      const bots = await readBots(), on = b.on === true;
+      await setBot("spot", { config: { ...loadConfig(bots.spot.config), dailyStop: on } });
+      await setBot("perps", { config: { ...loadPerpsConfig(bots.perps.config), dailyStop: on } });
+      await notify(on ? "Stop du jour activé : plus d'entrée après une perte du jour trop forte" : "Stop du jour coupé : les bots continuent de trader même après une mauvaise journée (le plancher à 30 % reste)");
+      return json({ ok: true, on });
+    }
     if (req.method === "POST" && route === "/api/agents/fresh") {
       const b = (await req.json().catch(() => ({}))) as { on?: boolean };
       const sc = loadConfig((await readBots()).spot.config);

@@ -316,7 +316,7 @@ export async function runTick(admin: Admin): Promise<string> {
       return "hold";
     };
     if (held.length >= cfg.maxPositions) return await hold(`${held.length} position(s) ouverte(s), maximum atteint`);
-    const blocked = riskGate(mem, value, now);
+    const blocked = riskGate(mem, value, now, cfg.dailyStop ? RISK.dailyLoss : Infinity); // perte du jour : seulement si activée
     if (blocked) { mem.mindset = mindset(brain, { inPosition: held.length > 0, blocked, goalPct: (value / Number(bot.goal_usd)) * 100 }); return await hold(blocked); }
     // AGENT NOUVEAUX TOKENS (si activé) : un seul token récent à la fois, toute petite mise, 3 par jour au plus
     if (cfg.newTokens && !held.some((p) => p.strategy === "nouveau")) {

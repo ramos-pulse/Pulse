@@ -42,7 +42,7 @@ test("sortie quand le RSI repasse au-dessus de 50 (70 en naïf)", () => {
 test("réglages bornés et valeurs par défaut", () => {
   const p = sanitizeRsi({ rsiPeriod: 999, entry: 60, exit: 10, riskPct: 50, naive: "oui" as never });
   assert.equal(p.rsiPeriod, 50); assert.equal(p.entry, 50); assert.ok(p.exit > p.entry); assert.equal(p.riskPct, 3); assert.equal(p.naive, false);
-  assert.deepEqual(loadConfig(null), { strategy: "tendance", rsi: RSI_DEFAULTS, trend: null, autopilot: false, plans: [], swapAuto: true, researchAggressive: false, newTokens: false, extraSoft: false, researchPerps: 50, nerve: 1,
+  assert.deepEqual(loadConfig(null), { strategy: "tendance", rsi: RSI_DEFAULTS, trend: null, autopilot: false, plans: [], swapAuto: true, researchAggressive: false, newTokens: false, extraSoft: false, dailyStop: false, researchPerps: 50, nerve: 1,
     maxPositions: 3, vaultPct: 25, partialTp: true, marketFilter: true, breakerPct: 15, breakerBase: null, breakerTrippedAt: null });
 });
 test("backtest RSI : une position à la fois, risque ≈ 1 % par perte", () => {
