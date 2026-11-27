@@ -687,6 +687,12 @@ function renderAg() {
       <div class="rl"><span>− Calme</span><span>Très nerveux +</span></div>
       <div class="v txt" id="agNerveName" style="margin-top:10px;text-align:center">${esc(A.levels[A.nerve])}</div>
       <p class="sub" id="agNerveTxt" style="margin:6px 0 0">${nerveTxt(A.nerve)}</p>
+      <div class="sep"></div>
+      <div class="k">Recherche : spot ou perps ?</div>
+      <input type="range" id="agPerps" min="0" max="100" step="10" value="${A.perps ?? 50}">
+      <div class="rl"><span>← Plus pour le bot spot</span><span>Plus pour les perps →</span></div>
+      <div class="v txt" id="agPerpsTxt" style="margin-top:10px;text-align:center">${perpsTxt(A.perps ?? 50)}</div>
+      <p class="sub" style="margin:6px 0 0">Part des cycles de recherche (chercheur + mathématicien) consacrée à chaque bot. Au milieu : moitié-moitié.</p>
       <button class="btn go sm" style="width:100%;margin-top:12px" id="agSave">Enregistrer</button>
     </div>`;
   window.__nerveTxt = nerveTxt;
@@ -784,6 +790,7 @@ function hero() {
   return `<div class="hero"><div class="t"><span class="dot ${live.find(x => x.startsWith("alert")) || live.find(x => x.startsWith("ok")) || ""}"></span>CAPITAL TOTAL</div>
     <div class="n" data-roll="total" data-v="${v}">${nf(v)}<small>$</small></div>
     <div class="k ${cl(d)}">${d == null ? "variation du jour dans 1 h" : `${sg(d)} $ (${sg(ref.v ? d / ref.v * 100 : 0)} %) sur 24 h`}</div>
+    <button class="btn sm" style="width:100%;margin:10px 0 0" id="whatsUp">🤖 Tu fais quoi ?</button>
     <div class="periods">${Object.keys(PERIODS).map(p => `<button class="${RANGE === p ? "on" : ""}" data-range="${p}">${p}</button>`).join("")}</div>
     ${bigChart(pts)}</div>`;
 }
@@ -943,6 +950,36 @@ function lot2Cards() {
       ${wd.last.map(x => `<p class="sub" style="margin:8px 0 0">${esc(x.detail)}</p>`).join("")}</div>`;
 }
 
+const perpsTxt = v => v === 50 ? "Moitié spot, moitié perps" : v === 0 ? "Tout pour le bot spot" : v === 100 ? "Tout pour les perps" : `${100 - v} % spot · ${v} % perps`;
+
+/** « Tu fais quoi ? » : ce que fait chaque bot et chaque agent en ce moment, en clair (gratuit, sans IA). */
+async function whatsUp() {
+  sheet(`<h3>🤖 Tu fais quoi ?</h3><div class="skel" style="height:160px"></div>`);
+  if (!AG) { try { AG = await api("/api/research"); } catch (e) {} }
+  const lines = [];
+  for (const [k, name] of [["spot", "Bot 1 (spot)"], ["perps", "Bot 2 (perps)"]]) {
+    const b = S.bots[k], m = b.memory || {}, c = b.config || {}, pos = b.positions || [];
+    let txt;
+    if (b.status === "paused") txt = `Je suis en pause : je n'ouvre rien${pos.length ? ", mais je surveille mes positions et leurs stops" : ", je relis juste le portefeuille"}.`;
+    else if (b.status !== "running") txt = "Je suis arrêté. Lance une mission pour que je reprenne.";
+    else if (m.pending) txt = "Une transaction est en cours de confirmation, j'attends la blockchain.";
+    else if (pos.length) txt = `Je gère ${pos.length} position(s) : ${pos.map(p => `${k === "perps" ? (p.side === "short" ? "short " : "long ") : ""}${p.symbol} ${sg(p.live?.pnlPct)} %, stop à ${px(p.stop)}${p.target ? `, objectif ${px(p.target)}` : ""}`).join(" ; ")}. ${pos.length < (c.maxPositions || 3) ? "Je cherche aussi une autre entrée." : "Maximum de positions atteint."}`;
+    else if (m.cooldownUntil && m.cooldownUntil > Date.now()) txt = `Je fais une courte pause après une perte (encore ${Math.ceil((m.cooldownUntil - Date.now()) / 60000)} min).`;
+    else if (c.autopilot && !(c.plans || []).length) txt = "Le pilote attend que le chercheur valide une stratégie pour moi : aucune ne passe encore ses tests.";
+    else txt = `Je surveille ${(c.plans || []).length ? (c.plans || []).map(p => `${p.symbol || p.asset} (${FAM[p.family || "tendance"] || ""}, ${p.interval === "15m" ? "15 min" : "1 h"})`).join(", ") : "le marché"} et j'attends un signal.`;
+    const why = m.signal ? ` Dernière analyse : ${m.signal}` : "";
+    lines.push(`<div class="row" style="display:block"><div class="l1">${dotHtml(k)} ${name}</div><p class="sub" style="margin:6px 0 0;font-size:14px !important">${esc(txt)}${esc(why)}</p>${m.mindset ? `<p class="sub" style="margin:4px 0 0;font-style:italic">« ${esc(m.mindset)} »</p>` : ""}</div>`);
+  }
+  const st = AG?.settings || {}, best = (AG?.best || []).filter(r => r.qualifies).length;
+  lines.push(`<div class="row" style="display:block"><div class="l1">🔎 Chercheur et mathématicien</div><p class="sub" style="margin:6px 0 0;font-size:14px !important">${AG ? `${nf(AG.tested, 0)} stratégies testées, dernière recherche il y a ${ago(AG.lastAt)}. ${best ? `${best} stratégie(s) prête(s) pour le pilote.` : "Aucune stratégie ne passe encore les critères."} Réglages : ${st.aggressive ? "mode agressif" : "mode normal"}, ${(st.levels || [])[st.nerve] || ""}, ${perpsTxt(st.perps ?? 50).toLowerCase()}.` : "Je n'ai pas pu joindre le chercheur."}</p></div>`);
+  if (AGS?.fresh) lines.push(`<div class="row" style="display:block"><div class="l1">⭐ Nouveaux tokens</div><p class="sub" style="margin:6px 0 0;font-size:14px !important">${AGS.fresh.on ? "Achats activés." : "J'observe seulement."} ${esc(AGS.fresh.last?.[0]?.detail || "")}</p></div>`);
+  const plain = lines.map(l => l.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ")).join(". ");
+  window.__whats = plain;
+  $("#sheetBody").innerHTML = `<h3>🤖 Tu fais quoi ?</h3>${lines.join("")}<div class="btns" style="margin-top:12px"><button class="btn" id="sheetCancel">Fermer</button><button class="btn go" id="whatsSpeak">🔊 Lire</button></div>`;
+  return plain;
+}
+const dotHtml = k => `<span class="dot ${dotClass(k)}" style="display:inline-block;vertical-align:middle"></span>`;
+
 // ---------------------------------------------------------------- notifications push
 const b64urlToBytes = s => { const p = s.replace(/-/g, "+").replace(/_/g, "/"); return Uint8Array.from(atob(p + "===".slice((p.length + 3) % 4)), c => c.charCodeAt(0)); };
 async function enablePush() {
@@ -1014,6 +1051,7 @@ function parseCommand(raw) {
   if (/mode agressif|agents agressifs/.test(t)) { const on = !/(coupe|desactive|arrete|enleve)/.test(t); return {act: "agag", v: on, sensitive: on, say: `Mode agressif des agents ${on ? "activé" : "coupé"}`}; }
   if (/pause|arrete|stoppe/.test(t)) return {act: "pause", kinds, say: `Pause ${kinds.length > 1 ? "des deux bots" : kinds[0] === "spot" ? "du bot 1" : "du bot 2"}`};
   if (/reprend|relance|redemarre|continue|lance/.test(t)) return {act: "resume", kinds, say: `Reprise ${kinds.length > 1 ? "des deux bots" : kinds[0] === "spot" ? "du bot 1" : "du bot 2"}`};
+  if (/tu fais quoi|que fais|quoi de neuf|ca va|t es ou|tu en es ou/.test(t)) return {act: "whats"};
   if (/solde|combien|capital|valeur|argent/.test(t)) return {act: "info"};
   if (/position/.test(t)) return {act: "pos"};
   return {err: `Je n'ai pas compris « ${raw} ». Essaie : « pause bot 2 », « levier x5 », « agressivité prudent », « solde ».`};
@@ -1021,6 +1059,7 @@ function parseCommand(raw) {
 function speak(txt) { try { const u = new SpeechSynthesisUtterance(txt); u.lang = "fr-FR"; speechSynthesis.cancel(); speechSynthesis.speak(u); } catch (e) {} }
 async function runCommand(c) {
   if (c.err) { toast(c.err); speak("Je n'ai pas compris."); return; }
+  if (c.act === "whats") { const txt = await whatsUp(); speak(txt); return; }
   if (c.act === "info") { const v = k => nf(S.bots[k].last_value_usd); const txt = `Bot 1 : ${v("spot")} dollars. Bot 2 : ${v("perps")} dollars.`; toast(txt); speak(txt); return; }
   if (c.act === "pos") { const l = ["spot", "perps"].flatMap(k => (S.bots[k].positions || []).map(p => `${p.side === "short" ? "short " : ""}${p.symbol} ${sg(p.live?.pnlPct)} %`)); const txt = l.length ? "Positions : " + l.join(", ") : "Aucune position ouverte."; toast(txt); speak(txt); return; }
   if (c.sensitive && !c.confirmed) {
@@ -1105,6 +1144,8 @@ document.addEventListener("click", async e => {
   if (t.dataset.theme) { THEME = t.dataset.theme; document.documentElement.dataset.theme = THEME; try { localStorage.setItem("pulse_theme", THEME); } catch (err) {}
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content", getComputedStyle(document.documentElement).getPropertyValue("--bg").trim()); renderSet(); return; }
   if (t.id === "pushOn") return enablePush();
+  if (t.id === "whatsUp") return whatsUp();
+  if (t.id === "whatsSpeak") { speak(window.__whats || ""); return; }
   if (t.id === "pushTest") { try { const r = await api("/api/push/test", {method: "POST"}); toast(r.sent ? "Notification envoyée" : "Aucun téléphone abonné"); } catch (err) {} return; }
   if (t.id === "gameStart") { GAME.score = GAME.n = GAME.bot = GAME.streak = 0; sheet(""); return gameRound(true); }
   if (t.id === "gameNext") return gameRound(false);
@@ -1122,8 +1163,8 @@ document.addEventListener("click", async e => {
       toast(`Protections enregistrées · disjoncteur ${r.spot.breakerPct ? "−" + r.spot.breakerPct + " %" : "coupé"}`); } catch (e) {}
     await refresh(); renderSet(); return; }
   if (t.id === "chatSend") return sendChat();
-  if (t.id === "agSave") { const aggressive = $("#agAggr").checked, nerve = +$("#agNerve").value; window.__agDraft = null;
-    try { const r = await api("/api/research/settings", {method: "POST", body: JSON.stringify({aggressive, nerve})});
+  if (t.id === "agSave") { const aggressive = $("#agAggr").checked, nerve = +$("#agNerve").value, perps = +$("#agPerps").value; window.__agDraft = null;
+    try { const r = await api("/api/research/settings", {method: "POST", body: JSON.stringify({aggressive, nerve, perps})});
       toast(`Agents : ${r.aggressive ? "mode agressif" : "mode normal"} · ${AG?.settings?.levels?.[r.nerve] || ""}`); } catch (e) {}
     await refresh(); await loadAg(); return; }
   if (t.id === "swapRun") { if (SW_BUSY) return; SW_BUSY = true; renderAg();
@@ -1185,7 +1226,7 @@ document.addEventListener("click", async e => {
 });
 
 document.addEventListener("change", async e => {
-  if (e.target.id === "agAggr") { window.__agDraft = {aggressive: e.target.checked, nerve: +$("#agNerve").value}; if (e.target.checked) toast("Mode agressif : pense à enregistrer"); return; }
+  if (e.target.id === "agAggr") { window.__agDraft = {aggressive: e.target.checked, nerve: +$("#agNerve").value, perps: +$("#agPerps").value}; if (e.target.checked) toast("Mode agressif : pense à enregistrer"); return; }
   if (e.target.id === "freshOn") { const on = e.target.checked; if (on && !confirm("Activer les achats de nouveaux tokens (2 à 5 $ par token, terrain très risqué) ?")) { e.target.checked = false; return; }
     await api("/api/agents/fresh", {method: "POST", body: JSON.stringify({on})}); toast(on ? "Achats de nouveaux tokens activés" : "Observation seulement"); await refresh(); return loadAg(); }
   if (e.target.id === "wakeOn") { WAKE = e.target.checked; try { localStorage.setItem("pulse_wake", WAKE ? "1" : "0"); } catch (err) {}
@@ -1198,7 +1239,8 @@ document.addEventListener("change", async e => {
   await refresh(); loadAg();
 });
 document.addEventListener("input", e => { if (e.target.id === "pbias") $("#pbiasTxt").textContent = biasText(+e.target.value);
-  if (e.target.id === "agNerve" || e.target.id === "agAggr") window.__agDraft = {aggressive: $("#agAggr").checked, nerve: +$("#agNerve").value};
+  if (e.target.id === "agNerve" || e.target.id === "agAggr" || e.target.id === "agPerps") window.__agDraft = {aggressive: $("#agAggr").checked, nerve: +$("#agNerve").value, perps: +$("#agPerps").value};
+  if (e.target.id === "agPerps") $("#agPerpsTxt").textContent = perpsTxt(+e.target.value);
   if (e.target.id === "agNerve") { $("#agNerveName").textContent = (AG?.settings?.levels || [])[+e.target.value] || ""; $("#agNerveTxt").textContent = window.__nerveTxt?.(+e.target.value) || ""; }
   if (e.target.id === "paggr") { $("#paggrName").textContent = S.rules.aggrLevels[+e.target.value].name; $("#pmodeTxt").textContent = modeText(+e.target.value); } });
 setInterval(() => { if (PAGE === "ag" && !document.hidden && !AG_BUSY) loadAg(); }, 60000);

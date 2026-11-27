@@ -9,7 +9,7 @@ import { candles as getCandles, hourlyCandles } from "./engine/candles.ts";
 import { env } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, allTokens, setExtraTokens, type TokenInfo, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
+import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, allTokens, setExtraTokens, type TokenInfo, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, simulate, tempo, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, pushHook, type BotKind, type BotState } from "./store.ts";
 import { arbScan, FRESH, freshCandidates, freshRefusal, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
@@ -295,8 +295,12 @@ async function runResearch() {
   const fast = A.nerve >= 2;
   // nerveux : 2 cycles sur 3 consacrés au scalping 15 min
   const all = researchMarkets();
-  const pool = fast && cycle % 3 !== 0 ? all.filter((x) => x.interval === "15m") : all;
-  const m = pool[cycle % pool.length]!;
+  // barre du chercheur : ce cycle est consacré au bot spot ou au bot perps selon la répartition choisie
+  const side = researchSide(cycle, A.perps ?? 50);
+  const bySide = all.filter((x) => x.kind === side);
+  const base = bySide.length ? bySide : all;
+  const pool = fast && cycle % 3 !== 0 ? base.filter((x) => x.interval === "15m") : base;
+  const m = pool[Math.floor((Math.abs(Math.sin(cycle * 78.233) * 43758.5453) % 1) * pool.length)]!; // tirage uniforme : chaque marché du bot passe régulièrement
   let candles;
   try { candles = await getCandles(m.product, m.interval, HISTORY[m.interval]); }
   catch (e) { return { market: m.name, tested: 0, note: `historique indisponible : ${(e as Error).message}` }; }
@@ -385,8 +389,8 @@ async function revalidate(m: Market, candles: Candle[], ctx: { blockedAt?: (t: n
 const QUALIFY = { minTestTrades: 5, minTestPF: 1.3, maxTestDD: 10, maxAgeDays: REVALIDATE.maxAgeDays };
 /** Mode agressif des agents : critères assouplis (« à surveiller » accepté), plus de stratégies retenues mais moins sûres. */
 const QUALIFY_AGGR = { minTestTrades: 4, minTestPF: 1.15, maxTestDD: 20, minTrainPF: 1.0, maxAgeDays: REVALIDATE.maxAgeDays };
-interface AgentSettings { aggressive: boolean; nerve: number }
-const agentSettings = (spotConfig: unknown): AgentSettings => { const c = loadConfig(spotConfig); return { aggressive: c.researchAggressive, nerve: c.nerve }; };
+interface AgentSettings { aggressive: boolean; nerve: number; perps?: number }
+const agentSettings = (spotConfig: unknown): AgentSettings => { const c = loadConfig(spotConfig); return { aggressive: c.researchAggressive, nerve: c.nerve, perps: c.researchPerps }; };
 function qualifies(r: ResearchRow, a: AgentSettings = { aggressive: false, nerve: 1 }): boolean {
   // « fraîche » = créée ou re-validée sur des données récentes depuis moins de 10 jours (re-validation chaque semaine)
   const young = Date.now() - Date.parse(r.validated_at ?? r.created_at) < QUALIFY.maxAgeDays * 86_400_000;
@@ -950,15 +954,15 @@ Deno.serve(async (req) => {
       return json({ ok: true, auto: body.on !== false });
     }
     if (req.method === "POST" && route === "/api/research/settings") {
-      const body = (await req.json().catch(() => ({}))) as { aggressive?: boolean; nerve?: number };
+      const body = (await req.json().catch(() => ({}))) as { aggressive?: boolean; nerve?: number; perps?: number };
       const bots = await readBots();
       const sc = loadConfig(bots.spot.config), pc = loadPerpsConfig(bots.perps.config);
-      const spot = loadConfig({ ...sc, researchAggressive: body.aggressive ?? sc.researchAggressive, nerve: body.nerve ?? sc.nerve });
+      const spot = loadConfig({ ...sc, researchAggressive: body.aggressive ?? sc.researchAggressive, nerve: body.nerve ?? sc.nerve, researchPerps: body.perps ?? sc.researchPerps });
       await setBot("spot", { config: spot });
       await setBot("perps", { config: { ...pc, pilotAggressive: spot.researchAggressive } }); // le pilote perps suit le mode agressif des agents
-      await notify(`Agents : mode ${spot.researchAggressive ? "AGRESSIF" : "normal"}, nervosité ${NERVE_LEVELS[spot.nerve]}`);
+      await notify(`Agents : mode ${spot.researchAggressive ? "AGRESSIF" : "normal"}, nervosité ${NERVE_LEVELS[spot.nerve]}, recherche ${100 - spot.researchPerps} % spot / ${spot.researchPerps} % perps`);
       const pilot = await autopilot(true).catch((e) => `pilote : ${(e as Error).message}`);
-      return json({ ok: true, aggressive: spot.researchAggressive, nerve: spot.nerve, pilot });
+      return json({ ok: true, aggressive: spot.researchAggressive, nerve: spot.nerve, perps: spot.researchPerps, pilot });
     }
     if (req.method === "POST" && route === "/api/autopilot") {
       const body = (await req.json().catch(() => ({}))) as { spot?: boolean; perps?: boolean };

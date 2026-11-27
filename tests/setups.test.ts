@@ -156,3 +156,11 @@ test("taille selon la volatilité : risque réduit quand le marché s'agite", ()
   assert.ok(volScale(fromCloses(closes, H, 0, 0.001)) < 1);
   assert.equal(volScale(fromCloses(closes.slice(0, 240), H, 0, 0.001)), 1);
 });
+
+test("barre du chercheur : répartition des cycles entre spot et perps", async () => {
+  const { researchSide } = await import("../supabase/functions/pulse/engine/strategy.ts");
+  const share = (p: number) => Array.from({ length: 2000 }, (_, c) => researchSide(29_000_000 + c, p)).filter((x) => x === "perps").length / 2000;
+  assert.equal(share(0), 0); assert.equal(share(100), 1);
+  assert.ok(Math.abs(share(50) - 0.5) < 0.05, `50 % ⇒ ${share(50)}`);
+  assert.ok(Math.abs(share(80) - 0.8) < 0.05, `80 % ⇒ ${share(80)}`);
+});

@@ -764,6 +764,7 @@ export const NAIVE_EXIT = 70;
 
 export type SpotStrategy = "tendance" | "rsi";
 export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams; trend: Params | null; source?: string; autopilot: boolean; plans: SpotPlan[]; swapAuto: boolean; researchAggressive: boolean; nerve: number;
+  researchPerps: number; // barre du chercheur : part des cycles de recherche pour les perps (0 = tout pour le spot, 100 = tout pour les perps)
   newTokens: boolean; // agent nouveaux tokens : achète (toute petite mise) les tokens tout juste lancés qui passent les garde-fous
   maxPositions: number; vaultPct: number; partialTp: boolean; marketFilter: boolean;
   breakerPct: number; breakerBase: number | null; breakerTrippedAt: number | null }
@@ -804,7 +805,7 @@ export function loadConfig(raw: unknown): SpotConfig {
   const o = (raw && typeof raw === "object" ? raw : {}) as Partial<SpotConfig>;
   return { strategy: o.strategy === "rsi" ? "rsi" : "tendance", rsi: sanitizeRsi(o.rsi), trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}),
     autopilot: o.autopilot === true, plans: sanitizeSpotPlans(o.plans), swapAuto: o.swapAuto !== false,
-    researchAggressive: o.researchAggressive === true, newTokens: o.newTokens === true, nerve: Number.isFinite(Number(o.nerve)) ? Math.round(Math.min(3, Math.max(0, Number(o.nerve)))) : 1,
+    researchAggressive: o.researchAggressive === true, newTokens: o.newTokens === true, researchPerps: Number.isFinite(Number(o.researchPerps)) ? Math.round(Math.min(100, Math.max(0, Number(o.researchPerps)))) : 50, nerve: Number.isFinite(Number(o.nerve)) ? Math.round(Math.min(3, Math.max(0, Number(o.nerve)))) : 1,
     ...protections(o),
     marketFilter: o.marketFilter !== false,
     breakerPct: (BREAKER_STEPS as readonly number[]).includes(Number(o.breakerPct)) ? Number(o.breakerPct) : BREAKER_DEFAULT,
@@ -982,4 +983,15 @@ export function backtestRsi(candles: Candle[], p: RsiParams, feePct: number, o: 
     maxDd = Math.max(maxDd, 1 - equity / peak);
   }
   return summarize(log, { equity, maxDd }, candles[start], candles.at(-1));
+}
+
+/**
+ * Barre du chercheur : choisit le bot étudié à ce cycle. `perpsPct` = part des cycles pour les perps (0 à 100).
+ * Tirage reproductible par cycle (même résultat pour un même cycle), sinon chaque bot garde au moins ses marchés.
+ */
+export function researchSide(cycle: number, perpsPct: number): "spot" | "perps" {
+  if (perpsPct <= 0) return "spot";
+  if (perpsPct >= 100) return "perps";
+  const x = Math.abs(Math.sin(cycle * 12.9898) * 43758.5453) % 1;
+  return x < perpsPct / 100 ? "perps" : "spot";
 }
