@@ -771,13 +771,16 @@ function staleWarn() {
 function totalCurve() {
   const a = CURVE?.spot?.length ? CURVE.spot : S.bots.spot.curve || [], b = CURVE?.perps?.length ? CURVE.perps : S.bots.perps.curve || [];
   const ts = [...new Set([...a, ...b].map(x => Math.floor(x.t / 3600000) * 3600000))].sort((x, y) => x - y);
-  let ia = 0, ib = 0, va = null, vb = null; const out = [];
+  // Un bot sans courbe (ou avant son premier point) compte pour sa valeur actuelle :
+  // sinon le total « saute » quand sa courbe démarre et affiche un faux gain.
+  const nowA = S.bots.spot.last_value_usd ?? 0, nowB = S.bots.perps.last_value_usd ?? 0;
+  let ia = 0, ib = 0, va = a[0]?.v ?? nowA, vb = b[0]?.v ?? nowB; const out = [];
   for (const t of ts) {
     while (ia < a.length && a[ia].t < t + 3600000) va = a[ia++].v;
     while (ib < b.length && b[ib].t < t + 3600000) vb = b[ib++].v;
-    if (va != null || vb != null) out.push({t, v: (va ?? 0) + (vb ?? 0)});
+    out.push({t, v: va + vb});
   }
-  const now = (S.bots.spot.last_value_usd ?? 0) + (S.bots.perps.last_value_usd ?? 0);
+  const now = nowA + nowB;
   if (out.length) out.push({t: Date.now(), v: now});
   return out;
 }
