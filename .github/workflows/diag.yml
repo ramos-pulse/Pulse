@@ -24,7 +24,7 @@ jobs:
           q() { psql "$URL" -X -A -F ' | ' -c "$1" 2>&1 | cut -c1-400; echo; }
           q "select now()"
           q "select max(created_at) as derniere, count(*) filter (where created_at > now() - interval '3 hours') as en_3h, count(*) as total from research"
-          q "select created_at, status_code, left(regexp_replace(content::text, '\s+', ' ', 'g'), 350) from net._http_response order by created_at desc limit 25"
+          q "select created, status_code, timed_out, left(error_msg,150), left(regexp_replace(content::text, '\s+', ' ', 'g'), 1500) from net._http_response where content::text like '%research%' or content::text like '%watchdog%' or status_code <> 200 or timed_out order by created desc limit 8"
           q "select kind, status, last_tick_at, left(last_message, 200), config->>'researchPerps' as perps, config->>'extraSoft' as soft, config->>'autopilot' as pilot, jsonb_array_length(coalesce(config->'plans','[]'::jsonb)) as plans from bot_state"
           q "select created_at, agent, left(detail, 250) from agent_log order by created_at desc limit 15"
           q "select kind, active, count(*) from token_universe group by 1,2"
