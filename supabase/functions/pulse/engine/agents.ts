@@ -57,13 +57,13 @@ async function fetchRetry(url: string, init: RequestInit = {}, tries = 4): Promi
 // ---------------------------------------------------------------------------------------------------
 /** Filtres stricts du sélectionneur. */
 export const SELECT = { minLiquidity: 1_000_000, minVolume24h: 1_000_000, minAgeDays: 30, keep: 25, max: 30 };
-export interface Candidate { mint: string; symbol: string; decimals: number; pool: string; liquidity: number; volume24h: number; ageDays: number; why?: string }
+export interface Candidate { mint: string; symbol: string; decimals: number; pool: string; liquidity: number; volume24h: number; ageDays: number; why?: string; program?: "2022" }
 
 /** Un token passe-t-il les filtres ? Renvoie null s'il passe, sinon la raison du refus. */
 export function selectionRefusal(c: Candidate, j: JupToken | undefined): string | null {
   if (!j) return "inconnu de Jupiter";
   if (!isVerified(j)) return "non vérifié par Jupiter";
-  if (j.tokenProgram && j.tokenProgram !== TOKEN_PROGRAM) return "programme de token non standard (Token-2022)";
+  if (j.tokenProgram && j.tokenProgram !== TOKEN_PROGRAM && j.tokenProgram !== TOKEN_2022) return "programme de token inconnu";
   if (j.audit?.mintAuthorityDisabled !== true) return "émission de nouveaux jetons encore possible";
   if (j.audit?.freezeAuthorityDisabled !== true) return "gel des comptes encore possible";
   if (c.liquidity < SELECT.minLiquidity) return `liquidité ${Math.round(c.liquidity / 1000)} k$ < 1 M$`;
@@ -119,7 +119,10 @@ export async function bestPools(mints: string[]): Promise<Record<string, string>
 /** Classe les candidats qui passent et garde les 20 à 30 meilleurs (volume × liquidité). */
 export function rankSelection(cands: Candidate[], info: Map<string, JupToken>) {
   const ok: Candidate[] = [], refused: Candidate[] = [];
-  for (const c of cands) { const why = selectionRefusal(c, info.get(c.mint)); if (why) refused.push({ ...c, why }); else ok.push(c); }
+  for (const c of cands) {
+    const j = info.get(c.mint), why = selectionRefusal(c, j);
+    if (why) refused.push({ ...c, why }); else ok.push(j?.tokenProgram === TOKEN_2022 ? { ...c, program: "2022" } : c);
+  }
   ok.sort((a, b) => Math.sqrt(b.volume24h * b.liquidity) - Math.sqrt(a.volume24h * a.liquidity));
   return { selected: ok.slice(0, SELECT.keep), refused };
 }

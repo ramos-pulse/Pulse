@@ -15,7 +15,8 @@ test("sélectionneur : filtres stricts (liquidité, volume, vérifié, âge, ém
   assert.match(selectionRefusal({ ...cand, liquidity: 5e5 }, safe())!, /liquidité/);
   assert.match(selectionRefusal({ ...cand, volume24h: 2e5 }, safe())!, /volume/);
   assert.match(selectionRefusal({ ...cand, ageDays: 10 }, safe())!, /récent/);
-  assert.match(selectionRefusal(cand, safe({ tokenProgram: "TokenzQdBNbLqP5VEhdkAS6EPFLC1PE6Z2ZZ8vKtzqjB" }))!, /Token-2022/);
+  assert.equal(selectionRefusal(cand, safe({ tokenProgram: "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" })), null); // Token-2022 accepté (extensions vérifiées ensuite)
+  assert.match(selectionRefusal(cand, safe({ tokenProgram: "AutreProgramme1111111111111111111111111111" }))!, /inconnu/);
   const many = Array.from({ length: 40 }, (_, i) => ({ ...cand, mint: "M" + i, volume24h: 1e6 + i * 1e5 }));
   const info = new Map(many.map((c) => [c.mint, safe({ id: c.mint })]));
   const r = rankSelection(many, info);

@@ -664,8 +664,14 @@ async function runSelector(force = false): Promise<string> {
   const ranked = rankSelection(candidates, info);
   const refused = ranked.refused;
   // pool le plus liquide pour l'historique des prix (DexScreener) ; sans pool, pas d'historique : token écarté
-  const pools = await bestPools(ranked.selected.filter((c) => !c.pool).map((c) => c.mint));
-  const selected = ranked.selected.map((c) => ({ ...c, pool: c.pool || pools[c.mint] || "" })).filter((c) => c.pool);
+  // Token-2022 : accepté seulement si ses extensions sont sûres (pas de frais cachés, de transferts bloquables…)
+  const safe: typeof ranked.selected = [];
+  for (const c of ranked.selected) {
+    const bad = c.program === "2022" ? await token2022Danger(c.mint).catch(() => "contrôle Token-2022 indisponible") : null;
+    if (bad) refused.push({ ...c, why: bad }); else safe.push(c);
+  }
+  const pools = await bestPools(safe.filter((c) => !c.pool).map((c) => c.mint));
+  const selected = safe.map((c) => ({ ...c, pool: c.pool || pools[c.mint] || "" })).filter((c) => c.pool);
   if (!selected.length && !candidates.length) throw new Error("aucune donnée de marché");
   const { data: cur } = await db.from("token_universe").select("*").eq("kind", "selection").limit(500);
   const current = (cur ?? []) as UniverseRow[];
@@ -678,7 +684,7 @@ async function runSelector(force = false): Promise<string> {
     const was = current.find((r) => r.mint === c.mint);
     if (!was?.active) added.push(c.symbol);
     await db.from("token_universe").upsert({ mint: c.mint, kind: "selection", symbol: c.symbol, decimals: c.decimals, pool: c.pool, liquidity: c.liquidity, volume_24h: c.volume24h, age_days: c.ageDays,
-      score: Math.round(Math.sqrt(c.volume24h * c.liquidity)), active: true, why: "passe tous les filtres", updated_at: now, removed_at: null, ...(was ? {} : { added_at: now }) }, { onConflict: "mint" });
+      score: Math.round(Math.sqrt(c.volume24h * c.liquidity)), active: true, why: "passe tous les filtres", updated_at: now, removed_at: null, ...(c.program ? { data: { program: c.program } } : {}), ...(was ? {} : { added_at: now }) }, { onConflict: "mint" });
   }
   for (const r of current.filter((x) => x.active && !keep.has(x.mint))) {
     const why = refused.find((c) => c.mint === r.mint)?.why ?? "n'est plus parmi les meilleurs tokens";
