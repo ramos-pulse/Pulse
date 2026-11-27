@@ -338,6 +338,13 @@ function missionCard(kind, title) {
         <div><div class="k">Cours</div><div class="v">${px(cur)} $</div></div>
         <div data-tip="${p.partialDone ? (kind === "spot" ? "La moitié a déjà été vendue avec un gain, et le stop du reste est au prix d'entrée : cette position ne peut plus perdre." : "Le gain a atteint 1,5 fois le risque : le stop est remonté au prix d'entrée, la position ne peut plus perdre.") : "Le stop suit le prix : il ne descend jamais, il monte quand la position gagne."}"><div class="k">Stop</div><div class="v amber">${px(stop)} $${p.partialDone ? " 🔒" : ""}</div></div>
       </div>
+      ${(() => { // ce que le bot a mis dans cette position, et ce qu'elle vaut maintenant
+        const stake = kind === "perps" ? p.collateralUsd : p.costUsd;
+        const now = kind === "perps" ? (p.lastValueUsd ?? null) : stake != null && p.live?.pnlPct != null ? stake * (1 + p.live.pnlPct / 100) : null;
+        if (stake == null) return "";
+        return `<div class="grid g3" style="margin-top:8px"><div data-tip="${kind === "perps" ? "Collatéral engagé dans la position." : p.partialDone ? "Ce qui reste investi après la vente de la moitié." : "Montant investi dans ce token."}"><div class="k">${kind === "perps" ? "Collatéral" : "Investi"}</div><div class="v">${nf(stake)} $</div></div>
+          <div><div class="k">Vaut maintenant</div><div class="v ${cl(now != null ? now - stake : null)}">${now != null ? nf(now) + " $" : "—"}</div></div>
+          <div><div class="k">${kind === "perps" ? "Taille" : "Gain"}</div><div class="v ${kind === "perps" ? "" : cl(now != null ? now - stake : null)}">${kind === "perps" ? (p.sizeUsd ? nf(p.sizeUsd) + " $" : "—") : now != null ? sg(now - stake) + " $" : "—"}</div></div></div>`; })()}
       ${posBar(p)}
       <button class="btn sm" style="width:100%;margin-top:10px" data-chart="${kind}|${esc(p.symbol)}|${p.interval === "15m" ? "15m" : "1h"}">📈 Graphique et trades</button>`;
   };
