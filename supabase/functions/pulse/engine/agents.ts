@@ -4,11 +4,10 @@
 //  - ARBITRAGE (éclaireur, sans argent) : mesure les écarts de prix entre DEX et les boucles de swaps, frais déduits.
 // Les filtres sont des fonctions pures (testées) ; les appels réseau sont à part.
 import { dexPairs, type DexPair } from "./dex.ts";
-import { getQuote } from "./jupiter.ts";
+import { getQuote, jupBase, jupHeaders } from "./jupiter.ts";
 import { SOL_MINT, USDC_MINT } from "./strategy.ts";
 
 const GT = "https://api.geckoterminal.com/api/v2/networks/solana";
-const JUP = "https://lite-api.jup.ag";
 const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const STABLES = new Set([USDC_MINT, "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB", "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo", "USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA"]);
@@ -23,7 +22,7 @@ export async function jupTokens(mints: string[]): Promise<Map<string, JupToken>>
   const out = new Map<string, JupToken>();
   for (let i = 0; i < mints.length; i += 20) { // petits lots : la recherche Jupiter limite le nombre de résultats renvoyés
     if (i) await new Promise((res) => setTimeout(res, 700)); // espacer les appels
-    const r = await fetchRetry(`${JUP}/tokens/v2/search?query=${mints.slice(i, i + 20).join(",")}`);
+    const r = await fetchRetry(`${jupBase()}/tokens/v2/search?query=${mints.slice(i, i + 20).join(",")}`, { headers: jupHeaders() });
     if (!r.ok) throw new Error(`Jupiter tokens indisponible (${r.status})`);
     for (const t of (await r.json()) as JupToken[]) if (t?.id) out.set(t.id, t);
   }
@@ -81,7 +80,7 @@ const isVerified = (j: JupToken) => j.isVerified === true || !!j.tags?.some((t) 
 export async function selectionCandidates(exclude: Set<string>): Promise<{ candidates: Candidate[]; info: Map<string, JupToken> }> {
   const info = new Map<string, JupToken>(), by = new Map<string, Candidate>();
   try {
-    const r = await fetchRetry(`${JUP}/tokens/v2/toptraded/24h?limit=100`);
+    const r = await fetchRetry(`${jupBase()}/tokens/v2/toptraded/24h?limit=100`, { headers: jupHeaders() });
     if (!r.ok) throw new Error(`Jupiter top (${r.status})`);
     for (const j of (await r.json()) as JupToken[]) {
       if (!j?.id || exclude.has(j.id) || STABLES.has(j.id) || WRAPPED_SOL.has(j.id)) continue;

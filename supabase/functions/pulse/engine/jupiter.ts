@@ -1,8 +1,11 @@
 // Serveur uniquement : prix, cotations, swaps spot et API Jupiter Perps.
 import { getBase64EncodedWireTransaction, getTransactionDecoder, partiallySignTransaction, signTransaction } from "@solana/kit";
-import { sendRaw } from "./solana.ts";
+import { env, sendRaw } from "./solana.ts";
 
-const JUP = "https://lite-api.jup.ag";
+/** Avec une clé Jupiter (secret JUPITER_API_KEY) : API principale, limites bien plus hautes. Sinon : API gratuite partagée. */
+export const jupKey = () => env("JUPITER_API_KEY")?.trim() || "";
+export const jupBase = () => (jupKey() ? "https://api.jup.ag" : "https://lite-api.jup.ag");
+export const jupHeaders = (h: Record<string, string> = {}): Record<string, string> => (jupKey() ? { ...h, "x-api-key": jupKey() } : h);
 const PERPS = "https://perps-api.jup.ag/v2";
 
 const num = (v: unknown) => {
@@ -14,7 +17,7 @@ type KeyPair = Awaited<ReturnType<typeof import("./solana.ts").loadKeyPairFrom>>
 
 /** Prix USD. Un prix manquant n'annule plus tout : on reçoit ce qui est disponible. */
 export async function getPrices(mints: string[]): Promise<Record<string, number>> {
-  const res = await fetch(`${JUP}/price/v3?ids=${mints.join(",")}`, { signal: AbortSignal.timeout(12_000) });
+  const res = await fetch(`${jupBase()}/price/v3?ids=${mints.join(",")}`, { headers: jupHeaders(), signal: AbortSignal.timeout(12_000) });
   if (!res.ok) throw new Error(`Cours Jupiter indisponibles (${res.status})`);
   const json = (await res.json()) as Record<string, { usdPrice?: unknown } | undefined>;
   const out: Record<string, number> = {};
@@ -28,8 +31,8 @@ export async function getPrices(mints: string[]): Promise<Record<string, number>
 export interface Quote { inAmount: string; outAmount: string; priceImpactPct: string; [k: string]: unknown }
 
 export async function getQuote(inputMint: string, outputMint: string, amount: bigint, slippageBps: number): Promise<Quote> {
-  const url = `${JUP}/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}&restrictIntermediateTokens=true`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+  const url = `${jupBase()}/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}&restrictIntermediateTokens=true`;
+  const res = await fetch(url, { headers: jupHeaders(), signal: AbortSignal.timeout(12_000) });
   const q = (await res.json()) as Quote & { error?: string };
   if (!res.ok || q.error || !q.outAmount) throw new Error(`Cotation refusée : ${q.error ?? res.status}`);
   return q;
@@ -53,9 +56,9 @@ async function sendProtected(wireBase64: string): Promise<string> {
 /** Construit, signe et envoie le swap. Renvoie la signature (à CONFIRMER ensuite). */
 export async function executeSwap(quote: Quote, owner: string, keyPair: KeyPair, opts: { protect?: boolean } = {}): Promise<string> {
   const protect = opts.protect !== false;
-  const res = await fetch(`${JUP}/swap/v1/swap`, {
+  const res = await fetch(`${jupBase()}/swap/v1/swap`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: jupHeaders({ "content-type": "application/json" }),
     signal: AbortSignal.timeout(15_000),
     body: JSON.stringify({
       quoteResponse: quote,
@@ -154,7 +157,7 @@ export async function verifyToken(t: { symbol: string; mint: string; decimals: n
   if (hit && Date.now() - hit.at < 6 * 3_600_000) return hit;
   let res = { ok: false, why: "contrôle Jupiter indisponible" };
   try {
-    const r = await fetch(`${JUP}/tokens/v2/search?query=${t.mint}`, { signal: AbortSignal.timeout(8_000) });
+    const r = await fetch(`${jupBase()}/tokens/v2/search?query=${t.mint}`, { headers: jupHeaders(), signal: AbortSignal.timeout(8_000) });
     if (r.ok) {
       const list = (await r.json()) as { id?: string; symbol?: string; decimals?: number; isVerified?: boolean }[];
       const info = Array.isArray(list) ? list.find((x) => x.id === t.mint) : undefined;
