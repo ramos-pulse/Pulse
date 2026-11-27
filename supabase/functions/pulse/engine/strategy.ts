@@ -44,7 +44,8 @@ export const TOKENS = [
 ] as const;
 
 /** Un token tradable : liste fixe ci-dessus + tokens choisis par le sélectionneur ou l'agent nouveaux tokens. */
-export interface TokenInfo { symbol: string; mint: string; decimals: number; candles: string; verify: boolean; extra?: "selection" | "nouveau"; seenAt?: number; active?: boolean }
+export interface TokenInfo { symbol: string; mint: string; decimals: number; candles: string; verify: boolean; extra?: "selection" | "nouveau"; seenAt?: number; active?: boolean;
+  program?: "2022" } // programme Token-2022 (beaucoup de nouveaux tokens) ; absent = programme classique
 let EXTRA: TokenInfo[] = [];
 /**
  * Tokens ajoutés par les agents (chargés depuis la base à chaque appel). Un token retiré de la sélection reste connu tant

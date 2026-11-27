@@ -10,6 +10,7 @@ import { SOL_MINT, USDC_MINT } from "./strategy.ts";
 const GT = "https://api.geckoterminal.com/api/v2/networks/solana";
 const JUP = "https://lite-api.jup.ag";
 const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const STABLES = new Set([USDC_MINT, "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB", "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo", "USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA"]);
 const WRAPPED_SOL = new Set([SOL_MINT, "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", "7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj", "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v"]);
 
@@ -20,8 +21,8 @@ export interface JupToken {
 }
 export async function jupTokens(mints: string[]): Promise<Map<string, JupToken>> {
   const out = new Map<string, JupToken>();
-  for (let i = 0; i < mints.length; i += 50) {
-    const r = await fetch(`${JUP}/tokens/v2/search?query=${mints.slice(i, i + 50).join(",")}`, { signal: AbortSignal.timeout(10_000) });
+  for (let i = 0; i < mints.length; i += 20) { // petits lots : la recherche Jupiter limite le nombre de résultats renvoyés
+    const r = await fetch(`${JUP}/tokens/v2/search?query=${mints.slice(i, i + 20).join(",")}`, { signal: AbortSignal.timeout(10_000) });
     if (!r.ok) throw new Error(`Jupiter tokens indisponible (${r.status})`);
     for (const t of (await r.json()) as JupToken[]) if (t?.id) out.set(t.id, t);
   }
@@ -104,14 +105,14 @@ export const FRESH = {
   // gestion d'une position : toute petite mise, sortie rapide
   stakePct: 0.05, minStakeUsd: 2, maxStakeUsd: 5, maxShareOfEquity: 0.2, stopPct: 0.2, targetPct: 0.4, maxHoldMs: 4 * 3_600_000, maxPerDay: 3,
 };
-export interface Fresh { mint: string; symbol: string; decimals: number; pool: string; liquidity: number; volume1h: number; change1h: number; buys1h: number; sells1h: number; ageMin: number; topHolders?: number }
+export interface Fresh { program?: "2022"; mint: string; symbol: string; decimals: number; pool: string; liquidity: number; volume1h: number; change1h: number; buys1h: number; sells1h: number; ageMin: number; topHolders?: number }
 
 /** Seuils assouplis du mode « extra souple » (les contrôles anti-arnaque restent les mêmes). */
 export const FRESH_SOFT = { minLiquidity: 25_000, minVolume1h: 10_000, minSells1h: 10, maxTopHolders: 40, minChange1h: 0, maxChange1h: 100 };
 export function freshRefusal(f: Fresh, j: JupToken | undefined, soft = false): string | null {
   const F = soft ? { ...FRESH, ...FRESH_SOFT } : FRESH;
   if (!j) return "inconnu de Jupiter";
-  if (j.tokenProgram && j.tokenProgram !== TOKEN_PROGRAM) return "programme de token non standard";
+  if (j.tokenProgram && j.tokenProgram !== TOKEN_PROGRAM && j.tokenProgram !== TOKEN_2022) return "programme de token inconnu";
   if (j.audit?.mintAuthorityDisabled !== true) return "émission de nouveaux jetons possible";
   if (j.audit?.freezeAuthorityDisabled !== true) return "gel des comptes possible (piège classique)";
   const top = j.audit?.topHoldersPercentage;
@@ -140,7 +141,7 @@ export async function freshCandidates(exclude: Set<string>, soft = false): Promi
   const F = soft ? FRESH_SOFT : FRESH;
   const pre = list.filter((f) => f.liquidity >= F.minLiquidity && f.sells1h >= F.minSells1h).slice(0, 40);
   const info = pre.length ? await jupTokens(pre.map((f) => f.mint)) : new Map<string, JupToken>();
-  for (const f of pre) { const j = info.get(f.mint); if (j) { f.symbol = j.symbol; f.decimals = j.decimals; f.topHolders = j.audit?.topHoldersPercentage; } }
+  for (const f of pre) { const j = info.get(f.mint); if (j) { f.symbol = j.symbol; f.decimals = j.decimals; f.topHolders = j.audit?.topHoldersPercentage; if (j.tokenProgram === TOKEN_2022) f.program = "2022"; } }
   return { list: pre, info };
 }
 

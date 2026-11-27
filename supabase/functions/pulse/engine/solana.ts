@@ -74,12 +74,15 @@ export interface Balances {
 }
 
 export async function getBalances(owner: string): Promise<Balances> {
-  const mints = [USDC_MINT, ...allTokens().filter((t) => t.mint !== SOL_MINT).map((t) => t.mint)];
+  const toks = allTokens().filter((t) => t.mint !== SOL_MINT);
+  const mints = [USDC_MINT, ...toks.map((t) => t.mint)];
+  // chaque token a son compte associé, dérivé avec SON programme (classique ou Token-2022)
+  const progs = [TOKEN_PROGRAM, ...toks.map((t) => (t.program === "2022" ? TOKEN_2022 : TOKEN_PROGRAM))];
   const enc = getAddressEncoder();
-  const accounts = await Promise.all(mints.map(async (mint) => {
+  const accounts = await Promise.all(mints.map(async (mint, i) => {
     const [ata] = await getProgramDerivedAddress({
       programAddress: address(ATA_PROGRAM),
-      seeds: [enc.encode(address(owner)), enc.encode(address(TOKEN_PROGRAM)), enc.encode(address(mint))],
+      seeds: [enc.encode(address(owner)), enc.encode(address(progs[i]!)), enc.encode(address(mint))],
     });
     return ata;
   }));
@@ -95,7 +98,7 @@ export async function getBalances(owner: string): Promise<Balances> {
   infos.value.forEach((a, i) => {
     if (!a) return; // compte jamais créé = solde nul
     const info = a.data.parsed.info;
-    if (a.owner !== TOKEN_PROGRAM || info.owner !== owner || info.mint !== mints[i]) throw new Error("Compte de jeton inattendu");
+    if (a.owner !== progs[i] || info.owner !== owner || info.mint !== mints[i]) throw new Error("Compte de jeton inattendu");
     raw[info.mint] = BigInt(info.tokenAmount.amount);
     ui[info.mint] = Number(info.tokenAmount.amount) / 10 ** info.tokenAmount.decimals;
   });
@@ -129,7 +132,26 @@ export async function sendRaw(wireBase64: string): Promise<string> {
 }
 
 // ------------------------------------ Comptes de tokens (agent swap) ------------------------------------
-export const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PE6Z2ZZ8vKtzqjB";
+export const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
+/**
+ * Extensions d'un token Token-2022. Certaines sont des pièges classiques : frais à chaque transfert, programme qui peut
+ * bloquer les transferts (hook), délégué permanent qui peut reprendre les jetons, comptes gelés par défaut…
+ * Renvoie null si le token est sain (aucune extension dangereuse), sinon la raison du refus.
+ */
+const SAFE_EXT = new Set(["metadataPointer", "tokenMetadata", "groupPointer", "groupMemberPointer", "tokenGroup", "tokenGroupMember", "mintCloseAuthority", "immutableOwner"]);
+export async function token2022Danger(mint: string): Promise<string | null> {
+  type R = { value: { owner: string; data: { parsed?: { info?: { extensions?: { extension: string; state?: { newerTransferFee?: { transferFeeBasisPoints?: number }; olderTransferFee?: { transferFeeBasisPoints?: number } } }[] } } } } | null };
+  const r = await rpc<R>("getAccountInfo", [mint, { encoding: "jsonParsed", commitment: "confirmed" }]);
+  if (!r.value) return "token introuvable";
+  if (r.value.owner !== TOKEN_2022) return null;
+  for (const e of r.value.data.parsed?.info?.extensions ?? []) {
+    if (SAFE_EXT.has(e.extension)) continue;
+    if (e.extension === "transferFeeConfig" && !(e.state?.newerTransferFee?.transferFeeBasisPoints || e.state?.olderTransferFee?.transferFeeBasisPoints)) continue;
+    return `extension Token-2022 risquée (${e.extension})`;
+  }
+  return null;
+}
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
 export interface TokenAccount { pubkey: string; mint: string; program: string; amount: bigint; ui: number; decimals: number; lamports: number }
 

@@ -6,7 +6,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { riskPerTrade } from "./engine/brain.ts";
 import { candles as getCandles, hourlyCandles } from "./engine/candles.ts";
-import { env } from "./engine/solana.ts";
+import { env, token2022Danger } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
 import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, type TokenInfo, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
@@ -642,9 +642,10 @@ type UniverseRow = { mint: string; kind: "selection" | "nouveau"; symbol: string
 const candleSource = (r: Pick<UniverseRow, "mint" | "pool">) => (env("BIRDEYE_API_KEY") ? `be:${r.mint}|${r.pool ?? ""}` : `gt:${r.pool}`);
 async function loadUniverse() {
   // tokens actifs + tokens retirés depuis peu (ils peuvent encore être en portefeuille : le bot doit pouvoir les revendre)
-  const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
-  const { data } = await db.from("token_universe").select("*").or(`removed_at.is.null,removed_at.gt.${since}`).limit(200);
-  setExtraTokens(((data ?? []) as UniverseRow[]).filter((r) => r.pool).map((r): TokenInfo => ({
+  const since = Date.now() - 30 * 86_400_000;
+  const { data } = await db.from("token_universe").select("*").limit(500);
+  setExtraTokens(((data ?? []) as UniverseRow[]).filter((r) => r.pool && (!r.removed_at || Date.parse(r.removed_at) > since)).map((r): TokenInfo => ({
+    ...((r.data as { program?: string } | null)?.program === "2022" ? { program: "2022" as const } : {}),
     symbol: r.symbol, mint: r.mint, decimals: r.decimals, candles: candleSource(r), verify: r.kind === "selection", extra: r.kind, active: r.active,
     ...(r.seen_at ? { seenAt: Date.parse(r.seen_at) } : {}) })));
 }
@@ -652,7 +653,12 @@ async function loadUniverse() {
 /** SÉLECTIONNEUR : une fois par jour, les 20 à 30 meilleurs tokens Solana ; ceux qui ne passent plus les filtres sont retirés. */
 async function runSelector(force = false): Promise<string> {
   const { day } = parisNow();
-  if (!force) { const { data } = await db.from("agent_log").select("id").eq("agent", "selecteur").eq("wallet", day).limit(1); if (data?.length) return "déjà fait aujourd'hui"; }
+  if (!force) { // une fois par jour ; mais une sélection vide (souvent une panne de données) est refaite au bout d'une heure
+    const { data } = await db.from("agent_log").select("created_at, usd").eq("agent", "selecteur").eq("wallet", day).order("created_at", { ascending: false }).limit(1);
+    const last = data?.[0] as { created_at: string; usd?: number | null } | undefined;
+    if (last && (last.usd ?? 0) > 0) return "déjà fait aujourd'hui";
+    if (last && Date.now() - Date.parse(last.created_at) < 3_600_000) return "sélection vide récente : nouvel essai dans l'heure";
+  }
   const fixed = new Set<string>(TOKENS.map((t) => t.mint));
   const { candidates, info } = await selectionCandidates(fixed);
   const { selected, refused } = rankSelection(candidates, info);
@@ -695,13 +701,14 @@ async function runFreshScout(): Promise<string> {
   const { list, info } = await freshCandidates(known, soft);
   const ok = [], refusals: Record<string, number> = {};
   for (const f of list) {
-    const why = freshRefusal(f, info.get(f.mint), soft);
+    let why = freshRefusal(f, info.get(f.mint), soft);
+    if (!why && f.program === "2022") why = await token2022Danger(f.mint).catch(() => "contrôle Token-2022 indisponible"); // frais cachés, transferts bloquables…
     if (why) { const k = why.split(" (")[0]!.split(" :")[0]!; refusals[k] = (refusals[k] ?? 0) + 1; continue; }
     if (!f.decimals) continue;
     ok.push(f);
     const now = new Date().toISOString();
     await db.from("token_universe").upsert({ mint: f.mint, kind: "nouveau", symbol: f.symbol, decimals: f.decimals, pool: f.pool, liquidity: f.liquidity, volume_24h: f.volume1h * 24, age_days: f.ageMin / 1440,
-      score: f.change1h, active: true, why: "garde-fous passés", data: { change1h: f.change1h, buys1h: f.buys1h, sells1h: f.sells1h, topHolders: f.topHolders }, added_at: now, updated_at: now, seen_at: now }, { onConflict: "mint" });
+      score: f.change1h, active: true, why: "garde-fous passés", data: { change1h: f.change1h, buys1h: f.buys1h, sells1h: f.sells1h, topHolders: f.topHolders, ...(f.program ? { program: f.program } : {}) }, added_at: now, updated_at: now, seen_at: now }, { onConflict: "mint" });
   }
   const top = Object.entries(refusals).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${k} (${n})`).join(", ");
   const text = `${list.length} lancement(s) examiné(s), ${ok.length} retenu(s)${ok.length ? ` : ${ok.map((f) => f.symbol).join(", ")}` : ""}${top ? ` · refus : ${top}` : ""}`;
@@ -1034,11 +1041,18 @@ Deno.serve(async (req) => {
       await notify(`Bot perps : agressivité ${AGGR_LEVELS[config.aggr]!.name.toLowerCase()}${effectiveAggr(config) !== config.aggr ? ` (plafonnée à ${AGGR_LEVELS[effectiveAggr(config)]!.name.toLowerCase()} en pilote automatique)` : ""}, levier max x${config.maxLev}, ${config.bias === 0 ? "longs et shorts équilibrés" : config.bias > 0 ? `longs favorisés (shorts à ${100 - config.bias} %)` : `shorts favorisés (longs à ${100 + config.bias} %)`}`);
       return json({ ok: true, config });
     }
-    const m = route.match(/^\/api\/(spot|perps)\/(start|pause|stop|goal)$/);
+    const m = route.match(/^\/api\/(spot|perps)\/(start|pause|stop|goal|rebase)$/);
     if (req.method === "POST" && m) {
       const kind = m[1] as BotKind, action = m[2];
       const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
       if (action === "start") return json(await startMission(kind, body as { goal_usd?: number; days?: number }));
+      if (action === "rebase") { // remet le point de départ à la valeur actuelle (ex. après un transfert compté comme un gain), sans toucher aux positions
+        const b = (await readBots())[kind], v = Number(b.last_value_usd);
+        if (!(v > 0)) return json({ error: "valeur inconnue" }, 409);
+        const mem = loadMemory(b.price_history); mem.dayStartValue = v;
+        await setBot(kind, { start_value_usd: v, price_history: mem as never });
+        return json({ ok: true, start: v });
+      }
       if (action === "pause") { await setBot(kind, { status: "paused", last_message: "En pause. Une position ouverte reste gérée par son stop." }); return json({ ok: true }); }
       if (action === "stop") { const r = await emergencyStop(kind); return json(r, r.ok ? 200 : 409); }
       if (action === "goal") {

@@ -372,6 +372,7 @@ function missionCard(kind, title) {
   </div>
   <div class="card" style="padding:10px 16px"><details data-d="wallet-${kind}" style="margin:0"><summary>▸ ${kind === "spot" ? "PORTEFEUILLE DU ROBOT" : "PORTEFEUILLE PERPS"}</summary>
     ${wallet ? `<div class="addr">${esc(wallet)}</div><button class="btn sm" data-copy="${esc(wallet)}">Copier l'adresse</button>
+      <button class="btn sm" style="margin-top:8px" data-rebase="${kind}">Remettre le gain à zéro</button>
       <p class="sub" style="margin:12px 0 0">Dépose des USDC (Solana) + environ 0,03 SOL pour les frais. ${kind === "perps" ? "Minimum 10 $ d'USDC pour ouvrir une position." : ""}</p>`
       : `<p class="sub" style="margin:8px 0 0">Secret ${kind === "spot" ? "BOT_WALLET_PRIVATE_KEY" : "PERPS_WALLET_PRIVATE_KEY"} absent dans Supabase (Edge Functions → Secrets).</p>`}
   </details></div>`;
@@ -522,7 +523,7 @@ function renderSet() {
     <div class="eyebrow">Connexions</div>
     <div class="card" style="font:14px/2 var(--mono)">${ok(s.spotWallet)} Wallet spot<br>${ok(s.perpsWallet)} Wallet perps<br>${ok(s.customRpc)} RPC Solana privé<br>${ok(s.telegram)} Telegram<br>${ok(s.cron)} Tick automatique chaque minute</div>
     <div class="eyebrow">Apparence</div>
-    <div class="card"><div class="chips" style="margin:0">${[["dark", "Sombre"], ["light", "Clair"], ["oled", "Noir pur (OLED)"]].map(([k, l]) => `<button class="chip ${THEME === k ? "on" : ""}" data-theme="${k}">${l}</button>`).join("")}</div>
+    <div class="card"><div class="chips" style="margin:0">${[["dark", "Sombre"], ["light", "Clair"], ["oled", "Noir pur (OLED)"]].map(([k, l]) => `<button class="chip ${THEME === k ? "on" : ""}" data-th="${k}">${l}</button>`).join("")}</div>
       <p class="sub" style="margin:8px 0 0">Noir pur : idéal sur les écrans OLED, économise la batterie.</p></div>
     <div class="eyebrow">Notifications sur le téléphone</div>
     <div class="card">
@@ -1144,7 +1145,7 @@ document.addEventListener("click", async e => {
     return on ? quickConfirm("soft", 1, "Mode EXTRA SOUPLE pour les deux bots : le chercheur accepte presque toutes les stratégies positives (≥ 3 trades, PF ≥ 1), et si rien ne passe le pilote prend quand même la meilleure. Chaque trade prend la moitié du risque normal. L'agent nouveaux tokens devient moins exigeant (les contrôles anti-arnaque restent). Plus de trades, mais moins prouvés : attends-toi à des pertes.") : quickApply("soft", false); }
   if (t.dataset.qfresh) { const on = !S.bots.spot.config?.newTokens; return on ? quickConfirm("fresh", 1, "Agent nouveaux tokens : il achètera (2 à 5 $ par token) des tokens lancés depuis moins de 24 h qui passent les garde-fous. Terrain très risqué.") : quickApply("fresh", false); }
   if (t.dataset.qok) { closeSheet(); const v = t.dataset.qv; return quickApply(t.dataset.qok, v === "1" && ["agag", "fresh", "soft"].includes(t.dataset.qok) ? true : +v); }
-  if (t.dataset.theme) { THEME = t.dataset.theme; document.documentElement.dataset.theme = THEME; try { localStorage.setItem("pulse_theme", THEME); } catch (err) {}
+  if (t.dataset.th) { THEME = t.dataset.th; document.documentElement.dataset.theme = THEME; try { localStorage.setItem("pulse_theme", THEME); } catch (err) {}
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content", getComputedStyle(document.documentElement).getPropertyValue("--bg").trim()); renderSet(); return; }
   if (t.id === "pushOn") return enablePush();
   if (t.id === "whatsUp") return whatsUp();
@@ -1156,6 +1157,10 @@ document.addEventListener("click", async e => {
   if (t.id === "selRun") { t.textContent = "Sélection en cours…"; try { const r = await api("/api/agents/selector/run", {method: "POST"}); toast(r.result); } catch (err) {} return loadAg(); }
   if (t.id === "voiceOk") { closeSheet(); const c = window.__pendingCmd; window.__pendingCmd = null; if (c) runCommand(c); return; }
   if (t.id === "cmdGo") { const v = $("#cmdIn").value.trim(); closeSheet(); if (v) runCommand(parseCommand(v)); return; }
+  if (t.dataset.rebase) { const k = t.dataset.rebase;
+    sheet(`<h3>Remettre le gain à zéro ?</h3><p>Le point de départ du ${k === "spot" ? "bot 1" : "bot 2"} devient sa valeur actuelle (${nf(S.bots[k].last_value_usd)} $). Utile si un dépôt ou un transfert a été compté comme un gain. Les positions et la mission continuent normalement.</p>
+      <div class="btns"><button class="btn" id="sheetCancel">Annuler</button><button class="btn go" data-dorebase="${k}">Remettre à zéro</button></div>`); return; }
+  if (t.dataset.dorebase) { closeSheet(); try { await api(`/api/${t.dataset.dorebase}/rebase`, {method: "POST"}); toast("Gain remis à zéro"); } catch (err) {} return refresh(); }
   if (t.dataset.copy) { try { await navigator.clipboard.writeText(t.dataset.copy); toast("Adresse copiée"); } catch (err) { toast("Copie impossible"); } return; }
   if (t.dataset.hf) { HF = t.dataset.hf; renderHist(); return; }
   if (t.dataset.pr) { document.querySelectorAll(`[data-pr="${t.dataset.pr}"]`).forEach(x => x.classList.toggle("on", x === t)); return; }
