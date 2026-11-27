@@ -1,0 +1,32 @@
+# Diagnostic manuel (lecture seule) : état des bots, des recherches et des réponses du cron. Aucun secret affiché.
+name: Diagnostic Pulse
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.62.10
+      - run: supabase link --project-ref "$PROJECT_REF" --password "$PGPASSWORD" >/dev/null 2>&1 || true
+      - name: Requêtes
+        run: |
+          URL=$(cat supabase/.temp/pooler-url 2>/dev/null)
+          [ -z "$URL" ] && URL="postgresql://postgres.$PROJECT_REF@aws-0-eu-central-1.pooler.supabase.com:5432/postgres"
+          URL=$(echo "$URL" | sed 's/:\[YOUR-PASSWORD\]//')
+          q() { psql "$URL" -X -A -F ' | ' -c "$1" 2>&1 | cut -c1-400; echo; }
+          q "select now()"
+          q "select max(created_at) as derniere, count(*) filter (where created_at > now() - interval '3 hours') as en_3h, count(*) as total from research"
+          q "select created_at, status_code, left(regexp_replace(content::text, '\s+', ' ', 'g'), 350) from net._http_response order by created_at desc limit 25"
+          q "select kind, status, last_tick_at, left(last_message, 200), config->>'researchPerps' as perps, config->>'extraSoft' as soft, config->>'autopilot' as pilot, jsonb_array_length(coalesce(config->'plans','[]'::jsonb)) as plans from bot_state"
+          q "select created_at, agent, left(detail, 250) from agent_log order by created_at desc limit 15"
+          q "select kind, active, count(*) from token_universe group by 1,2"
+          q "select jobname, schedule, active from cron.job"
+          q "select status, left(return_message,200), start_time from cron.job_run_details order by start_time desc limit 10"
