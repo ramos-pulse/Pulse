@@ -7,10 +7,11 @@
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <title>Pulse · Poste de contrôle</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#08100c;--card:#0e1712;--card2:#142119;--line:#1e2d24;--text:#e8f0e9;--muted:#7f9386;--lime:#c8f560;--amber:#f2b54f;--red:#ef5350;--green:#4ade80;--blue:#7cb8ff;
+:root{--bg:#08100c;--card:#0e1712;--card2:#142119;--line:#1e2d24;--text:#e8f0e9;--muted:#7f9386;--lime:#c8f560;--amber:#f2b54f;--red:#ef5350;--green:#4ade80;--blue:#7cb8ff;--onlime:#0b1405;--track:#1b2a1f;
   --mono:"JetBrains Mono",ui-monospace,Menlo,monospace;--sans:"Space Grotesk",-apple-system,Roboto,sans-serif;--sb:env(safe-area-inset-bottom)}
 *{box-sizing:border-box;min-width:0;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 var(--sans)}
@@ -109,10 +110,69 @@ nav svg{width:22px;height:22px}nav button.on{color:var(--lime)}
 .toast{position:fixed;left:50%;bottom:calc(96px + var(--sb));transform:translateX(-50%);background:var(--card2);border:1px solid var(--line);padding:11px 18px;border-radius:14px;z-index:40;max-width:90vw}
 #login{display:none;min-height:100vh;align-items:center;justify-content:center;padding:24px}
 #login input{width:100%;text-align:left;margin:16px 0}
-@media (prefers-reduced-motion:reduce){.dot.ok{animation:none}}
+/* ---- thèmes ---- */
+[data-theme=light]{--bg:#f3f6f1;--card:#fff;--card2:#eef3ea;--line:#d9e3d4;--text:#0f1a12;--muted:#5b6d60;--lime:#3d7a08;--amber:#a86a12;--red:#d23c38;--green:#178a46;--blue:#2563eb;--onlime:#fff;--track:#e1e9dc}
+[data-theme=oled]{--bg:#000;--card:#060908;--card2:#0c120e;--line:#151e18;--track:#111a14}
+[data-theme=light] .think{color:#2c3d31}[data-theme=light] .tip{background:#10170f;color:#eef5ea}
+[data-theme=light] .warnbox{color:#7a4f0d}
+.btn.go,.chip.on,.bubble.me{color:var(--onlime)}
+nav{background:color-mix(in srgb,var(--bg) 94%,transparent) !important}
+.bar,.seg i{background:var(--track)}
+/* ---- statut vivant ---- */
+.dot.pulse{position:relative}.dot.pulse::after{content:"";position:absolute;inset:-5px;border-radius:50%;border:2px solid currentColor;color:inherit;opacity:0;animation:ring 1.8s infinite}
+.dot.ok.pulse::after{color:var(--lime)}.dot.alert{background:var(--amber);box-shadow:0 0 10px var(--amber)}.dot.alert.pulse::after{color:var(--amber)}
+@keyframes ring{0%{transform:scale(.6);opacity:.8}100%{transform:scale(1.7);opacity:0}}
+/* ---- accueil ---- */
+.hero{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:16px 16px 10px;margin:10px 0 10px}
+.hero .t{font:600 10.5px var(--mono);letter-spacing:.2em;color:var(--muted);display:flex;align-items:center;gap:8px}
+.hero .n{font:700 clamp(34px,11vw,44px)/1.05 var(--mono);letter-spacing:-.03em;margin:8px 0 2px}
+.hero .n small{font-size:.5em;margin-left:6px}
+.periods{display:flex;gap:6px;margin:10px 0 4px}.periods button{font:600 11px var(--mono);padding:6px 10px;border-radius:99px;background:var(--card2);color:var(--muted)}.periods button.on{background:var(--lime);color:var(--onlime)}
+.chart{position:relative;touch-action:pan-y;user-select:none;-webkit-user-select:none}
+.chart svg{display:block;width:100%}
+.chart .cur{position:absolute;top:0;bottom:16px;width:1px;background:var(--text);opacity:.5;display:none;pointer-events:none}
+.chart .lbl{position:absolute;top:-4px;transform:translateX(-50%);background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:4px 8px;font:600 11.5px var(--mono);white-space:nowrap;display:none;pointer-events:none;z-index:2}
+.flash-up{animation:fu 1s}.flash-down{animation:fd 1s}
+@keyframes fu{0%{box-shadow:0 0 0 2px var(--green) inset}100%{box-shadow:none}}@keyframes fd{0%{box-shadow:0 0 0 2px var(--red) inset}100%{box-shadow:none}}
+/* ---- réglages rapides sur la carte d'un bot ---- */
+.srow{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap}
+.qs{display:flex;flex-direction:column;align-items:flex-end;gap:6px;margin-left:auto}
+.qs .lev{display:flex;gap:4px}.qs .lev button{font:600 10.5px var(--mono);padding:5px 7px;border-radius:8px;background:var(--card2);color:var(--muted);border:1px solid var(--line)}
+.qs .lev button.on{background:var(--lime);color:var(--onlime);border-color:var(--lime)}.qs .lev button.hot.on{background:var(--amber);border-color:var(--amber)}
+.seg{display:flex;align-items:center;gap:6px;font:600 9.5px var(--mono);letter-spacing:.08em;color:var(--muted)}
+.seg span.bars{display:flex;gap:3px}.seg i{display:block;width:16px;height:8px;border-radius:3px;cursor:pointer}
+.seg i.on{background:var(--lime)}.seg i.on.hot{background:var(--amber)}.seg i.on.red{background:var(--red)}
+.qs .tg{font:600 10px var(--mono);padding:5px 8px;border-radius:8px;background:var(--card2);color:var(--muted);border:1px solid var(--line)}.qs .tg.on{background:var(--amber);color:#1a1205;border-color:var(--amber)}
+/* ---- barre stop → objectif ---- */
+.pbar{position:relative;height:34px;margin:14px 2px 0}
+.pbar .t{position:absolute;top:13px;left:0;right:0;height:8px;border-radius:8px;background:linear-gradient(90deg,rgba(239,83,80,.55),var(--track) 45%,rgba(74,222,128,.55))}
+.pbar .f{position:absolute;top:13px;height:8px;border-radius:8px}
+.pbar .m{position:absolute;top:7px;width:2px;height:20px;background:var(--muted)}
+.pbar .n{position:absolute;top:6px;width:22px;height:22px;margin-left:-11px;border-radius:50%;background:var(--text);border:4px solid var(--card);transition:left .6s}
+.pl{display:flex;justify-content:space-between;font:10.5px var(--mono);color:var(--muted);margin-top:2px}
+/* ---- squelettes de chargement ---- */
+.skel{background:linear-gradient(90deg,var(--card) 25%,var(--card2) 50%,var(--card) 75%);background-size:200% 100%;animation:sk 1.3s infinite;border-radius:14px}
+@keyframes sk{to{background-position:-200% 0}}
+/* ---- agents ---- */
+.agh{display:flex;align-items:center;gap:12px}
+.ava{width:42px;height:42px;border-radius:14px;display:grid;place-items:center;background:var(--card2);border:1px solid var(--line);flex:none;position:relative}
+.ava svg{width:24px;height:24px;color:var(--lime)}
+.ava .zz{position:absolute;right:-4px;bottom:-4px;display:flex;gap:2px;background:var(--card);border:1px solid var(--line);border-radius:99px;padding:3px 4px}
+.ava .zz b{width:4px;height:4px;border-radius:50%;background:var(--lime);animation:bob 1.2s infinite}.ava .zz b:nth-child(2){animation-delay:.2s}.ava .zz b:nth-child(3){animation-delay:.4s}
+@keyframes bob{0%,60%,100%{transform:translateY(0);opacity:.5}30%{transform:translateY(-3px);opacity:1}}
+.mrow{padding:12px 0;border-bottom:1px solid var(--line)}.mrow:last-child{border-bottom:0}
+.mrow .top2{display:flex;justify-content:space-between;align-items:center;gap:8px}
+/* ---- micro ---- */
+#mic{position:fixed;right:16px;bottom:calc(84px + var(--sb));z-index:25;width:52px;height:52px;border-radius:50%;background:var(--card2);border:1px solid var(--line);display:grid;place-items:center;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+#mic svg{width:24px;height:24px;color:var(--lime)}#mic.on{background:var(--lime)}#mic.on svg{color:var(--onlime)}#mic.on::after{content:"";position:absolute;inset:-6px;border-radius:50%;border:2px solid var(--lime);animation:ring 1.4s infinite}
+/* ---- mini-jeu ---- */
+.game .score{display:flex;justify-content:space-between;font:600 12px var(--mono);color:var(--muted);margin-bottom:8px}
+.game .res{font:700 18px var(--sans);text-align:center;margin:8px 0;min-height:26px}
+@media (prefers-reduced-motion:reduce){.dot.ok,.dot.pulse::after,.skel,.ava .zz b,#mic.on::after{animation:none}}
 </style>
 </head>
 <body>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem("pulse_theme")||"dark"}catch(e){}</script>
 <div id="login"><div class="card" style="width:100%;max-width:400px">
   <div class="brand">PULSE</div>
   <h2 style="margin:14px 0 4px;font:600 24px var(--sans)">Connexion</h2>
@@ -128,7 +188,7 @@ nav svg{width:22px;height:22px}nav button.on{color:var(--lime)}
   <div class="top"><div class="brand">POSTE DE CONTRÔLE</div><div class="live"><span class="dot" id="dot"></span><span id="fresh">connexion…</span></div></div>
   <main>
     <div id="alerts"></div>
-    <section class="page on" id="p-home"></section>
+    <section class="page on" id="p-home"><div class="skel" style="height:150px;margin:10px 0"></div><div class="sum"><div class="skel" style="height:110px"></div><div class="skel" style="height:110px"></div></div><div class="skel" style="height:260px;margin-top:22px"></div><div class="skel" style="height:260px;margin-top:22px"></div></section>
     <section class="page" id="p-hist"></section>
     <section class="page" id="p-bt"></section>
     <section class="page" id="p-ag"></section>
@@ -144,6 +204,7 @@ nav svg{width:22px;height:22px}nav button.on{color:var(--lime)}
 </div>
 
 <div class="sheet-bg" id="sheet"><div class="sheet" id="sheetBody"></div></div>
+<button id="mic" aria-label="Commande vocale" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
 
 <script>
 {
@@ -192,11 +253,11 @@ $("#loginBtn").onclick = () => { BASE = serverUrl($("#srv").value); TOKEN = $("#
   const box = $("#loginErr"); box.style.display = "block"; box.textContent = "Connexion…"; refresh(); };
 
 $("#nav").onclick = e => { const b = e.target.closest("button"); if (b) go(b.dataset.p); };
-function go(p) { PAGE = p; if (p === "set") $("#p-set").innerHTML = ""; if (p === "ag") loadAg(); document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
+function go(p) { PAGE = p; if (p === "set") $("#p-set").innerHTML = ""; if (p === "ag") loadAg(); if (p === "hist") loadReport(); if (p === "home") loadCurve(); document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
   document.querySelectorAll(".page").forEach(x => x.classList.toggle("on", x.id === "p-" + p)); render(); scrollTo(0, 0); }
 
 async function refresh() {
-  try { S = await api("/api/state"); lastOk = Date.now(); $("#login").style.display = "none"; $("#app").style.display = "block"; notifyNew(); render(); }
+  try { S = await api("/api/state"); lastOk = Date.now(); $("#login").style.display = "none"; $("#app").style.display = "block"; $("#mic").style.display = "grid"; notifyNew(); if (!CURVE) loadCurve(); if (!SCRUB) render(); else fresh(); }
   catch (e) { if (!lastOk && e.message !== "auth") showLogin(e.message); fresh(); }
 }
 function fresh() { const s = lastOk ? (Date.now() - lastOk) / 1000 : 999, ok = s < 10;
@@ -206,9 +267,10 @@ async function notifyNew() {
   const all = ["spot", "perps"].flatMap(k => S.bots[k].trades).filter(t => new Date(t.created_at).getTime() > seen);
   if (!all.length) return;
   seen = Math.max(...all.map(t => new Date(t.created_at).getTime())); try { localStorage.setItem("pulse_seen", seen); } catch (e) {}
+  try { navigator.vibrate?.([35, 60, 35]); } catch (e) {} // petite vibration à chaque trade
   for (const t of all.slice(0, 3)) {
-    const act = (t.side || t.action || "").toUpperCase();
-    const msg = `${{BUY: "ACHAT", SELL: "VENTE", OPEN: "OUVERTURE", CLOSE: "FERMETURE"}[act] || act} ${t.symbol || t.asset || ""}${t.pnl_usd != null ? " · " + sg(t.pnl_usd) + " $" : ""}`;
+    const act = (t.action || t.side || "").toUpperCase();
+    const msg = `${{BUY: "ACHAT", SELL: "VENTE", OPEN: "OUVERTURE", CLOSE: "FERMETURE", DEPOSIT: "DÉPÔT", WITHDRAW: "RETRAIT"}[act] || act} ${t.symbol || t.asset || ""}${t.pnl_usd != null ? " · " + sg(t.pnl_usd) + " $" : ""}`;
     if (document.hidden && "Notification" in window && Notification.permission === "granted") {
       const reg = await navigator.serviceWorker?.getRegistration(); reg?.showNotification("Pulse", {body: msg, icon: "icon-192.png"});
     } else toast(msg);
@@ -241,10 +303,10 @@ function summary() {
   const tile = (k, label) => { const b = S.bots[k], [sc, st] = STATUS[b.status] || ["off", b.status];
     const v = b.last_value_usd, start = b.start_value_usd, g = v != null && start ? v - start : null;
     const pos = (b.positions || []).map(p => k === "perps" ? `${p.side === "short" ? "SHORT" : "LONG"} ${p.symbol}` : p.symbol).join(", ");
-    return `<a href="#card-${k}"><div class="t"><span class="dot ${sc === "run" ? "ok" : sc === "pause" ? "warn" : ""}"></span>${label} · ${st}</div>
-      <div class="n">${nf(v)} $</div><div class="k ${g == null ? "" : cl(g)}">${g == null ? "—" : `${sg(g)} $ (${sg(g / start * 100)} %)`}${pos ? ` · ${esc(pos)}` : ""}</div>${spark(b.curve)}</a>`; };
+    return `<a href="#card-${k}"><div class="t"><span class="dot ${dotClass(k)}"></span>${label} · ${st}</div>
+      <div class="n" data-roll="tile-${k}" data-v="${v ?? ""}">${nf(v)} $</div><div class="k ${g == null ? "" : cl(g)}">${g == null ? "—" : `${sg(g)} $ (${sg(g / start * 100)} %)`}${pos ? ` · ${esc(pos)}` : ""}</div>${spark(b.curve)}</a>`; };
   const br = S.protections?.breakerTrippedAt ? `<div class="warnbox" style="margin-top:10px">⚠ Disjoncteur déclenché ${ago(new Date(S.protections.breakerTrippedAt).toISOString())} : les deux bots ont été arrêtés après une perte de plus de ${S.protections.breakerPct} %. Relance une mission quand tu es prêt.</div>` : "";
-  return `<div class="sum">${tile("spot", "Bot 1")}${tile("perps", "Bot 2")}</div>${br}`;
+  return `${hero()}<div class="sum">${tile("spot", "Bot 1")}${tile("perps", "Bot 2")}</div>${br}${staleWarn()}`;
 }
 /** Courbe du capital (mini graphique) : vert si au-dessus du point de départ, rouge sinon. */
 function spark(c) {
@@ -267,8 +329,6 @@ function missionCard(kind, title) {
   const inPos = list.length > 0;
   const posBlock = p => {
     const cur = p.live?.price, entry = p.entry, stop = p.stop, side = p.side;
-    const lo = Math.min(stop ?? entry, entry, cur ?? entry), hi = Math.max(stop ?? entry, entry, cur ?? entry, p.best ?? entry);
-    const at = v => hi > lo ? ((v - lo) / (hi - lo) * 100).toFixed(1) : 50;
     return `<div class="sep"></div>
       <div class="grid g3" style="margin-top:0">
         <div><div class="k">Position</div><div class="v">${kind === "perps" ? (side === "short" ? "SHORT ▼ " : "LONG ▲ ") : ""}${esc(p.symbol)}${p.interval === "15m" ? ' <span class="mut" style="font-weight:400">15m</span>' : ""}</div></div>
@@ -278,16 +338,16 @@ function missionCard(kind, title) {
         <div><div class="k">Cours</div><div class="v">${px(cur)} $</div></div>
         <div data-tip="${p.partialDone ? (kind === "spot" ? "La moitié a déjà été vendue avec un gain, et le stop du reste est au prix d'entrée : cette position ne peut plus perdre." : "Le gain a atteint 1,5 fois le risque : le stop est remonté au prix d'entrée, la position ne peut plus perdre.") : "Le stop suit le prix : il ne descend jamais, il monte quand la position gagne."}"><div class="k">Stop</div><div class="v amber">${px(stop)} $${p.partialDone ? " 🔒" : ""}</div></div>
       </div>
-      ${stop && cur ? `<div class="range"><div class="t" style="${side === "short" ? "transform:scaleX(-1)" : ""}"></div><div class="e" style="left:${at(entry)}%"></div><div class="n" style="left:${at(cur)}%"></div></div>
-      <div class="rl"><span>${side === "short" ? "meilleur" : "stop"} ${px(lo)}</span><span>${side === "short" ? "stop" : "meilleur"} ${px(hi)}</span></div>` : ""}`;
+      ${posBar(p)}
+      <button class="btn sm" style="width:100%;margin-top:10px" data-chart="${kind}|${esc(p.symbol)}|${p.interval === "15m" ? "15m" : "1h"}">📈 Graphique et trades</button>`;
   };
   const pos = list.map(posBlock).join("");
   const running = b.status === "running", paused = b.status === "paused";
   const wallet = S.wallets[kind];
   return `<div class="eyebrow" id="card-${kind}">${title}</div>
   <div class="card">
-    <div class="status ${sc}"><span class="dot ${sc === "run" ? "ok" : sc === "pause" ? "warn" : ""}"></span>${st}${m.pending ? ' <span class="pill">tx en cours</span>' : ""}</div>
-    <div class="big">${nf(value)}<small>$</small></div>
+    <div class="srow"><div class="status ${sc}"><span class="dot ${dotClass(kind)}"></span>${st}${m.pending ? ' <span class="pill">tx en cours</span>' : ""}</div>${quickSettings(kind)}</div>
+    <div class="big" data-roll="big-${kind}" data-v="${value ?? ""}">${nf(value)}<small>$</small></div>
     <div class="sub">sur un objectif de ${nf(goal, 0)} $${start ? ` · départ ${nf(start)} $` : ""}</div>
     <div class="bar"><i style="width:${prog}%"></i></div>
     <div class="grid">
@@ -326,7 +386,8 @@ function render() {
   const spotStrat = sc.autopilot ? `Pilote auto${sc.plans?.length ? " · " + sc.plans.map(p => p.symbol + (p.interval === "15m" ? " 15m" : "")).join(", ") : " · en attente"}`
     : sc.plans?.length ? `Chercheur · ${sc.plans.map(p => p.symbol).join(", ")}` : sc.strategy === "rsi" ? (sc.rsi.naive ? "RSI naïf" : "RSI") : "Tendance";
   if (PAGE === "home") { $("#p-home").innerHTML = summary() + missionCard("spot", `Bot 1 · Spot Solana · ${spotStrat}`) + missionCard("perps", `Bot 2 · Perps · ${perpsLabel()}`) + bilanCard() + rulesNote();
-    document.querySelectorAll("#p-home details[data-d]").forEach(d => { d.open = OPEN.has(d.dataset.d); }); } // volets ouverts conservés au rafraîchissement
+    document.querySelectorAll("#p-home details[data-d]").forEach(d => { d.open = OPEN.has(d.dataset.d); }); // volets ouverts conservés au rafraîchissement
+    rolls(); bindChart(); }
   if (PAGE === "hist") renderHist();
   if (PAGE === "bt") renderBt();
   if (PAGE === "ag" && !$("#p-ag").innerHTML) renderAg();
@@ -388,7 +449,7 @@ function renderHist() {
   const closes = rows.filter(t => t.pnl_usd != null), wins = closes.filter(t => t.pnl_usd > 0);
   const gw = wins.reduce((s, t) => s + t.pnl_usd, 0), gl = -closes.filter(t => t.pnl_usd <= 0).reduce((s, t) => s + t.pnl_usd, 0);
   const net = gw - gl, pf = gl ? gw / gl : gw ? Infinity : 0;
-  $("#p-hist").innerHTML = `<div class="eyebrow">Historique</div>
+  $("#p-hist").innerHTML = `${reportCard()}<div class="eyebrow">Historique</div>
     <div class="chips">${[["all", "Tout"], ["spot", "Spot"], ["perps", "Perps"]].map(([k, l]) => `<button class="chip ${HF === k ? "on" : ""}" data-hf="${k}">${l}</button>`).join("")}</div>
     <div class="card"><div class="grid" style="margin-top:0">
       <div><div class="k">Trades clôturés</div><div class="v">${closes.length}</div></div>
@@ -427,7 +488,10 @@ function whyTrade(t, k) {
 
 function renderBt() {
   const el = $("#p-bt");
-  let body = `<div class="eyebrow">Backtest · 60 jours</div>
+  let body = `<div class="eyebrow">Détente</div><div class="card"><div class="agh">${avatar("game")}<div><div class="v txt" style="font-weight:600">🎮 Devine la bougie</div>
+      <div class="l2">${GAME.best ? `Record : ${GAME.best} bonnes réponses d'affilée` : "Hausse ou baisse ? Sur de vrais graphiques passés, sans argent."}</div></div></div>
+      <button class="btn go sm" style="width:100%;margin-top:12px" id="gameStart">Jouer</button></div>
+    <div class="eyebrow">Backtest · 60 jours</div>
     <div class="card"><p class="sub" style="margin-top:0">Rejoue la stratégie sur les vrais prix des 60 derniers jours, frais inclus, avec les 3 réglages que le bot choisit chaque jour. Simulation du passé : ça ne garantit pas le futur.</p>
     <button class="btn go" style="width:100%" id="btRun">${BT === "loading" || BT?.partial ? "Calcul en cours…" : "Lancer le backtest"}</button></div>`;
   if (BT && BT !== "loading") {
@@ -457,9 +521,25 @@ function renderSet() {
     ${perpsCard()}
     <div class="eyebrow">Connexions</div>
     <div class="card" style="font:14px/2 var(--mono)">${ok(s.spotWallet)} Wallet spot<br>${ok(s.perpsWallet)} Wallet perps<br>${ok(s.customRpc)} RPC Solana privé<br>${ok(s.telegram)} Telegram<br>${ok(s.cron)} Tick automatique chaque minute</div>
+    <div class="eyebrow">Apparence</div>
+    <div class="card"><div class="chips" style="margin:0">${[["dark", "Sombre"], ["light", "Clair"], ["oled", "Noir pur (OLED)"]].map(([k, l]) => `<button class="chip ${THEME === k ? "on" : ""}" data-theme="${k}">${l}</button>`).join("")}</div>
+      <p class="sub" style="margin:8px 0 0">Noir pur : idéal sur les écrans OLED, économise la batterie.</p></div>
+    <div class="eyebrow">Notifications sur le téléphone</div>
+    <div class="card">
+      <p class="sub" style="margin:0 0 6px">Trades, alertes (chien de garde, sandwich, réserve de SOL) et bilan du soir, même app fermée.</p>
+      <div class="field"><span>Notifications push</span><button class="btn sm" id="pushOn">${PUSH_ON ? "Activées ✓" : "Activer"}</button></div>
+      ${PUSH_ON ? `<div class="field"><span>Envoyer un test</span><button class="btn sm" id="pushTest">Tester</button></div>` : ""}
+      <p class="sub" style="margin:8px 0 0">Sur Brave : si rien n'arrive, active « Utiliser les services Google pour la messagerie push » dans Réglages → Confidentialité et sécurité, puis réessaie.</p>
+    </div>
+    <div class="eyebrow">Commande vocale</div>
+    <div class="card">
+      <p class="sub" style="margin:0 0 6px">Bouton micro en bas à droite. Exemples : « mets le bot 2 en pause », « levier x5 », « agressivité prudent », « solde », « reprends le bot 1 ». Les ordres sensibles (levier x100 et plus, très agressif, arrêt d'urgence) demandent une confirmation.</p>
+      <label class="field"><span>« Hey Pulse » (app ouverte)</span><input type="checkbox" id="wakeOn" ${WAKE ? "checked" : ""} style="width:26px;height:26px"></label>
+      <p class="sub" style="margin:8px 0 0">${SR ? "L'écoute ne marche que quand l'app est ouverte à l'écran, et consomme un peu plus de batterie." : "⚠ Ce navigateur ne fournit pas la reconnaissance vocale (c'est le cas de Brave). Le micro ouvre une zone de texte : appuie sur le micro de ton clavier pour dicter. « Hey Pulse » et la reconnaissance directe marchent dans Chrome."}</p>
+    </div>
     <div class="eyebrow">Application</div>
     <div class="card">
-      <div class="field"><span>Notifications sur ce téléphone</span><button class="btn sm" id="notif">${"Notification" in window && Notification.permission === "granted" ? "Activées ✓" : "Activer"}</button></div>
+      <div class="field"><span>Notifications (app ouverte)</span><button class="btn sm" id="notif">${"Notification" in window && Notification.permission === "granted" ? "Activées ✓" : "Activer"}</button></div>
       <div class="field"><span>Installer l'app</span><button class="btn sm" id="install">Installer</button></div>
       <div class="field"><span>Se déconnecter</span><button class="btn sm" id="logout">Quitter</button></div>
     </div>${rulesNote()}`;
@@ -519,13 +599,13 @@ async function loadAg() { try { [AG, AGS] = await Promise.all([api("/api/researc
 function mathCard() {
   const m = AGS?.math; if (!m) return "";
   const pct = x => x == null ? "—" : `${nf(x, 1)} %`;
-  const reg = { "tendance": ["ok", "Tendance"], "retour à la moyenne": ["mid", "Retour à la moyenne"], "hasard": ["", "Hasard"] };
+  const reg = { "tendance": ["ok", "Tendance"], "retour à la moyenne": ["mid", "Retour moy."], "hasard": ["", "Hasard"] };
   const rows = m.insights.map(x => { const [c, label] = reg[x.regime] || ["", x.regime];
-    return `<div class="row"><div><div class="l1">${esc(x.market)} <span class="mut" style="font-weight:400">${x.interval === "15m" ? "15 min" : "1 h"}</span></div>
-      <div class="l2">Hurst ${nf(x.hurst)}${x.half_life ? ` · demi-vie ${nf(x.half_life, 0)} bougies` : ""}${x.significant ? " · effet significatif" : ""}${x.live_regime ? ` · <b>en ce moment : ${esc(x.live_regime)}</b>` : ""}</div></div>
-      <div class="r"><span class="pill ${c}">${label}</span></div></div>`; }).join("");
+    const name = String(x.market).replace(/ · 15 min$/, ""); // le nom contient déjà « · 15 min » : pas de doublon
+    return `<div class="mrow"><div class="top2"><div class="l1">${esc(name)} <span class="mut" style="font-weight:400">${x.interval === "15m" ? "15 min" : "1 h"}</span></div><span class="pill ${c}">${label}</span></div>
+      <div class="l2" style="line-height:1.5">Hurst ${nf(x.hurst)}${x.half_life ? ` · demi-vie ${nf(x.half_life, 0)} bougies` : ""}${x.significant ? " · effet significatif" : ""}${x.live_regime ? ` · <b>en ce moment : ${esc(x.live_regime)}</b>` : ""}</div></div>`; }).join("");
   return `<div class="eyebrow">Agent mathématicien</div><div class="card">
-    <div class="status run"><span class="dot ok"></span>Analyse les marchés à chaque cycle</div>
+    <div class="agh">${avatar("math", true)}<div class="status run" style="font-size:12px;letter-spacing:.12em">Analyse les marchés à chaque cycle</div></div>
     <p class="sub" style="margin:10px 0 0">Il mesure chaque marché avec des outils statistiques (ratio de variance de Lo-MacKinlay, exposant de Hurst, demi-vie du retour à la moyenne) pour savoir si les mouvements se prolongent, se corrigent, ou relèvent du hasard. Il en déduit des réglages et les propose au chercheur, qui les teste sur la période jamais vue comme les autres. Un marché « hasard » n'a pas d'avantage exploitable.</p>
     <div class="grid"><div><div class="k">Ses idées validées</div><div class="v">${pct(m.stats.math.rate)}</div><div class="l2">${m.stats.math.promising} / ${m.stats.math.tested}</div></div>
       <div><div class="k">Idées du chercheur</div><div class="v">${pct(m.stats.chercheur.rate)}</div><div class="l2">${m.stats.chercheur.promising} / ${m.stats.chercheur.tested}</div></div></div>
@@ -537,7 +617,7 @@ function swapCard() {
   const line = r => `<div class="row"><div><div class="l1">${r.action === "vente" ? "VENTE" : "RÉCUP"} <span class="mut" style="font-weight:400">${r.wallet === "spot" ? "spot" : "perps"}</span></div><div class="l2">${esc(r.detail)}</div></div>
     <div class="r">${r.action === "vente" ? `${nf(r.usd)} $` : `+${nf(r.sol, 4)} SOL`}<div class="l2">${ago(r.created_at)}${r.signature ? ` · <a href="https://solscan.io/tx/${esc(r.signature)}" target="_blank" rel="noopener">tx ↗</a>` : ""}</div></div></div>`;
   return `<div class="eyebrow">Agent swap</div><div class="card">
-    <div class="status ${w.auto ? "run" : "off"}"><span class="dot ${w.auto ? "ok" : ""}"></span>${w.auto ? "Nettoyage automatique" : "Automatique coupé"}</div>
+    <div class="agh">${avatar("swap", SW_BUSY)}<div class="status ${w.auto ? "run" : "off"}" style="font-size:12px;letter-spacing:.12em">${w.auto ? "Nettoyage automatique" : "Automatique coupé"}</div></div>
     <p class="sub" style="margin:10px 0 0">Comme le bouton « Reclaim » de Jupiter, mais tout seul, sur les wallets des bots : il revend les restes de tokens (au moins ${nf(w.rules.minSellUsd)} $) en USDC et ferme les comptes de tokens vides pour récupérer le SOL de caution. Il ne détruit jamais de tokens et ne touche ni à l'USDC ni aux positions en cours.</p>
     <div class="grid"><div><div class="k">SOL récupéré</div><div class="v up">+${nf(w.totals.sol, 4)}</div></div><div><div class="k">Restes revendus</div><div class="v">${nf(w.totals.usd)} $</div></div>
       <div><div class="k">Dernier passage</div><div class="v">${w.lastRun ? "il y a " + ago(w.lastRun) : "jamais"}</div></div><div><div class="k">Prochain</div><div class="v">${w.auto ? (w.nextRun ? new Date(w.nextRun).toLocaleString("fr-FR", {weekday: "short", hour: "2-digit", minute: "2-digit"}) : "dans 5 min") : "—"}</div></div></div>
@@ -631,11 +711,12 @@ function renderAg() {
       </div>
       ${r.live ? `<div class="sep"></div><div class="k">En réel (trades des bots)</div><div class="v ${cl(r.live.pnlUsd)}" style="font-size:15px">${r.live.trades} trades · ${sg(r.live.pnlUsd)} $ · PF ${nf(r.live.profitFactor)}</div>` : ""}
       ${r.verdict === "déçue en réel" || r.verdict === "périmée" ? `<p class="sub" style="margin:8px 0 0">${esc(r.why)}</p>` : ""}
-      <button class="btn sm" style="width:100%;margin-top:14px" data-apply="${r.id}" data-desc="${esc(r.description)}" data-kind="${r.kind}">${r.kind === "spot" ? "Ajouter au bot spot" : "Appliquer au bot perps"}</button></div>`).join("");
-  el.innerHTML = `${mathCard()}${swapCard()}<div class="eyebrow">Le Chercheur</div>
-    <div class="card"><div class="status run"><span class="dot ok"></span>Recherche en continu</div>
+      <button class="btn sm" style="width:100%;margin-top:14px" data-sim="${r.id}">📊 Voir le backtest</button>
+      <button class="btn sm" style="width:100%;margin-top:8px" data-apply="${r.id}" data-desc="${esc(r.description)}" data-kind="${r.kind}">${r.kind === "spot" ? "Ajouter au bot spot" : "Appliquer au bot perps"}</button></div>`).join("");
+  el.innerHTML = `${AG ? "" : `<div class="skel" style="height:180px;margin-top:20px"></div>`}${mathCard()}${swapCard()}${lot2Cards()}<div class="eyebrow">Le Chercheur</div>
+    <div class="card"><div class="agh">${avatar("search", AG_BUSY || (AG?.lastAt && Date.now() - new Date(AG.lastAt) < 90000))}<div class="status run" style="font-size:12px;letter-spacing:.12em">Recherche en continu</div></div>
       <div class="big" style="font-size:40px">${AG ? nf(AG.tested, 0) : "…"}<small>stratégies testées</small></div>
-      <div class="sub">Toutes les 5 minutes, il invente et teste de nouvelles stratégies, puis les juge sur 30 jours qu'il n'a jamais vus.${AG?.lastAt ? ` Dernière recherche il y a ${ago(AG.lastAt)}.` : ""}</div>
+      <div class="sub">Toutes les 5 minutes, il invente et teste de nouvelles stratégies (tendance, RSI, range, ORB, VWAP, compression, volume, funding), puis les juge sur une période qu'il n'a jamais vue, et re-teste chaque semaine celles qu'il garde.${AG?.lastAt ? ` Dernière recherche il y a ${ago(AG.lastAt)}.` : ""}</div>
       <button class="btn sm" style="width:100%;margin-top:14px" id="agRun">${AG_BUSY ? "Recherche en cours…" : "Chercher maintenant"}</button></div>
     ${pilot}
     <div class="eyebrow">Ses meilleures découvertes</div>
@@ -658,11 +739,379 @@ async function sendChat() {
   AG_BUSY = false; renderAg(); const log = $("#chatLog"); log?.lastElementChild?.scrollIntoView({block: "end"});
 }
 
+// ================================================================ LOT 3 : accueil, graphiques, réglages rapides, agents, jeu, voix
+let CURVE = null, RANGE = "7j", SCRUB = false, REP = null, THEME = "dark", PUSH_ON = false, WAKE = false;
+try { RANGE = localStorage.getItem("pulse_range") || "7j"; THEME = localStorage.getItem("pulse_theme") || "dark"; WAKE = localStorage.getItem("pulse_wake") === "1"; PUSH_ON = localStorage.getItem("pulse_push") === "1"; } catch (e) {}
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const isBrave = !!navigator.brave;
+async function loadCurve() { try { CURVE = await api("/api/curve"); if (PAGE === "home" && !SCRUB) render(); } catch (e) {} }
+async function loadReport() { try { REP = await api("/api/report"); if (PAGE === "hist") renderHist(); } catch (e) {} }
+setInterval(() => { if (!document.hidden && PAGE === "home" && lastOk) loadCurve(); }, 300000);
+
+/** Statut vivant : vert qui pulse en mission, gris en pause, orange en cas d'alerte. */
+function botAlert(k) {
+  const b = S.bots[k]; if (b.status !== "running" && b.status !== "paused") return false;
+  const stale = b.status === "running" && b.last_tick_at && Date.now() - new Date(b.last_tick_at) > 180000;
+  return stale || (b.memory?.errStreak ?? 0) >= 3 || /^(Erreur|Données indisponibles)/.test(b.last_message || "");
+}
+function dotClass(k) { const st = S.bots[k].status; return botAlert(k) ? "alert pulse" : st === "running" ? "ok pulse" : st === "success" ? "ok" : ""; }
+function staleWarn() {
+  return ["spot", "perps"].filter(k => S.bots[k].status === "running" && S.bots[k].last_tick_at && Date.now() - new Date(S.bots[k].last_tick_at) > 180000)
+    .map(k => `<div class="warnbox">⚠ ${k === "spot" ? "Bot 1" : "Bot 2"} : aucun contrôle depuis ${ago(S.bots[k].last_tick_at)}. Le chien de garde t'enverra une alerte s'il ne repart pas.</div>`).join("");
+}
+
+/** Courbe totale (bot 1 + bot 2), un point par heure. */
+function totalCurve() {
+  const a = CURVE?.spot?.length ? CURVE.spot : S.bots.spot.curve || [], b = CURVE?.perps?.length ? CURVE.perps : S.bots.perps.curve || [];
+  const ts = [...new Set([...a, ...b].map(x => Math.floor(x.t / 3600000) * 3600000))].sort((x, y) => x - y);
+  let ia = 0, ib = 0, va = null, vb = null; const out = [];
+  for (const t of ts) {
+    while (ia < a.length && a[ia].t < t + 3600000) va = a[ia++].v;
+    while (ib < b.length && b[ib].t < t + 3600000) vb = b[ib++].v;
+    if (va != null || vb != null) out.push({t, v: (va ?? 0) + (vb ?? 0)});
+  }
+  const now = (S.bots.spot.last_value_usd ?? 0) + (S.bots.perps.last_value_usd ?? 0);
+  if (out.length) out.push({t: Date.now(), v: now});
+  return out;
+}
+const PERIODS = {"24h": 864e5, "7j": 6048e5, "30j": 2592e6, "tout": Infinity};
+function hero() {
+  const v = (S.bots.spot.last_value_usd ?? 0) + (S.bots.perps.last_value_usd ?? 0);
+  const c = totalCurve(), ref = c.filter(x => x.t <= Date.now() - 864e5).at(-1) ?? c[0];
+  const d = ref ? v - ref.v : null;
+  const live = ["spot", "perps"].map(dotClass);
+  const pts = c.filter(x => x.t >= Date.now() - PERIODS[RANGE]);
+  return `<div class="hero"><div class="t"><span class="dot ${live.find(x => x.startsWith("alert")) || live.find(x => x.startsWith("ok")) || ""}"></span>CAPITAL TOTAL</div>
+    <div class="n" data-roll="total" data-v="${v}">${nf(v)}<small>$</small></div>
+    <div class="k ${cl(d)}">${d == null ? "variation du jour dans 1 h" : `${sg(d)} $ (${sg(ref.v ? d / ref.v * 100 : 0)} %) sur 24 h`}</div>
+    <div class="periods">${Object.keys(PERIODS).map(p => `<button class="${RANGE === p ? "on" : ""}" data-range="${p}">${p}</button>`).join("")}</div>
+    ${bigChart(pts)}</div>`;
+}
+/** Grand graphique du capital : glisser le doigt pour lire la valeur et l'heure. */
+function bigChart(pts) {
+  if (pts.length < 2) return `<div class="l2" style="padding:18px 0;text-align:center">La courbe apparaîtra après la première heure de mission.</div>`;
+  const W = 340, H = 110, vs = pts.map(x => x.v), lo = Math.min(...vs), hi = Math.max(...vs), t0 = pts[0].t, t1 = pts.at(-1).t;
+  const X = t => (t - t0) / Math.max(1, t1 - t0) * W, Y = v => hi > lo ? H - 6 - (v - lo) / (hi - lo) * (H - 14) : H / 2;
+  const col = vs.at(-1) >= vs[0] ? "var(--green)" : "var(--red)", line = pts.map(x => `${X(x.t).toFixed(1)},${Y(x.v).toFixed(1)}`).join(" ");
+  window.__chart = {pts, t0, t1, W};
+  return `<div class="chart" id="bigChart"><div class="cur"></div><div class="lbl"></div>
+    <svg viewBox="0 0 ${W} ${H}" height="${H}" preserveAspectRatio="none"><defs><linearGradient id="cg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="${col}" stop-opacity=".28"/><stop offset="1" stop-color="${col}" stop-opacity="0"/></linearGradient></defs>
+      <polygon points="0,${H} ${line} ${W},${H}" fill="url(#cg)"/><polyline points="${line}" fill="none" stroke="${col}" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>
+    <div class="pl"><span>${new Date(t0).toLocaleDateString("fr-FR", {day: "numeric", month: "short"})}</span><span>${nf(lo)} – ${nf(hi)} $</span><span>maintenant</span></div></div>`;
+}
+function bindChart() {
+  const el = $("#bigChart"); if (!el || el.__b) return; el.__b = true;
+  const show = e => { const C = window.__chart; if (!C) return; const r = el.getBoundingClientRect(), x = Math.max(0, Math.min(r.width, e.clientX - r.left));
+    const t = C.t0 + x / r.width * (C.t1 - C.t0); let best = C.pts[0]; for (const p of C.pts) if (Math.abs(p.t - t) < Math.abs(best.t - t)) best = p;
+    const px_ = (best.t - C.t0) / Math.max(1, C.t1 - C.t0) * r.width, cur = el.querySelector(".cur"), lbl = el.querySelector(".lbl");
+    cur.style.display = lbl.style.display = "block"; cur.style.left = px_ + "px"; lbl.style.left = Math.max(60, Math.min(r.width - 60, px_)) + "px";
+    lbl.textContent = `${nf(best.v)} $ · ${new Date(best.t).toLocaleString("fr-FR", {weekday: "short", hour: "2-digit", minute: "2-digit"})}`; };
+  const end = () => { SCRUB = false; setTimeout(() => { if (!SCRUB) { el.querySelector(".cur").style.display = el.querySelector(".lbl").style.display = "none"; } }, 1600); };
+  el.addEventListener("pointerdown", e => { SCRUB = true; show(e); el.setPointerCapture?.(e.pointerId); });
+  el.addEventListener("pointermove", e => { if (SCRUB) show(e); });
+  el.addEventListener("pointerup", end); el.addEventListener("pointercancel", end);
+}
+/** Chiffres qui défilent quand ils changent, et léger flash vert/rouge de la carte. */
+const ROLL = {};
+function rolls() {
+  document.querySelectorAll("[data-roll]").forEach(el => {
+    const k = el.dataset.roll, v = parseFloat(el.dataset.v); if (!isFinite(v)) return;
+    const prev = ROLL[k]; ROLL[k] = v;
+    if (prev == null || Math.abs(prev - v) < 0.005) return;
+    const card = el.closest(".card,.hero,a"); card?.classList.remove("flash-up", "flash-down"); void card?.offsetWidth; card?.classList.add(v > prev ? "flash-up" : "flash-down");
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const small = el.querySelector("small")?.outerHTML ?? (el.textContent.trim().endsWith("$") ? " $" : ""), t0 = performance.now();
+    const step = now => { const f = Math.min(1, (now - t0) / 700), e = 1 - (1 - f) ** 3; el.innerHTML = nf(prev + (v - prev) * e) + small; if (f < 1) requestAnimationFrame(step); };
+    requestAnimationFrame(step);
+  });
+}
+
+/** Réglages rapides sur la carte d'un bot (levier, agressivité, nervosité, modes des agents). */
+function quickSettings(kind) {
+  const sc = S.bots.spot.config || {}, pc = S.bots.perps.config || {};
+  const seg = (attr, n, cur, label, hotFrom) => `<div class="seg" data-tip="${label}">${label.split(" ")[0].toUpperCase()}<span class="bars">${Array.from({length: n}, (_, i) => `<i class="${i <= cur ? "on" : ""}${i <= cur && cur >= hotFrom ? (cur >= n - 1 && hotFrom < n ? " red" : " hot") : ""}" data-${attr}="${i}"></i>`).join("")}</span></div>`;
+  if (kind === "perps") {
+    const levs = S.rules.leverages || [3, 5, 10, 100, 250];
+    return `<div class="qs"><div class="lev">${levs.map(l => `<button class="${pc.maxLev === l ? "on" : ""} ${l >= 100 ? "hot" : ""}" data-qlev="${l}">x${l}</button>`).join("")}</div>
+      ${seg("qaggr", (S.rules.aggrLevels || []).length || 5, pc.aggr ?? 1, `Agressivité du bot perps : ${S.rules.aggrLevels?.[pc.aggr ?? 1]?.name || ""}. Touche une case pour changer.`, 3)}</div>`;
+  }
+  return `<div class="qs">${seg("qnerve", 4, sc.nerve ?? 1, `Nervosité des stratégies : ${["Calme", "Normal", "Nerveux", "Très nerveux"][sc.nerve ?? 1]}. Touche une case pour changer.`, 3)}
+    <div style="display:flex;gap:4px"><button class="tg ${sc.researchAggressive ? "on" : ""}" data-qag="1">Agents agressifs</button><button class="tg ${sc.newTokens ? "on" : ""}" data-qfresh="1">Nouveaux tokens</button></div></div>`;
+}
+
+/** Barre stop → objectif d'une position, avec le prix actuel. */
+function posBar(p) {
+  const cur = p.live?.price, entry = p.entry, stop = p.stop; if (!cur || !entry || !stop) return "";
+  const long = p.side !== "short", target = p.target ?? (long ? Math.max(p.best ?? entry, cur, entry + 2 * Math.abs(entry - stop)) : Math.min(p.best ?? entry, cur, entry - 2 * Math.abs(entry - stop)));
+  const a = long ? stop : target, b = long ? target : stop, lo = Math.min(a, cur), hi = Math.max(b, cur), at = v => hi > lo ? (v - lo) / (hi - lo) * 100 : 50;
+  const L = long ? at(stop) : at(target), R = long ? at(target) : at(stop), E = at(entry), C = at(cur), win = long ? cur >= entry : cur <= entry;
+  const prog = Math.max(0, Math.min(100, (long ? (cur - stop) / (target - stop) : (stop - cur) / (stop - target)) * 100));
+  return `<div class="pbar" data-tip="Progression de la position, du stop (perte maximale) à l'objectif ${p.target ? "fixé par la stratégie" : "indicatif (2 fois le risque)"} : ${nf(prog, 0)} % du chemin."><div class="t" style="left:${Math.min(L, R)}%;right:${100 - Math.max(L, R)}%${long ? "" : ";transform:scaleX(-1)"}"></div>
+    <div class="f" style="left:${Math.min(E, C)}%;width:${Math.abs(C - E)}%;background:${win ? "var(--green)" : "var(--red)"};opacity:.75"></div>
+    <div class="m" style="left:${E}%"></div><div class="n" style="left:${C}%"></div></div>
+    <div class="pl"><span class="down">stop ${px(stop)}</span><span>entrée ${px(entry)}</span><span class="up">${p.target ? "objectif" : "2R"} ${px(target)}</span></div>`;
+}
+
+/** Graphique de prix d'une position : bougies, entrée, stop, objectif et trades passés. */
+async function openChart(kind, symbol, interval) {
+  sheet(`<h3>${esc(symbol)} · ${interval === "15m" ? "15 min" : "1 h"}</h3><div class="skel" style="height:220px"></div>`);
+  let d; try { d = await api(`/api/chart?kind=${kind}&symbol=${encodeURIComponent(symbol)}&interval=${interval}&count=120`); } catch (e) { $("#sheetBody").innerHTML = `<h3>${esc(symbol)}</h3><p>Graphique indisponible : ${esc(e.message)}</p><button class="btn" id="sheetCancel">Fermer</button>`; return; }
+  const p = (S.bots[kind].positions || []).find(x => x.symbol === symbol);
+  const c = d.candles; if (!c.length) return;
+  const W = 360, H = 220, lvls = [p?.stop, p?.target, p?.entry].filter(Boolean);
+  const lo = Math.min(...c.map(x => x[3]), ...lvls), hi = Math.max(...c.map(x => x[2]), ...lvls), t0 = c[0][0], t1 = c.at(-1)[0], bw = W / c.length;
+  const X = t => (t - t0) / Math.max(1, t1 - t0) * (W - bw) + bw / 2, Y = v => 8 + (hi - v) / (hi - lo || 1) * (H - 16);
+  const bars = c.map(([t, o, h, l, cl_]) => { const up = cl_ >= o, col = up ? "var(--green)" : "var(--red)";
+    return `<line x1="${X(t)}" x2="${X(t)}" y1="${Y(h)}" y2="${Y(l)}" stroke="${col}" stroke-width="1"/><rect x="${X(t) - bw * 0.35}" width="${bw * 0.7}" y="${Y(Math.max(o, cl_))}" height="${Math.max(1, Math.abs(Y(o) - Y(cl_)))}" fill="${col}"/>`; }).join("");
+  const hl = (v, col, label, dash, right) => v ? `<line x1="0" x2="${W}" y1="${Y(v)}" y2="${Y(v)}" stroke="${col}" stroke-width="1.2" ${dash ? 'stroke-dasharray="5 4"' : ""}/><text x="${right ? W - 4 : 4}" text-anchor="${right ? "end" : "start"}" y="${Y(v) + (right ? 12 : -3)}" fill="${col}" font-size="10" font-family="monospace">${label} ${px(v)}</text>` : "";
+  const marks = d.trades.filter(t => t.t >= t0).map(t => { const buy = /buy|open/.test(t.what); const x = X(Math.min(t1, t.t)), y = Y(t.price);
+    return `<path d="M${x} ${buy ? y + 4 : y - 4} l-6 ${buy ? 9 : -9} h12 z" fill="${buy ? "var(--green)" : "var(--red)"}" stroke="var(--card)" stroke-width="1"/>`; }).join("");
+  $("#sheetBody").innerHTML = `<h3>${esc(symbol)} · ${interval === "15m" ? "15 min" : "1 h"}</h3>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;background:var(--card2);border-radius:14px">${bars}${hl(p?.entry, "var(--text)", "entrée", false)}${hl(p?.stop, "var(--red)", "stop", true, true)}${hl(p?.target, "var(--green)", "objectif", true)}${marks}</svg>
+    <p class="sub" style="margin:10px 0">▲ vert = achat ou ouverture · ▼ rouge = vente ou fermeture · pointillés : stop et objectif.${p?.why ? ` Pourquoi : ${esc(p.why)}` : ""}</p>
+    <button class="btn" style="width:100%" id="sheetCancel">Fermer</button>`;
+}
+
+/** Backtest visuel d'une stratégie du chercheur : prix, trades simulés et courbe du capital. */
+async function openSim(id) {
+  sheet(`<h3>Backtest #${esc(id)}</h3><div class="skel" style="height:260px"></div><p class="sub">Simulation en cours…</p>`);
+  let d; try { d = await api(`/api/research/sim?id=${id}`); } catch (e) { $("#sheetBody").innerHTML = `<h3>Backtest #${esc(id)}</h3><p>Indisponible : ${esc(e.message)}</p><button class="btn" id="sheetCancel">Fermer</button>`; return; }
+  const W = 360, H = 170, c = d.candles, lo = Math.min(...c.map(x => x[1])), hi = Math.max(...c.map(x => x[1])), t0 = c[0][0], t1 = c.at(-1)[0];
+  const X = t => (t - t0) / Math.max(1, t1 - t0) * W, Y = v => 6 + (hi - v) / (hi - lo || 1) * (H - 12);
+  const line = c.map(x => `${X(x[0]).toFixed(1)},${Y(x[1]).toFixed(1)}`).join(" ");
+  const tr = d.trades.filter(t => t.reason !== "prise_partielle").map(t => { const col = t.pnl > 0 ? "var(--green)" : "var(--red)";
+    return `${t.t0 ? `<line x1="${X(t.t0)}" y1="${Y(t.entry)}" x2="${X(t.t)}" y2="${Y(t.exit)}" stroke="${col}" stroke-width="2" opacity=".9"/><circle cx="${X(t.t0)}" cy="${Y(t.entry)}" r="2.6" fill="var(--text)"/>` : ""}<circle cx="${X(t.t)}" cy="${Y(t.exit)}" r="3" fill="${col}"/>`; }).join("");
+  const split = d.split ? `<line x1="${X(d.split)}" x2="${X(d.split)}" y1="0" y2="${H}" stroke="var(--amber)" stroke-dasharray="4 4"/><text x="${X(d.split) + 4}" y="12" fill="var(--amber)" font-size="10" font-family="monospace">période jamais vue →</text>` : "";
+  const cv = [{t: t0, v: 1}, ...d.curve], cl_ = Math.min(...cv.map(x => x.v)), ch = Math.max(...cv.map(x => x.v)), CH = 70;
+  const cy = v => 4 + (ch - v) / (ch - cl_ || 1) * (CH - 8), eq = cv.map(x => `${X(x.t).toFixed(1)},${cy(x.v).toFixed(1)}`).join(" ");
+  const s = d.stats;
+  $("#sheetBody").innerHTML = `<h3>Backtest #${d.id} · ${esc(d.market)}</h3><p class="sub" style="margin:0 0 8px">${esc(d.description)}</p>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;background:var(--card2);border-radius:14px"><polyline points="${line}" fill="none" stroke="var(--muted)" stroke-width="1.2"/>${split}${tr}</svg>
+    <div class="k" style="margin:10px 0 4px">Capital simulé (frais inclus)</div>
+    <svg viewBox="0 0 ${W} ${CH}" width="100%" style="display:block;background:var(--card2);border-radius:14px"><line x1="0" x2="${W}" y1="${cy(1)}" y2="${cy(1)}" stroke="var(--line)"/><polyline points="${eq}" fill="none" stroke="${cv.at(-1).v >= 1 ? "var(--green)" : "var(--red)"}" stroke-width="2"/></svg>
+    <div class="grid g3" style="grid-template-columns:repeat(3,1fr)"><div><div class="k">Trades</div><div class="v">${s.trades}</div></div><div><div class="k">Gagnants</div><div class="v">${s.winRate} %</div></div><div><div class="k">PF</div><div class="v">${nf(s.profitFactor)}</div></div>
+      <div><div class="k">Rendement</div><div class="v ${cl(s.returnPct)}">${sg(s.returnPct, 1)} %</div></div><div><div class="k">Pire baisse</div><div class="v">${nf(s.maxDrawdownPct, 1)} %</div></div></div>
+    <p class="sub" style="margin:10px 0">Trait vert = trade gagnant, rouge = perdant (de l'entrée à la sortie). À droite du pointillé orange, la période que la stratégie n'a jamais vue pendant son réglage.</p>
+    <button class="btn" style="width:100%" id="sheetCancel">Fermer</button>`;
+}
+
+/** Bilan par stratégie (onglet Historique). */
+function reportCard() {
+  if (!REP) return `<div class="eyebrow">Bilan par stratégie</div><div class="skel" style="height:90px;margin-bottom:14px"></div>`;
+  const rows = REP.rows || [];
+  return `<div class="eyebrow">Bilan par stratégie · 60 jours</div><div class="card">${rows.length ? rows.map(r => `<div class="row"><div><div class="l1">${esc(r.source.replace(/^chercheur /, ""))}</div>
+      <div class="l2">${r.bot === "spot" ? "Bot 1" : "Bot 2"}${r.family ? ` · ${FAM[r.family] || r.family}` : ""}${r.interval ? ` · ${r.interval === "15m" ? "15 min" : "1 h"}` : ""} · ${r.trades} trade(s) · ${r.winRate} % gagnants · PF ${r.profitFactor >= 99 ? "∞" : nf(r.profitFactor)}</div></div>
+      <div class="r ${cl(r.pnl)}">${sg(r.pnl)} $</div></div>`).join("") : `<p class="sub" style="margin:0">Pas encore de trade clôturé.</p>`}</div>`;
+}
+
+/** Avatars des agents (animation « en réflexion » quand ils travaillent). */
+const AVA = {
+  search: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
+  math: '<path d="M18 5H7l6 7-6 7h11"/>',
+  swap: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
+  select: '<path d="M3 5h18l-7 8v6l-4-2v-4z"/>',
+  fresh: '<path d="M12 2l2.2 6.3L20 9l-4.8 4 1.6 6.5L12 16l-4.8 3.5L8.8 13 4 9l5.8-.7z"/>',
+  arb: '<path d="M12 3v18M5 7h14M5 7l-3 7h6zM19 7l-3 7h6z"/>',
+  guard: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  game: '<rect x="3" y="7" width="18" height="11" rx="4"/><path d="M8 11v3M6.5 12.5h3M15 12h.01M17 14h.01"/>',
+};
+const avatar = (k, busy) => `<div class="ava"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${AVA[k] || ""}</svg>${busy ? '<span class="zz"><b></b><b></b><b></b></span>' : ""}</div>`;
+const recent = (iso, ms = 6 * 60000) => iso && Date.now() - new Date(iso) < ms;
+
+/** Cartes des nouveaux agents (sélectionneur, nouveaux tokens, arbitrage, chien de garde). */
+function lot2Cards() {
+  const A = AGS; if (!A?.selector) return "";
+  const sel = A.selector, fr = A.fresh, arb = A.arb, wd = A.watchdog, M = v => v >= 1e6 ? nf(v / 1e6, 1) + " M$" : nf(v / 1e3, 0) + " k$";
+  return `<div class="eyebrow">Agent sélectionneur</div><div class="card">
+      <div class="agh">${avatar("select", recent(sel.last?.created_at))}<div><div class="v txt" style="font-weight:600">${sel.tokens.length} token(s) sélectionné(s)</div><div class="l2">${sel.last ? "dernière sélection il y a " + ago(sel.last.created_at) : "première sélection dans les 5 minutes"}</div></div></div>
+      <p class="sub" style="margin:10px 0 0">Chaque jour, les meilleurs tokens Solana : liquidité > 1 M$, volume > 1 M$/24 h, vérifiés par Jupiter, plus de 30 jours, émission et gel désactivés. Le chercheur et le pilote travaillent aussi sur eux ; un token qui ne passe plus est retiré.</p>
+      ${sel.tokens.length ? `<div class="sep"></div>${sel.tokens.map(t => `<div class="row"><div><div class="l1">${esc(t.symbol)}</div><div class="l2">liquidité ${M(t.liquidity)} · volume ${M(t.volume_24h)} · ${nf(t.age_days, 0)} j</div></div><div class="r l2">${ago(t.added_at)}</div></div>`).join("")}` : ""}
+      ${sel.removed.length ? `<div class="k" style="margin-top:10px">Retirés récemment</div>${sel.removed.slice(0, 5).map(t => `<div class="l2">${esc(t.symbol)} : ${esc(t.why || "")}</div>`).join("")}` : ""}
+      <button class="btn sm" style="width:100%;margin-top:12px" id="selRun">Refaire la sélection maintenant</button></div>
+    <div class="eyebrow">Agent nouveaux tokens</div><div class="card">
+      <div class="agh">${avatar("fresh", recent(fr.last?.[0]?.created_at))}<div><div class="status ${fr.on ? "run" : "off"}" style="font-size:12px;letter-spacing:.12em">${fr.on ? "Achats activés" : "Observation seulement"}</div><div class="l2">${fr.last?.[0] ? esc(fr.last[0].detail) : "premier passage dans les 5 minutes"}</div></div></div>
+      <p class="sub" style="margin:10px 0 0">Il repère les tokens lancés depuis 30 min à 24 h et ne garde que ceux qui passent des garde-fous stricts : émission et gel désactivés, liquidité ≥ 50 k$, de vraies ventes réussies, les gros portefeuilles ≤ 30 %, plus d'acheteurs que de vendeurs. ${fr.on ? "" : "Activé, il achète "}Mise de 2 à 5 $ (5 % du capital), stop −20 %, objectif +40 %, 4 h maximum, 3 par jour au plus, sortie d'urgence si la liquidité s'effondre.</p>
+      <div class="warnbox" style="margin:10px 0 0">⚠ Le terrain le plus risqué : même filtrés, beaucoup de nouveaux tokens s'effondrent. Ne mets que ce que tu acceptes de perdre.</div>
+      ${fr.tokens.length ? `<div class="k" style="margin-top:12px">Retenus en ce moment</div>${fr.tokens.map(t => `<div class="row"><div><div class="l1">${esc(t.symbol)}</div><div class="l2">liquidité ${M(t.liquidity)} · ${sg(t.data?.change1h ?? 0, 0)} % en 1 h · gros portefeuilles ${nf(t.data?.topHolders ?? 0, 0)} %</div></div><div class="r l2">${ago(t.seen_at || t.added_at)}</div></div>`).join("")}` : ""}
+      <label class="field" style="margin-top:8px"><span>Acheter les tokens retenus</span><input type="checkbox" id="freshOn" ${fr.on ? "checked" : ""} style="width:26px;height:26px"></label></div>
+    <div class="eyebrow">Agent arbitrage · éclaireur</div><div class="card">
+      <div class="agh">${avatar("arb", true)}<div><div class="v txt" style="font-weight:600">${arb.measures} mesure(s) · ${arb.positives} positive(s) après frais</div><div class="l2">sans argent, depuis ${arb.since ? ago(arb.since) : "—"}</div></div></div>
+      <p class="sub" style="margin:10px 0 0">Il compare les prix d'un même token entre les DEX et teste des allers-retours USDC → token → USDC, frais déduits. Il n'engage aucun argent : on ne passera au réel que si des gains se répètent.</p>
+      ${arb.best.length ? `<div class="sep"></div>${arb.best.map(o => `<div class="row"><div><div class="l1">${esc(o.token)} <span class="mut" style="font-weight:400">${esc(o.kind)}</span></div><div class="l2">${esc(o.detail)} · ${ago(o.created_at)}</div></div><div class="r ${cl(o.net_pct)}">${sg(o.net_pct)} %</div></div>`).join("")}` : ""}</div>
+    <div class="eyebrow">Chien de garde</div><div class="card">
+      <div class="agh">${avatar("guard")}<div><div class="v txt" style="font-weight:600">${wd.last.length ? "Dernière alerte il y a " + ago(wd.last[0].created_at) : "Rien à signaler"}</div><div class="l2">Alerte si un bot en mission ne se contrôle plus depuis 5 min, ou si une panne se répète</div></div></div>
+      ${wd.last.map(x => `<p class="sub" style="margin:8px 0 0">${esc(x.detail)}</p>`).join("")}</div>`;
+}
+
+// ---------------------------------------------------------------- notifications push
+const b64urlToBytes = s => { const p = s.replace(/-/g, "+").replace(/_/g, "/"); return Uint8Array.from(atob(p + "===".slice((p.length + 3) % 4)), c => c.charCodeAt(0)); };
+async function enablePush() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return toast("Notifications push non disponibles dans ce navigateur");
+  if ((await Notification.requestPermission()) !== "granted") return toast("Notifications refusées");
+  try {
+    const reg = await navigator.serviceWorker.ready, {key} = await api("/api/push/key");
+    const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: b64urlToBytes(key)});
+    await api("/api/push/subscribe", {method: "POST", body: JSON.stringify(sub.toJSON())});
+    PUSH_ON = true; try { localStorage.setItem("pulse_push", "1"); } catch (e) {}
+    toast("Notifications push activées"); renderSet();
+  } catch (e) { toast(isBrave ? "Échec : active « services Google pour la messagerie push » dans les réglages de Brave" : "Échec de l'abonnement : " + e.message); }
+}
+
+// ---------------------------------------------------------------- mini-jeu « Devine la bougie »
+let GAME = {best: 0, data: null, k: 0, score: 0, streak: 0, bot: 0, n: 0, guessed: null};
+try { GAME.best = +(localStorage.getItem("pulse_game_best") || 0); } catch (e) {}
+const GAME_MARKETS = [["perps", "SOL"], ["perps", "ETH"], ["perps", "BTC"], ["spot", "JUP"], ["spot", "BONK"], ["spot", "WIF"]];
+async function gameRound(newMarket) {
+  if (newMarket || !GAME.data || GAME.n % 5 === 0) {
+    const [kind, sym] = GAME_MARKETS[Math.floor(Math.random() * GAME_MARKETS.length)], iv = Math.random() < 0.5 ? "1h" : "15m";
+    $("#sheetBody").innerHTML = `<div class="skel" style="height:300px"></div>`;
+    try { GAME.data = {...(await api(`/api/chart?kind=${kind}&symbol=${sym}&interval=${iv}&count=400`)), sym, iv}; } catch (e) { toast("Graphique indisponible"); return closeSheet(); }
+  }
+  const c = GAME.data.candles; GAME.k = 60 + Math.floor(Math.random() * Math.max(1, c.length - 61)); GAME.guessed = null; gameDraw();
+}
+function gameDraw(reveal) {
+  const c = GAME.data.candles, show = c.slice(Math.max(0, GAME.k - 60), GAME.k + (reveal ? 1 : 0)), W = 360, H = 200;
+  const lo = Math.min(...show.map(x => x[3])), hi = Math.max(...show.map(x => x[2])), bw = W / 61;
+  const Y = v => 8 + (hi - v) / (hi - lo || 1) * (H - 16);
+  const bars = show.map(([, o, h, l, cl_], i) => { const up = cl_ >= o, last = reveal && i === show.length - 1, col = last ? "var(--amber)" : up ? "var(--green)" : "var(--red)", x = i * bw + bw / 2;
+    return `<line x1="${x}" x2="${x}" y1="${Y(h)}" y2="${Y(l)}" stroke="${col}"/><rect x="${x - bw * .35}" width="${bw * .7}" y="${Y(Math.max(o, cl_))}" height="${Math.max(1, Math.abs(Y(o) - Y(cl_)))}" fill="${col}"/>`; }).join("");
+  const next = c[GAME.k], prev = c[GAME.k - 1], up = next ? next[4] >= prev[4] : null;
+  const closes = c.slice(0, GAME.k).map(x => x[4]), ema = (n) => closes.reduce((a, v, i) => i ? v * 2 / (n + 1) + a * (1 - 2 / (n + 1)) : v, 0);
+  const botGuess = closes.length > 25 ? (ema(10) >= ema(25) ? "up" : "down") : "up"; // le chercheur suit la tendance
+  let res = "";
+  if (reveal) { const ok = (GAME.guessed === "up") === up, bok = (botGuess === "up") === up;
+    res = `<div class="res ${ok ? "up" : "down"}">${ok ? "✓ Gagné !" : "✗ Raté"} · c'était une ${up ? "hausse" : "baisse"} (${sg((next[4] / prev[4] - 1) * 100)} %)</div><p class="sub" style="text-align:center;margin:0 0 8px">Le chercheur avait dit ${botGuess === "up" ? "hausse" : "baisse"} ${bok ? "✓" : "✗"}</p>`; }
+  $("#sheetBody").innerHTML = `<div class="game"><h3>🎮 Devine la bougie</h3>
+    <div class="score"><span>Toi : ${GAME.score} / ${GAME.n}</span><span>Série : ${GAME.streak} · record ${GAME.best}</span><span>Chercheur : ${GAME.bot}</span></div>
+    <div class="l2" style="margin-bottom:6px">${GAME.data.kind === "perps" ? "" : "Spot "}${esc(GAME.data.sym)} · bougies ${GAME.data.iv === "15m" ? "15 min" : "1 h"} · date cachée</div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;background:var(--card2);border-radius:14px">${bars}</svg>${res}
+    ${reveal ? `<div class="btns" style="margin-top:8px"><button class="btn" id="sheetCancel">Arrêter</button><button class="btn go" id="gameNext">Suivante</button></div>`
+      : `<p class="sub" style="text-align:center;margin:10px 0">La prochaine bougie va-t-elle clôturer plus haut ou plus bas ?</p><div class="btns"><button class="btn red" data-guess="down">▼ Baisse</button><button class="btn go" data-guess="up">▲ Hausse</button></div>`}</div>`;
+  GAME.botGuess = botGuess;
+}
+function gameGuess(g) {
+  if (GAME.guessed) return; GAME.guessed = g;
+  const c = GAME.data.candles, up = c[GAME.k][4] >= c[GAME.k - 1][4], ok = (g === "up") === up;
+  GAME.n++; if (ok) { GAME.score++; GAME.streak++; } else GAME.streak = 0;
+  if ((GAME.botGuess === "up") === up) GAME.bot++;
+  if (GAME.streak > GAME.best) { GAME.best = GAME.streak; try { localStorage.setItem("pulse_game_best", GAME.best); } catch (e) {} }
+  try { navigator.vibrate?.(ok ? 30 : [20, 40, 20]); } catch (e) {}
+  gameDraw(true);
+}
+
+// ---------------------------------------------------------------- commande vocale
+let REC = null, LISTEN = false, WAKE_REC = null;
+const AGGR_WORDS = [["très agressif", 4], ["agressif", 3], ["dynamique", 2], ["normal", 1], ["prudent", 0]];
+const NERVE_WORDS = [["très nerveux", 3], ["nerveux", 2], ["normal", 1], ["calme", 0]];
+function parseCommand(raw) {
+  const t = raw.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[’']/g, " ");
+  const kinds = /bot ?(1|un)\b|spot/.test(t) ? ["spot"] : /bot ?(2|deux)\b|perp/.test(t) ? ["perps"] : ["spot", "perps"];
+  if (/urgence|ferme tout|coupe tout|vends tout/.test(t)) return {act: "stop", kinds, sensitive: true, say: `Arrêt d'urgence ${kinds.length > 1 ? "des deux bots" : kinds[0] === "spot" ? "du bot 1" : "du bot 2"}`};
+  const lev = /levier\D{0,6}(\d+)/.exec(t);
+  if (lev) { const l = +lev[1]; if (!(S.rules.leverages || []).includes(l)) return {err: `Levier x${l} non proposé (choix : ${(S.rules.leverages || []).map(x => "x" + x).join(", ")})`}; return {act: "lev", v: l, sensitive: l >= 100, say: `Levier maximum x${l}`}; }
+  if (/agressivit/.test(t)) { const w = AGGR_WORDS.find(([k]) => t.includes(k.normalize("NFD").replace(/[̀-ͯ]/g, ""))); if (w) return {act: "aggr", v: w[1], sensitive: w[1] >= 3, say: `Agressivité ${S.rules.aggrLevels?.[w[1]]?.name}`}; }
+  if (/nervosit/.test(t)) { const w = NERVE_WORDS.find(([k]) => t.includes(k)); if (w) return {act: "nerve", v: w[1], say: `Nervosité ${["Calme", "Normal", "Nerveux", "Très nerveux"][w[1]]}`}; }
+  if (/mode agressif|agents agressifs/.test(t)) { const on = !/(coupe|desactive|arrete|enleve)/.test(t); return {act: "agag", v: on, sensitive: on, say: `Mode agressif des agents ${on ? "activé" : "coupé"}`}; }
+  if (/pause|arrete|stoppe/.test(t)) return {act: "pause", kinds, say: `Pause ${kinds.length > 1 ? "des deux bots" : kinds[0] === "spot" ? "du bot 1" : "du bot 2"}`};
+  if (/reprend|relance|redemarre|continue|lance/.test(t)) return {act: "resume", kinds, say: `Reprise ${kinds.length > 1 ? "des deux bots" : kinds[0] === "spot" ? "du bot 1" : "du bot 2"}`};
+  if (/solde|combien|capital|valeur|argent/.test(t)) return {act: "info"};
+  if (/position/.test(t)) return {act: "pos"};
+  return {err: `Je n'ai pas compris « ${raw} ». Essaie : « pause bot 2 », « levier x5 », « agressivité prudent », « solde ».`};
+}
+function speak(txt) { try { const u = new SpeechSynthesisUtterance(txt); u.lang = "fr-FR"; speechSynthesis.cancel(); speechSynthesis.speak(u); } catch (e) {} }
+async function runCommand(c) {
+  if (c.err) { toast(c.err); speak("Je n'ai pas compris."); return; }
+  if (c.act === "info") { const v = k => nf(S.bots[k].last_value_usd); const txt = `Bot 1 : ${v("spot")} dollars. Bot 2 : ${v("perps")} dollars.`; toast(txt); speak(txt); return; }
+  if (c.act === "pos") { const l = ["spot", "perps"].flatMap(k => (S.bots[k].positions || []).map(p => `${p.side === "short" ? "short " : ""}${p.symbol} ${sg(p.live?.pnlPct)} %`)); const txt = l.length ? "Positions : " + l.join(", ") : "Aucune position ouverte."; toast(txt); speak(txt); return; }
+  if (c.sensitive && !c.confirmed) {
+    sheet(`<h3>Confirmer ?</h3><p>${esc(c.say)}</p><div class="btns"><button class="btn" id="sheetCancel">Annuler</button><button class="btn ${c.act === "stop" ? "red" : "go"}" id="voiceOk">Valider</button></div>`);
+    window.__pendingCmd = {...c, confirmed: true}; speak(c.say + ". Tu confirmes ?"); return;
+  }
+  try {
+    if (c.act === "stop") for (const k of c.kinds) await api(`/api/${k}/stop`, {method: "POST"});
+    if (c.act === "pause") for (const k of c.kinds) await api(`/api/${k}/pause`, {method: "POST"});
+    if (c.act === "resume") for (const k of c.kinds) if (S.bots[k].status === "paused") await api(`/api/${k}/start`, {method: "POST", body: "{}"});
+    if (c.act === "lev") await api("/api/perps/config", {method: "POST", body: JSON.stringify({maxLev: c.v})});
+    if (c.act === "aggr") await api("/api/perps/config", {method: "POST", body: JSON.stringify({aggr: c.v})});
+    if (c.act === "nerve") await api("/api/research/settings", {method: "POST", body: JSON.stringify({nerve: c.v, aggressive: !!S.bots.spot.config?.researchAggressive})});
+    if (c.act === "agag") await api("/api/research/settings", {method: "POST", body: JSON.stringify({aggressive: c.v, nerve: S.bots.spot.config?.nerve ?? 1})});
+    toast("✓ " + c.say); speak(c.say); refresh();
+  } catch (e) { toast("Échec : " + e.message); }
+}
+function voiceFallback() {
+  sheet(`<h3>Commande vocale</h3><p>Appuie sur le <b>micro de ton clavier</b> et dicte ton ordre (ou tape-le).</p>
+    <input id="cmdIn" style="width:100%;text-align:left" placeholder="ex. mets le bot 2 en pause" autocomplete="off">
+    <div class="btns" style="margin-top:12px"><button class="btn" id="sheetCancel">Annuler</button><button class="btn go" id="cmdGo">Envoyer</button></div>
+    <p class="sub" style="margin:10px 0 0">${isBrave ? "Brave ne fournit pas la reconnaissance vocale directe : la dictée du clavier la remplace très bien." : ""}</p>`);
+  setTimeout(() => $("#cmdIn")?.focus(), 50);
+}
+function listen(onText) {
+  if (!SR) return voiceFallback();
+  const r = new SR(); r.lang = "fr-FR"; r.interimResults = false; r.maxAlternatives = 1;
+  let got = false; const timer = setTimeout(() => { if (!got) { try { r.abort(); } catch (e) {} voiceFallback(); } }, 7000);
+  r.onresult = e => { got = true; clearTimeout(timer); onText(e.results[0][0].transcript); };
+  r.onerror = e => { clearTimeout(timer); if (!got && e.error !== "aborted") voiceFallback(); };
+  r.onend = () => { $("#mic").classList.remove("on"); REC = null; };
+  try { r.start(); REC = r; $("#mic").classList.add("on"); } catch (e) { voiceFallback(); }
+}
+/** « Hey Pulse » : écoute continue tant que l'app est ouverte à l'écran (Chrome) ; la phrase qui suit est l'ordre. */
+function wakeStart() {
+  if (!SR || !WAKE || document.hidden || WAKE_REC) return;
+  const r = new SR(); r.lang = "fr-FR"; r.continuous = true; r.interimResults = false;
+  r.onresult = e => { const txt = e.results[e.results.length - 1][0].transcript.toLowerCase();
+    const m = /(?:h[eé]+|et|ok)\s*puls?e?\s*,?\s*(.*)/.exec(txt); if (!m) return;
+    try { navigator.vibrate?.(40); } catch (er) {}
+    if (m[1].trim().length > 3) runCommand(parseCommand(m[1])); else { try { r.stop(); } catch (er) {} setTimeout(() => listen(t => runCommand(parseCommand(t))), 300); } };
+  r.onend = () => { WAKE_REC = null; setTimeout(wakeStart, 800); };
+  r.onerror = () => {};
+  try { r.start(); WAKE_REC = r; } catch (e) {}
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) { try { WAKE_REC?.stop(); } catch (e) {} } else wakeStart(); });
+$("#mic").addEventListener("click", () => { if (REC) { try { REC.stop(); } catch (e) {} return; } listen(t => runCommand(parseCommand(t))); });
+
+/** Réglages rapides : appliqués tout de suite (confirmation pour les choix risqués). */
+async function quickApply(what, v) {
+  const pc = S.bots.perps.config || {}, sc = S.bots.spot.config || {};
+  const body = what === "lev" ? {maxLev: v} : {aggr: v};
+  try {
+    if (what === "lev" || what === "aggr") { await api("/api/perps/config", {method: "POST", body: JSON.stringify(body)}); toast(what === "lev" ? `Levier max x${v}` : `Agressivité : ${S.rules.aggrLevels[v].name}`); }
+    if (what === "nerve") { await api("/api/research/settings", {method: "POST", body: JSON.stringify({nerve: v, aggressive: !!sc.researchAggressive})}); toast(`Nervosité : ${["Calme", "Normal", "Nerveux", "Très nerveux"][v]}`); }
+    if (what === "agag") { await api("/api/research/settings", {method: "POST", body: JSON.stringify({aggressive: v, nerve: sc.nerve ?? 1})}); toast(v ? "Agents en mode agressif" : "Agents en mode normal"); }
+    if (what === "fresh") { await api("/api/agents/fresh", {method: "POST", body: JSON.stringify({on: v})}); toast(v ? "Agent nouveaux tokens : achats activés" : "Agent nouveaux tokens : observation seulement"); }
+  } catch (e) {}
+  void pc; await refresh();
+}
+function quickConfirm(what, v, txt) {
+  sheet(`<h3>Confirmer ?</h3><p>${txt}</p><div class="btns"><button class="btn" id="sheetCancel">Annuler</button><button class="btn go" data-qok="${what}" data-qv="${v}">Valider</button></div>`);
+}
+
 // ---------------------------------------------------------------- actions
 document.addEventListener("click", async e => {
+  const seg = e.target.closest("i[data-qaggr],i[data-qnerve]");
+  if (seg) { const n = seg.dataset.qaggr != null ? +seg.dataset.qaggr : +seg.dataset.qnerve, what = seg.dataset.qaggr != null ? "aggr" : "nerve";
+    if (what === "aggr" && n >= 3) return quickConfirm("aggr", n, `Agressivité « ${S.rules.aggrLevels[n].name} » : risque ×${S.rules.aggrLevels[n].riskMult} par trade, jusqu'à ${nf(S.rules.aggrLevels[n].dailyLoss * 100, 0)} % de perte par jour.`);
+    if (what === "nerve" && n === 3) return quickConfirm("nerve", 3, "« Très nerveux » IMPOSE des stratégies rapides : si aucune n'est validée pour un bot, il ne trade plus du tout.");
+    return quickApply(what, n); }
   const row = e.target.closest("[data-tr]");
   if (row && !e.target.closest("a")) { const [k, id] = row.dataset.tr.split(":"); const tr = S.bots[k].trades.find(x => String(x.id) === id); if (tr) whyTrade(tr, k); return; }
   const t = e.target.closest("button"); if (!t) return;
+  if (t.dataset.range) { RANGE = t.dataset.range; try { localStorage.setItem("pulse_range", RANGE); } catch (err) {} render(); return; }
+  if (t.dataset.chart) { const [k, sym, iv] = t.dataset.chart.split("|"); return openChart(k, sym, iv); }
+  if (t.dataset.sim) return openSim(t.dataset.sim);
+  if (t.dataset.qlev) { const l = +t.dataset.qlev; return l >= 100 ? quickConfirm("lev", l, `Levier jusqu'à x${l} : une variation d'environ ${nf(100 / l, 1)} % contre toi suffirait à liquider. Le bot garde toujours son stop bien avant la liquidation, mais c'est très risqué.`) : quickApply("lev", l); }
+  if (t.dataset.qag) { const on = !S.bots.spot.config?.researchAggressive; return on ? quickConfirm("agag", 1, "Mode agressif des agents : critères de validation assouplis et agressivité perps appliquée même en pilote automatique. Plus de trades, moins sûrs.") : quickApply("agag", false); }
+  if (t.dataset.qfresh) { const on = !S.bots.spot.config?.newTokens; return on ? quickConfirm("fresh", 1, "Agent nouveaux tokens : il achètera (2 à 5 $ par token) des tokens lancés depuis moins de 24 h qui passent les garde-fous. Terrain très risqué.") : quickApply("fresh", false); }
+  if (t.dataset.qok) { closeSheet(); const v = t.dataset.qv; return quickApply(t.dataset.qok, v === "1" && ["agag", "fresh"].includes(t.dataset.qok) ? true : +v); }
+  if (t.dataset.theme) { THEME = t.dataset.theme; document.documentElement.dataset.theme = THEME; try { localStorage.setItem("pulse_theme", THEME); } catch (err) {}
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", getComputedStyle(document.documentElement).getPropertyValue("--bg").trim()); renderSet(); return; }
+  if (t.id === "pushOn") return enablePush();
+  if (t.id === "pushTest") { try { const r = await api("/api/push/test", {method: "POST"}); toast(r.sent ? "Notification envoyée" : "Aucun téléphone abonné"); } catch (err) {} return; }
+  if (t.id === "gameStart") { GAME.score = GAME.n = GAME.bot = GAME.streak = 0; sheet(""); return gameRound(true); }
+  if (t.id === "gameNext") return gameRound(false);
+  if (t.dataset.guess) return gameGuess(t.dataset.guess);
+  if (t.id === "selRun") { t.textContent = "Sélection en cours…"; try { const r = await api("/api/agents/selector/run", {method: "POST"}); toast(r.result); } catch (err) {} return loadAg(); }
+  if (t.id === "voiceOk") { closeSheet(); const c = window.__pendingCmd; window.__pendingCmd = null; if (c) runCommand(c); return; }
+  if (t.id === "cmdGo") { const v = $("#cmdIn").value.trim(); closeSheet(); if (v) runCommand(parseCommand(v)); return; }
   if (t.dataset.copy) { try { await navigator.clipboard.writeText(t.dataset.copy); toast("Adresse copiée"); } catch (err) { toast("Copie impossible"); } return; }
   if (t.dataset.hf) { HF = t.dataset.hf; renderHist(); return; }
   if (t.dataset.pr) { document.querySelectorAll(`[data-pr="${t.dataset.pr}"]`).forEach(x => x.classList.toggle("on", x === t)); return; }
@@ -737,6 +1186,10 @@ document.addEventListener("click", async e => {
 
 document.addEventListener("change", async e => {
   if (e.target.id === "agAggr") { window.__agDraft = {aggressive: e.target.checked, nerve: +$("#agNerve").value}; if (e.target.checked) toast("Mode agressif : pense à enregistrer"); return; }
+  if (e.target.id === "freshOn") { const on = e.target.checked; if (on && !confirm("Activer les achats de nouveaux tokens (2 à 5 $ par token, terrain très risqué) ?")) { e.target.checked = false; return; }
+    await api("/api/agents/fresh", {method: "POST", body: JSON.stringify({on})}); toast(on ? "Achats de nouveaux tokens activés" : "Observation seulement"); await refresh(); return loadAg(); }
+  if (e.target.id === "wakeOn") { WAKE = e.target.checked; try { localStorage.setItem("pulse_wake", WAKE ? "1" : "0"); } catch (err) {}
+    if (WAKE && !SR) toast("Pas de reconnaissance vocale dans ce navigateur : utilise le micro du clavier"); if (WAKE) wakeStart(); else { try { WAKE_REC?.stop(); } catch (err) {} } return; }
   if (e.target.dataset?.swapauto) { await api("/api/agents/swap/auto", {method: "POST", body: JSON.stringify({on: e.target.checked})}); toast(e.target.checked ? "Nettoyage automatique activé" : "Nettoyage automatique coupé"); return loadAg(); }
   const k = e.target.dataset?.pilot; if (!k) return;
   const on = e.target.checked;
@@ -749,7 +1202,9 @@ document.addEventListener("input", e => { if (e.target.id === "pbias") $("#pbias
   if (e.target.id === "agNerve") { $("#agNerveName").textContent = (AG?.settings?.levels || [])[+e.target.value] || ""; $("#agNerveTxt").textContent = window.__nerveTxt?.(+e.target.value) || ""; }
   if (e.target.id === "paggr") { $("#paggrName").textContent = S.rules.aggrLevels[+e.target.value].name; $("#pmodeTxt").textContent = modeText(+e.target.value); } });
 setInterval(() => { if (PAGE === "ag" && !document.hidden && !AG_BUSY) loadAg(); }, 60000);
-document.addEventListener("keydown", e => { if (e.target.id === "chatIn" && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });
+document.addEventListener("keydown", e => { if (e.target.id === "chatIn" && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  if (e.target.id === "cmdIn" && e.key === "Enter") { e.preventDefault(); $("#cmdGo")?.click(); } });
+wakeStart();
 addEventListener("beforeinstallprompt", e => { e.preventDefault(); window.__inst = e; });
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
