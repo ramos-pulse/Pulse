@@ -12,7 +12,7 @@ import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spo
 import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, type TokenInfo, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, simulate, tempo, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, pushHook, type BotKind, type BotState } from "./store.ts";
-import { arbScan, FRESH, freshCandidates, freshRefusal, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
+import { arbScan, bestPools, FRESH, freshCandidates, freshRefusal, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
 import { newVapid, sendPush, type Subscription, type Vapid } from "./engine/webpush.ts";
 import { cleanWallet, CLEANER } from "./engine/cleaner.ts";
 import { analyze, LUCK, luckProbability, propose } from "./engine/math.ts";
@@ -661,7 +661,11 @@ async function runSelector(force = false): Promise<string> {
   }
   const fixed = new Set<string>(TOKENS.map((t) => t.mint));
   const { candidates, info } = await selectionCandidates(fixed);
-  const { selected, refused } = rankSelection(candidates, info);
+  const ranked = rankSelection(candidates, info);
+  const refused = ranked.refused;
+  // pool le plus liquide pour l'historique des prix (DexScreener) ; sans pool, pas d'historique : token écarté
+  const pools = await bestPools(ranked.selected.filter((c) => !c.pool).map((c) => c.mint));
+  const selected = ranked.selected.map((c) => ({ ...c, pool: c.pool || pools[c.mint] || "" })).filter((c) => c.pool);
   if (!selected.length && !candidates.length) throw new Error("aucune donnée de marché");
   const { data: cur } = await db.from("token_universe").select("*").eq("kind", "selection").limit(500);
   const current = (cur ?? []) as UniverseRow[];

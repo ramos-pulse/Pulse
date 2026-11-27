@@ -62,7 +62,7 @@ export interface Candidate { mint: string; symbol: string; decimals: number; poo
 /** Un token passe-t-il les filtres ? Renvoie null s'il passe, sinon la raison du refus. */
 export function selectionRefusal(c: Candidate, j: JupToken | undefined): string | null {
   if (!j) return "inconnu de Jupiter";
-  if (j.isVerified !== true) return "non vérifié par Jupiter";
+  if (!isVerified(j)) return "non vérifié par Jupiter";
   if (j.tokenProgram && j.tokenProgram !== TOKEN_PROGRAM) return "programme de token non standard (Token-2022)";
   if (j.audit?.mintAuthorityDisabled !== true) return "émission de nouveaux jetons encore possible";
   if (j.audit?.freezeAuthorityDisabled !== true) return "gel des comptes encore possible";
@@ -72,28 +72,48 @@ export function selectionRefusal(c: Candidate, j: JupToken | undefined): string 
   return null;
 }
 
-/** Candidats : les pools Solana les plus échangés (GeckoTerminal), regroupés par token. */
+const isVerified = (j: JupToken) => j.isVerified === true || !!j.tags?.some((t) => t === "verified" || t === "strict");
+
+/**
+ * Candidats : les 100 tokens les plus échangés sur 24 h selon Jupiter (vérification, audit, liquidité et volume inclus).
+ * Le pool le plus liquide (pour l'historique de prix) est trouvé ensuite sur DexScreener. Secours : GeckoTerminal.
+ */
 export async function selectionCandidates(exclude: Set<string>): Promise<{ candidates: Candidate[]; info: Map<string, JupToken> }> {
-  const pools = await gtPools("pools?sort=h24_volume_usd_desc", 5);
-  const by = new Map<string, Candidate>();
-  for (const p of pools) {
-    for (const side of ["base_token", "quote_token"] as const) {
-      const mint = mintOf(p.relationships[side].data.id);
+  const info = new Map<string, JupToken>(), by = new Map<string, Candidate>();
+  try {
+    const r = await fetchRetry(`${JUP}/tokens/v2/toptraded/24h?limit=100`);
+    if (!r.ok) throw new Error(`Jupiter top (${r.status})`);
+    for (const j of (await r.json()) as JupToken[]) {
+      if (!j?.id || exclude.has(j.id) || STABLES.has(j.id) || WRAPPED_SOL.has(j.id)) continue;
+      info.set(j.id, j);
+      const age = j.firstPool?.createdAt ? (Date.now() - Date.parse(j.firstPool.createdAt)) / 86_400_000 : 0;
+      by.set(j.id, { mint: j.id, symbol: j.symbol, decimals: j.decimals, pool: "", liquidity: j.liquidity ?? 0, volume24h: (j.stats24h?.buyVolume ?? 0) + (j.stats24h?.sellVolume ?? 0), ageDays: age });
+    }
+  } catch { /* secours ci-dessous */ }
+  if (!by.size) {
+    const pools = await gtPools("pools?sort=h24_volume_usd_desc", 5);
+    for (const p of pools) {
+      const mint = mintOf(p.relationships.base_token.data.id);
       if (exclude.has(mint) || STABLES.has(mint) || WRAPPED_SOL.has(mint)) continue;
-      const liq = Number(p.attributes.reserve_in_usd) || 0, vol = Number(p.attributes.volume_usd.h24) || 0;
-      const age = (Date.now() - Date.parse(p.attributes.pool_created_at)) / 86_400_000;
+      const liq = Number(p.attributes.reserve_in_usd) || 0, vol = Number(p.attributes.volume_usd.h24) || 0, age = (Date.now() - Date.parse(p.attributes.pool_created_at)) / 86_400_000;
       const cur = by.get(mint);
       if (!cur) by.set(mint, { mint, symbol: "", decimals: 0, pool: p.attributes.address, liquidity: liq, volume24h: vol, ageDays: age });
       else { if (liq > cur.liquidity) cur.pool = p.attributes.address; cur.liquidity += liq; cur.volume24h += vol; cur.ageDays = Math.max(cur.ageDays, age); }
-      break; // le token « échangé » est la base ; on ne compte pas la monnaie de cotation
     }
-  }
-  const info = await jupTokens([...by.keys()]);
-  for (const c of by.values()) {
-    const j = info.get(c.mint);
-    if (j) { c.symbol = j.symbol; c.decimals = j.decimals; if (j.firstPool?.createdAt) c.ageDays = Math.max(c.ageDays, (Date.now() - Date.parse(j.firstPool.createdAt)) / 86_400_000); }
+    for (const [m, j] of await jupTokens([...by.keys()])) info.set(m, j);
+    for (const c of by.values()) { const j = info.get(c.mint); if (j) { c.symbol = j.symbol; c.decimals = j.decimals; if (j.firstPool?.createdAt) c.ageDays = Math.max(c.ageDays, (Date.now() - Date.parse(j.firstPool.createdAt)) / 86_400_000); } }
   }
   return { candidates: [...by.values()], info };
+}
+
+/** Pool le plus liquide de chaque token (pour l'historique de prix GeckoTerminal). */
+export async function bestPools(mints: string[]): Promise<Record<string, string>> {
+  const out: Record<string, { a: string; l: number }> = {};
+  for (const p of await dexPairs(mints).catch(() => [] as DexPair[])) {
+    const m = mints.find((x) => p.baseToken?.address === x);
+    if (m && (p.liquidity?.usd ?? 0) > (out[m]?.l ?? 0)) out[m] = { a: p.pairAddress, l: p.liquidity?.usd ?? 0 };
+  }
+  return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, v.a]));
 }
 
 /** Classe les candidats qui passent et garde les 20 à 30 meilleurs (volume × liquidité). */
