@@ -15,7 +15,7 @@ const WRAPPED_SOL = new Set([SOL_MINT, "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm
 
 export interface JupToken {
   id: string; symbol: string; name?: string; decimals: number; tokenProgram?: string; isVerified?: boolean; tags?: string[]; organicScore?: number;
-  audit?: { mintAuthorityDisabled?: boolean; freezeAuthorityDisabled?: boolean; topHoldersPercentage?: number };
+  audit?: { mintAuthorityDisabled?: boolean; freezeAuthorityDisabled?: boolean; topHoldersPercentage?: number; isSus?: boolean; devBalancePercentage?: number; devMints?: number };
   firstPool?: { id?: string; createdAt?: string }; liquidity?: number; stats24h?: { buyVolume?: number; sellVolume?: number };
 }
 export async function jupTokens(mints: string[]): Promise<Map<string, JupToken>> {
@@ -65,6 +65,7 @@ export function selectionRefusal(c: Candidate, j: JupToken | undefined): string 
   if (j.tokenProgram && j.tokenProgram !== TOKEN_PROGRAM && j.tokenProgram !== TOKEN_2022) return "programme de token inconnu";
   if (j.audit?.mintAuthorityDisabled !== true) return "émission de nouveaux jetons encore possible";
   if (j.audit?.freezeAuthorityDisabled !== true) return "gel des comptes encore possible";
+  if (j.audit?.isSus) return "signalé suspect par Jupiter";
   if (c.liquidity < SELECT.minLiquidity) return `liquidité ${Math.round(c.liquidity / 1000)} k$ < 1 M$`;
   if (c.volume24h < SELECT.minVolume24h) return `volume 24 h ${Math.round(c.volume24h / 1000)} k$ < 1 M$`;
   if (c.ageDays < SELECT.minAgeDays) return `trop récent (${Math.floor(c.ageDays)} jours < 30)`;
@@ -133,6 +134,7 @@ export const FRESH = {
   minAgeMin: 30, maxAgeH: 24,           // ni les toutes premières minutes (pièges), ni plus d'un jour
   minLiquidity: 50_000, minVolume1h: 20_000, minSells1h: 20, // il faut pouvoir REVENDRE : des ventes réelles doivent passer
   maxTopHolders: 30,                    // les 10 plus gros portefeuilles ≤ 30 % du total
+  maxDevPct: 10,                        // le créateur ne garde pas plus de 10 % (sinon il peut tout vider d'un coup)
   minChange1h: 5, maxChange1h: 60,      // élan, mais pas une fusée déjà partie
   // gestion d'une position : toute petite mise, sortie rapide
   stakePct: 0.05, minStakeUsd: 2, maxStakeUsd: 5, maxShareOfEquity: 0.2, stopPct: 0.2, targetPct: 0.4, maxHoldMs: 4 * 3_600_000, maxPerDay: 3,
@@ -159,6 +161,10 @@ export function freshRefusal(f: Fresh, j: JupToken | undefined, soft = false): s
   if (j.audit?.freezeAuthorityDisabled !== true) return "gel des comptes possible (piège classique)";
   const top = j.audit?.topHoldersPercentage;
   if (top == null || top > F.maxTopHolders) return `concentration : les gros portefeuilles détiennent ${top == null ? "?" : Math.round(top)} %`;
+  // alertes de Jupiter : NINE (27/11) les avait toutes les deux et a été vidé juste après l'achat
+  if (j.audit?.isSus) return "signalé suspect par Jupiter";
+  if (j.audit?.devBalancePercentage == null) return "part du créateur inconnue";
+  if (j.audit.devBalancePercentage > FRESH.maxDevPct) return `le créateur détient ${Math.round(j.audit.devBalancePercentage)} % des jetons`;
   if (f.ageMin < FRESH.minAgeMin) return "trop jeune (moins de 30 min)";
   if (f.ageMin > FRESH.maxAgeH * 60) return "plus si nouveau";
   if (f.liquidity < F.minLiquidity) return `liquidité ${Math.round(f.liquidity / 1000)} k$ < ${F.minLiquidity / 1000} k$`;

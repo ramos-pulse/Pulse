@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { dexSpread, freshRefusal, freshStake, rankSelection, selectionRefusal, type JupToken } from "../supabase/functions/pulse/engine/agents.ts";
 
 const TP = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-const safe = (x: Partial<JupToken> = {}): JupToken => ({ id: "M", symbol: "OK", decimals: 6, tokenProgram: TP, isVerified: true, audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: true, topHoldersPercentage: 10 }, ...x });
+const safe = (x: Partial<JupToken> = {}): JupToken => ({ id: "M", symbol: "OK", decimals: 6, tokenProgram: TP, isVerified: true, audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: true, topHoldersPercentage: 10, devBalancePercentage: 2 }, ...x });
 const cand = { mint: "M", symbol: "OK", decimals: 6, pool: "P", liquidity: 2e6, volume24h: 3e6, ageDays: 90 };
 
 test("sélectionneur : filtres stricts (liquidité, volume, vérifié, âge, émission et gel désactivés)", () => {
@@ -27,7 +27,7 @@ test("nouveaux tokens : garde-fous anti-arnaque", () => {
   const f = { mint: "N", symbol: "NEW", decimals: 6, pool: "P", liquidity: 1e5, volume1h: 5e4, change1h: 15, buys1h: 200, sells1h: 120, ageMin: 180 };
   assert.equal(freshRefusal(f, safe({ isVerified: false })), null, "un nouveau token n'a pas besoin d'être vérifié, mais doit passer le reste");
   assert.match(freshRefusal(f, safe({ audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: false, topHoldersPercentage: 5 } }))!, /gel/);
-  assert.match(freshRefusal(f, safe({ audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: true, topHoldersPercentage: 60 } }))!, /concentration/);
+  assert.match(freshRefusal(f, safe({ audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: true, topHoldersPercentage: 60, devBalancePercentage: 2 } }))!, /concentration/);
   assert.match(freshRefusal({ ...f, sells1h: 3 }, safe())!, /vente/);
   assert.match(freshRefusal({ ...f, ageMin: 10 }, safe())!, /trop jeune/);
   assert.match(freshRefusal({ ...f, change1h: 300 }, safe())!, /variation/);
@@ -60,4 +60,13 @@ test("nouveaux tokens : les imitations de marques sont refusées", async () => {
   assert.equal(impersonates("XYZ", "Official Trump Coin"), true);
   assert.equal(impersonates("ZOTH", "Zoth"), false);
   assert.equal(impersonates("NINE"), false);
+});
+
+test("nouveaux tokens : cas NINE (suspect, créateur à 96 %) refusé", async () => {
+  const f = { mint: "M", symbol: "NINE", decimals: 6, pool: "P", liquidity: 80_000, volume1h: 50_000, change1h: 20, buys1h: 300, sells1h: 200, ageMin: 120 };
+  const a = { mintAuthorityDisabled: true, freezeAuthorityDisabled: true, topHoldersPercentage: 6.6 };
+  assert.match(freshRefusal(f, safe({ audit: { ...a, isSus: true, devBalancePercentage: 95.85 } }))!, /suspect/);
+  assert.match(freshRefusal(f, safe({ audit: { ...a, devBalancePercentage: 95.85 } }))!, /créateur détient 96/);
+  assert.match(freshRefusal(f, safe({ audit: { ...a, devBalancePercentage: 95.85 } }), true)!, /créateur/); // extra souple aussi
+  assert.match(freshRefusal(f, safe({ audit: a }))!, /créateur inconnue/);
 });
