@@ -43,3 +43,11 @@ test("arbitrage éclaireur : écart entre DEX, frais déduits", () => {
   assert.ok(o.netPct < o.grossPct - 0.5, "frais de 2 swaps et de réseau déduits");
   assert.equal(dexSpread("X", [pair("orca", 1)], "M"), null);
 });
+
+test("mode extra souple : nouveaux tokens moins exigeants, mais les contrôles anti-arnaque restent", () => {
+  const f = { mint: "N", symbol: "NEW", decimals: 6, pool: "P", liquidity: 3e4, volume1h: 1.2e4, change1h: 80, buys1h: 50, sells1h: 60, ageMin: 120 };
+  assert.ok(freshRefusal(f, safe()) !== null, "refusé en mode normal");
+  assert.equal(freshRefusal(f, safe(), true), null, "accepté en extra souple");
+  assert.match(freshRefusal(f, safe({ audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: false, topHoldersPercentage: 5 } }), true)!, /gel/);
+  assert.match(freshRefusal({ ...f, sells1h: 4 }, safe(), true)!, /vente/);
+});

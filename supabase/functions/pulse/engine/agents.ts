@@ -106,24 +106,27 @@ export const FRESH = {
 };
 export interface Fresh { mint: string; symbol: string; decimals: number; pool: string; liquidity: number; volume1h: number; change1h: number; buys1h: number; sells1h: number; ageMin: number; topHolders?: number }
 
-export function freshRefusal(f: Fresh, j: JupToken | undefined): string | null {
+/** Seuils assouplis du mode « extra souple » (les contrôles anti-arnaque restent les mêmes). */
+export const FRESH_SOFT = { minLiquidity: 25_000, minVolume1h: 10_000, minSells1h: 10, maxTopHolders: 40, minChange1h: 0, maxChange1h: 100 };
+export function freshRefusal(f: Fresh, j: JupToken | undefined, soft = false): string | null {
+  const F = soft ? { ...FRESH, ...FRESH_SOFT } : FRESH;
   if (!j) return "inconnu de Jupiter";
   if (j.tokenProgram && j.tokenProgram !== TOKEN_PROGRAM) return "programme de token non standard";
   if (j.audit?.mintAuthorityDisabled !== true) return "émission de nouveaux jetons possible";
   if (j.audit?.freezeAuthorityDisabled !== true) return "gel des comptes possible (piège classique)";
   const top = j.audit?.topHoldersPercentage;
-  if (top == null || top > FRESH.maxTopHolders) return `concentration : les gros portefeuilles détiennent ${top == null ? "?" : Math.round(top)} %`;
+  if (top == null || top > F.maxTopHolders) return `concentration : les gros portefeuilles détiennent ${top == null ? "?" : Math.round(top)} %`;
   if (f.ageMin < FRESH.minAgeMin) return "trop jeune (moins de 30 min)";
   if (f.ageMin > FRESH.maxAgeH * 60) return "plus si nouveau";
-  if (f.liquidity < FRESH.minLiquidity) return `liquidité ${Math.round(f.liquidity / 1000)} k$ < 50 k$`;
-  if (f.volume1h < FRESH.minVolume1h) return "trop peu d'échanges";
-  if (f.sells1h < FRESH.minSells1h) return "presque aucune vente réussie (risque de piège à acheteurs)";
-  if (f.change1h < FRESH.minChange1h || f.change1h > FRESH.maxChange1h) return `variation 1 h ${Math.round(f.change1h)} % hors de la zone 5-60 %`;
-  if (f.buys1h <= f.sells1h) return "plus de vendeurs que d'acheteurs";
+  if (f.liquidity < F.minLiquidity) return `liquidité ${Math.round(f.liquidity / 1000)} k$ < ${F.minLiquidity / 1000} k$`;
+  if (f.volume1h < F.minVolume1h) return "trop peu d'échanges";
+  if (f.sells1h < F.minSells1h) return "presque aucune vente réussie (risque de piège à acheteurs)";
+  if (f.change1h < F.minChange1h || f.change1h > F.maxChange1h) return `variation 1 h ${Math.round(f.change1h)} % hors de la zone ${F.minChange1h}-${F.maxChange1h} %`;
+  if (!soft && f.buys1h <= f.sells1h) return "plus de vendeurs que d'acheteurs";
   return null;
 }
 
-export async function freshCandidates(exclude: Set<string>): Promise<{ list: Fresh[]; info: Map<string, JupToken> }> {
+export async function freshCandidates(exclude: Set<string>, soft = false): Promise<{ list: Fresh[]; info: Map<string, JupToken> }> {
   const pools = await gtPools("new_pools", 2);
   const list: Fresh[] = [];
   for (const p of pools) {
@@ -134,7 +137,8 @@ export async function freshCandidates(exclude: Set<string>): Promise<{ list: Fre
       volume1h: Number(p.attributes.volume_usd.h1) || 0, change1h: Number(p.attributes.price_change_percentage?.h1) || 0, buys1h: t?.buys ?? 0, sells1h: t?.sells ?? 0,
       ageMin: (Date.now() - Date.parse(p.attributes.pool_created_at)) / 60_000 });
   }
-  const pre = list.filter((f) => f.liquidity >= FRESH.minLiquidity && f.sells1h >= FRESH.minSells1h).slice(0, 40);
+  const F = soft ? FRESH_SOFT : FRESH;
+  const pre = list.filter((f) => f.liquidity >= F.minLiquidity && f.sells1h >= F.minSells1h).slice(0, 40);
   const info = pre.length ? await jupTokens(pre.map((f) => f.mint)) : new Map<string, JupToken>();
   for (const f of pre) { const j = info.get(f.mint); if (j) { f.symbol = j.symbol; f.decimals = j.decimals; f.topHolders = j.audit?.topHoldersPercentage; } }
   return { list: pre, info };

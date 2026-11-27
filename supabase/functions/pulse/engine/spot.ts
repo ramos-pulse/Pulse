@@ -12,7 +12,7 @@ import { FRESH, freshStake } from "./agents.ts";
 import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type SetupParams } from "./setups.ts";
 import {
   addToVault, applyTransfer, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate,
-  cooldownMs, exitSlippageBps, floorOf, solReserveAlert, volScale, groupOf, LIQUIDITY, type SpotFamily,
+  EXTRA_SOFT, cooldownMs, exitSlippageBps, floorOf, solReserveAlert, volScale, groupOf, LIQUIDITY, type SpotFamily,
   rsiExitSignal, rsiSignal, RULES, sampleCurve, SOL_MINT, TOKENS, allTokens, type TokenInfo, TOTAL_RISK, tradable, trailStop, trendSignal, USDC_MINT,
   type Interval, type Memory, type Params, type Position, type RsiParams, type Signal, type SpotConfig, type SpotStrategy,
 } from "./strategy.ts";
@@ -313,7 +313,7 @@ export async function runTick(admin: Admin): Promise<string> {
         const c = await getCandles(token!.candles, plan.interval, rsi ? Math.max(rp.smaPeriod, rp.rsiPeriod * 6) + 40 : 400, now);
         const sig = rsi ? rsiSignal(c, rp) : setup ? setupSignal(setup, c, false, plan.params as SetupParams) : trendSignal(c, false, plan.params as Params);
         // stratégie non confirmée en réel : 75 % ; marché agité : taille réduite
-        const risk = (rsi ? rp.riskPct / 100 : riskPerTrade(brain)) * riskFactor(plan.confidence) * volScale(c);
+        const risk = (rsi ? rp.riskPct / 100 : riskPerTrade(brain)) * riskFactor(plan.confidence) * volScale(c) * (cfg.extraSoft ? EXTRA_SOFT.riskMult : 1);
         if (sig.side === "long") choices.push({ token: token!, sig, strategy: plan.family, params: plan.params, interval: plan.interval, rank: plan.score, risk, source: plan.source, seenKey: key, closed: closedP });
         else { notes.push(`${token!.symbol} ${plan.interval === "15m" ? "15 min" : "1 h"} : ${sig.reason}`); done(); }
       } catch { notes.push(`${token!.symbol} : historique indisponible`); }
@@ -410,7 +410,7 @@ async function freshEntry(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfi
   const T = tradable(value, b.usdc, mem.vault);
   const stake = Math.min(freshStake(T.equity), T.usdc);
   if (!(stake >= RISK.minOrderUsd) || stake * FRESH.stopPct > T.equity * 0.04) return null;
-  const pick = allTokens().find((t) => t.extra === "nouveau" && t.active !== false && t.seenAt && now - t.seenAt < 15 * 60_000 && !mem.fresh![t.mint] && !(b.raw[t.mint] ?? 0n));
+  const pick = allTokens().find((t) => t.extra === "nouveau" && t.active !== false && t.seenAt && now - t.seenAt < (cfg.extraSoft ? 30 : 15) * 60_000 && !mem.fresh![t.mint] && !(b.raw[t.mint] ?? 0n));
   if (!pick) return null;
   mem.fresh[pick.mint] = today; // jamais deux tentatives sur le même token
   const quote = await getQuote(USDC_MINT, pick.mint, BigInt(Math.floor(stake * 1e6)), 100).catch(() => null);

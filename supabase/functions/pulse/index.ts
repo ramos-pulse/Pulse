@@ -9,7 +9,7 @@ import { candles as getCandles, hourlyCandles } from "./engine/candles.ts";
 import { env } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, allTokens, setExtraTokens, type TokenInfo, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
+import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, type TokenInfo, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, simulate, tempo, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, pushHook, type BotKind, type BotState } from "./store.ts";
 import { arbScan, FRESH, freshCandidates, freshRefusal, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
@@ -389,13 +389,17 @@ async function revalidate(m: Market, candles: Candle[], ctx: { blockedAt?: (t: n
 const QUALIFY = { minTestTrades: 5, minTestPF: 1.3, maxTestDD: 10, maxAgeDays: REVALIDATE.maxAgeDays };
 /** Mode agressif des agents : critères assouplis (« à surveiller » accepté), plus de stratégies retenues mais moins sûres. */
 const QUALIFY_AGGR = { minTestTrades: 4, minTestPF: 1.15, maxTestDD: 20, minTrainPF: 1.0, maxAgeDays: REVALIDATE.maxAgeDays };
-interface AgentSettings { aggressive: boolean; nerve: number; perps?: number }
-const agentSettings = (spotConfig: unknown): AgentSettings => { const c = loadConfig(spotConfig); return { aggressive: c.researchAggressive, nerve: c.nerve, perps: c.researchPerps }; };
+interface AgentSettings { aggressive: boolean; nerve: number; perps?: number; soft?: boolean }
+const agentSettings = (spotConfig: unknown): AgentSettings => { const c = loadConfig(spotConfig); return { aggressive: c.researchAggressive, nerve: c.nerve, perps: c.researchPerps, soft: c.extraSoft }; };
 function qualifies(r: ResearchRow, a: AgentSettings = { aggressive: false, nerve: 1 }): boolean {
   // « fraîche » = créée ou re-validée sur des données récentes depuis moins de 10 jours (re-validation chaque semaine)
   const young = Date.now() - Date.parse(r.validated_at ?? r.created_at) < QUALIFY.maxAgeDays * 86_400_000;
   if (!young || r.verdict === "déçue en réel" || r.verdict === "périmée" || r.live?.failed) return false;
   const luck = r.test.luck;
+  if (a.soft) { // mode extra souple : presque tout ce qui est positif sur la période jamais vue (risque divisé par 2 dans les bots)
+    const t0 = tempo(r); if (a.nerve === 0 && t0 > 1) return false; if (a.nerve === 3 && t0 < 2) return false;
+    return (r.test.trades ?? 0) >= EXTRA_SOFT.minTestTrades && (r.test.profitFactor ?? 0) >= EXTRA_SOFT.minTestPF && (r.test.maxDrawdownPct ?? 99) <= EXTRA_SOFT.maxTestDD;
+  }
   if (luck != null && luck > (a.aggressive ? LUCK.rejectAggressive : LUCK.reject)) return false; // probablement de la chance
   const t = tempo(r);
   if (a.nerve === 0 && t > 1) return false;          // calme : pas de stratégie nerveuse
@@ -438,8 +442,17 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
   const spotCfg = loadConfig(bots.spot.config), perpsCfg = loadPerpsConfig(bots.perps.config);
   if (!spotCfg.autopilot && !perpsCfg.autopilot) return "désactivé";
   const A = agentSettings(bots.spot.config);
-  const { data } = await db.from("research").select("*").neq("verdict", "rejetée").order("score", { ascending: false }).limit(300);
-  const good = ((data ?? []) as ResearchRow[]).filter((r) => qualifies(r, A)).sort(pilotRank(A, await liveRegimes()));
+  const { data } = A.soft ? await db.from("research").select("*").order("score", { ascending: false }).limit(600)
+    : await db.from("research").select("*").neq("verdict", "rejetée").order("score", { ascending: false }).limit(300);
+  const rows = (data ?? []) as ResearchRow[];
+  let good = rows.filter((r) => qualifies(r, A)).sort(pilotRank(A, await liveRegimes()));
+  if (A.soft) { // extra souple : si un bot n'a rien, il prend quand même la meilleure stratégie positive sur la période jamais vue
+    for (const kind of ["spot", "perps"] as const) {
+      if (good.some((r) => r.kind === kind)) continue;
+      const fallback = rows.filter((r) => r.kind === kind && r.verdict !== "déçue en réel" && r.verdict !== "périmée" && !r.live?.failed && (r.test.returnPct ?? 0) > 0 && (r.test.trades ?? 0) >= 2).slice(0, 3);
+      good = [...good, ...fallback];
+    }
+  }
   const changes: string[] = [];
   if (spotCfg.autopilot) {
     const spotRows = good.filter((r) => r.kind === "spot");
@@ -675,10 +688,11 @@ async function runFreshScout(): Promise<string> {
   // les « nouveaux » de plus de 24 h ne sont plus des nouveaux
   const old = new Date(Date.now() - FRESH.maxAgeH * 3_600_000).toISOString();
   await db.from("token_universe").update({ active: false, removed_at: new Date().toISOString(), why: "plus de 24 h" }).eq("kind", "nouveau").eq("active", true).lt("added_at", old);
-  const { list, info } = await freshCandidates(known);
+  const soft = loadConfig((await readBots()).spot.config).extraSoft;
+  const { list, info } = await freshCandidates(known, soft);
   const ok = [], refusals: Record<string, number> = {};
   for (const f of list) {
-    const why = freshRefusal(f, info.get(f.mint));
+    const why = freshRefusal(f, info.get(f.mint), soft);
     if (why) { const k = why.split(" (")[0]!.split(" :")[0]!; refusals[k] = (refusals[k] ?? 0) + 1; continue; }
     if (!f.decimals) continue;
     ok.push(f);
@@ -938,6 +952,14 @@ Deno.serve(async (req) => {
     }
     if (req.method === "POST" && route === "/api/push/test") return json({ sent: await pushAll("Test : les notifications de Pulse fonctionnent ✅") });
     if (req.method === "POST" && route === "/api/agents/selector/run") return json({ result: await runSelector(true) });
+    if (req.method === "POST" && route === "/api/extra-soft") {
+      const b = (await req.json().catch(() => ({}))) as { on?: boolean };
+      const bots = await readBots(), on = b.on === true;
+      await setBot("spot", { config: { ...loadConfig(bots.spot.config), extraSoft: on } });
+      await setBot("perps", { config: { ...loadPerpsConfig(bots.perps.config), extraSoft: on } });
+      await notify(on ? "Mode EXTRA SOUPLE activé : critères très assouplis, risque divisé par 2 sur chaque trade" : "Mode extra souple coupé : retour aux critères normaux");
+      return json({ ok: true, on, pilot: await autopilot(true).catch((e) => `pilote : ${(e as Error).message}`) });
+    }
     if (req.method === "POST" && route === "/api/agents/fresh") {
       const b = (await req.json().catch(() => ({}))) as { on?: boolean };
       const sc = loadConfig((await readBots()).spot.config);

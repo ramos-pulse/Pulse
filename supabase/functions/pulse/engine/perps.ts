@@ -9,7 +9,7 @@ import { fundingHistory } from "./funding.ts";
 import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type Extra, type SetupParams } from "./setups.ts";
 import {
   addToVault, applyTransfer, detectTransfer, AGGR_AGGRESSIVE, AGGR_LEVELS, effectiveAggr, atr, dayKey, exitCheck, loadMemory, loadPerpsConfig, migratePositions, missionEnd, PARTIAL, PERPS_ASSETS, PERPS_RULES,
-  perpsChange, perpsSizing, PRESETS, RISK, riskFactor, cooldownMs, floorOf, solReserveAlert, volScale, sampleCurve, sideMult, riskGate, RULES, TOTAL_RISK, tradable, trailStop, trendSignal, DEFAULT_PARAMS,
+  perpsChange, perpsSizing, PRESETS, RISK, EXTRA_SOFT, riskFactor, cooldownMs, floorOf, solReserveAlert, volScale, sampleCurve, sideMult, riskGate, RULES, TOTAL_RISK, tradable, trailStop, trendSignal, DEFAULT_PARAMS,
   type Interval, type Memory, type Params, type PerpsConfig, type PerpsPlan, type Position,
 } from "./strategy.ts";
 
@@ -252,7 +252,7 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
       const price = await priceOf(A);
       const dist = Math.abs(sig.price - sig.stop);
       const stop = sig.side === "long" ? price - dist : price + dist;
-      const confidence = plan ? riskFactor(plan.confidence) : 1; // stratégie du chercheur pas encore confirmée en réel : 75 %
+      const confidence = (plan ? riskFactor(plan.confidence) : 1) * (cfg.extraSoft ? EXTRA_SOFT.riskMult : 1); // stratégie pas encore confirmée en réel : 75 % ; extra souple : ×0,5
       const vol = volScale(c); // marché agité : risque réduit (les stops sautent plus souvent)
       const wanted = Math.min(L.maxRisk, riskPerTrade(brain) * L.riskMult) * mult * confidence * vol;
       const room = L.maxRisk * TOTAL_RISK.perpsMult - openRisk(held, value); // risque total plafonné
