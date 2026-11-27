@@ -405,14 +405,15 @@ export async function runTick(admin: Admin): Promise<string> {
 async function freshEntry(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, address: string, keyPair: KeyPair, b: Balances, value: number, now: number): Promise<string | null> {
   const today = dayKey(now);
   mem.fresh ??= {};
-  for (const [k, d] of Object.entries(mem.fresh)) if (d < dayKey(now - 7 * 86_400_000)) delete mem.fresh[k];
+  // valeur = jour de l'achat ; « skip:jour » = token examiné mais écarté (ne compte pas dans les 3 achats du jour)
+  for (const [k, d] of Object.entries(mem.fresh)) if (d.replace(/^skip:/, "") < dayKey(now - 7 * 86_400_000)) delete mem.fresh[k];
   if (Object.values(mem.fresh).filter((d) => d === today).length >= FRESH.maxPerDay) return null;
   const T = tradable(value, b.usdc, mem.vault);
   const stake = Math.min(freshStake(T.equity), T.usdc);
   if (!(stake >= RISK.minOrderUsd) || stake * FRESH.stopPct > T.equity * 0.04) return null;
   const pick = allTokens().find((t) => t.extra === "nouveau" && t.active !== false && t.seenAt && now - t.seenAt < (cfg.extraSoft ? 30 : 15) * 60_000 && !mem.fresh![t.mint] && !(b.raw[t.mint] ?? 0n));
   if (!pick) return null;
-  mem.fresh[pick.mint] = today; // jamais deux tentatives sur le même token
+  mem.fresh[pick.mint] = `skip:${today}`; // jamais deux tentatives sur le même token
   const quote = await getQuote(USDC_MINT, pick.mint, BigInt(Math.floor(stake * 1e6)), 100).catch(() => null);
   if (!quote) return `Nouveau token ${pick.symbol} : pas de cotation Jupiter, ignoré.`;
   const impact = Number(quote.priceImpactPct) * 100;
@@ -420,6 +421,7 @@ async function freshEntry(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfi
   const fillPrice = stake / (Number(quote.outAmount) / 10 ** pick.decimals);
   const liqAtEntry = (await tokenLiquidity([pick.mint]).catch(() => ({} as Record<string, number>)))[pick.mint];
   const sig = await executeSwap(quote, address, keyPair, { protect: protectNow(mem, now) });
+  mem.fresh[pick.mint] = today; // achat réellement envoyé : compte dans la limite du jour
   mem.signal = `${pick.symbol} : nouveau token repéré par l'agent`;
   mem.pending = { kind: "buy", sig, at: now, mint: pick.mint, usdcBefore: b.usdc, expectedPrice: fillPrice, draft: {
     key: pick.mint, symbol: pick.symbol, side: "long", stop: fillPrice * (1 - FRESH.stopPct), target: fillPrice * (1 + FRESH.targetPct), best: fillPrice, initialRisk: fillPrice * FRESH.stopPct,
