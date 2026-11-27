@@ -40,6 +40,7 @@ test("marché qui revient à la moyenne : VR < 1, demi-vie retrouvée ⇒ propos
   const hl = halfLife(c, 50)!; assert.ok(hl > 1 && hl < 12, `demi-vie ${hl}`);
   const p = propose(c, market);
   assert.ok(p.some((x) => x.candidate.family === "rsi")); assert.ok(p.every((x) => x.rationale.length > 20));
-  // en perps (pas de RSI), un marché qui revient à la moyenne ne reçoit aucune stratégie de tendance
-  assert.equal(propose(c, { ...market, kind: "perps" }).length, 0);
+  // en perps (pas de RSI) : un marché qui revient à la moyenne reçoit des stratégies RANGE, pas de tendance
+  const pp = propose(c, { ...market, kind: "perps" });
+  assert.ok(pp.length >= 1 && pp.every((x) => x.candidate.family === "range"), JSON.stringify(pp.map((x) => x.candidate.family)));
 });

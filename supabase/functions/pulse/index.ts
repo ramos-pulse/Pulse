@@ -9,7 +9,7 @@ import { candles as getCandles, hourlyCandles } from "./engine/candles.ts";
 import { env } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, effectiveAggr, LEVERAGES, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
+import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, sanitizeRange, LEVERAGES, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, tempo, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, type BotKind, type BotState } from "./store.ts";
 import { cleanWallet, CLEANER } from "./engine/cleaner.ts";
@@ -88,6 +88,15 @@ async function setBot(kind: BotKind, patch: Partial<BotState>) {
   if (error) throw new Error(error.message);
 }
 
+/** Nouvelle mission : perte du jour, pause après perte, références de soldes et courbe repartent de zéro (le cerveau et les positions sont gardés). */
+function freshMissionMemory(ph: unknown, startValue: number | null) {
+  const mem = loadMemory(ph);
+  mem.day = dayKey(Date.now()); mem.dayStartValue = startValue ?? undefined; mem.cooldownUntil = undefined;
+  delete mem.lastUsdc; delete mem.lastSol;
+  mem.curve = startValue ? [{ t: Date.now(), v: Math.round(startValue * 100) / 100 }] : [];
+  return mem;
+}
+
 async function startMission(kind: BotKind, body: { goal_usd?: number; days?: number }) {
   const bot = (await readBots())[kind];
   if (bot.status === "running") return { ok: true };
@@ -103,7 +112,7 @@ async function startMission(kind: BotKind, body: { goal_usd?: number; days?: num
   }
   await setBot(kind, {
     status: "running", goal_usd: goal,
-    ...(isNew ? { started_at: new Date().toISOString(), start_value_usd: startValue, end_at: new Date(Date.now() + days * 86_400_000).toISOString() } : {}),
+    ...(isNew ? { started_at: new Date().toISOString(), start_value_usd: startValue, end_at: new Date(Date.now() + days * 86_400_000).toISOString(), price_history: freshMissionMemory(bot.price_history, startValue) as never } : {}),
     last_message: isNew ? "Mission lancée. J'analyse le marché." : "Je reprends la mission.",
   });
   await notify(`${kind === "spot" ? "Bot spot" : "Bot perps"} : mission ${isNew ? "lancée" : "reprise"} (objectif ${goal} $)`);
@@ -211,7 +220,7 @@ async function backtestMarket(i: number) {
 
 // ------------------------------------------------------------------ agent chercheur
 type LiveStats = { trades: number; wins: number; pnlUsd: number; profitFactor: number; confirmed: boolean; failed: boolean; lastAt: string };
-type ResearchRow = { id: number; created_at: string; market: string; product: string; symbol?: string | null; interval?: string | null; kind: "spot" | "perps"; family: "tendance" | "rsi"; params: Candidate["params"]; train: Record<string, number>; test: Record<string, number>; score: number; verdict: string; why: string; live?: LiveStats | null; origin?: string | null; rationale?: string | null };
+type ResearchRow = { id: number; created_at: string; market: string; product: string; symbol?: string | null; interval?: string | null; kind: "spot" | "perps"; family: "tendance" | "rsi" | "range"; params: Candidate["params"]; train: Record<string, number>; test: Record<string, number>; score: number; verdict: string; why: string; live?: LiveStats | null; origin?: string | null; rationale?: string | null };
 
 // ------------------------------------------------------------------ apprentissage croisé : le chercheur apprend des vrais trades des bots
 const LIVE = { minTrades: 4, failPF: 0.8, confirmPF: 1.2, boost: 1.3, days: 45 };
@@ -287,6 +296,7 @@ async function runResearch() {
   // 1. le mathématicien analyse la partie entraînement (jamais la période de validation) et propose ses stratégies en premier
   const train = candles.slice(0, Math.floor(candles.length * 2 / 3));
   const insight = analyze(train);
+  const liveInsight = analyze(candles.slice(-300)); // régime EN DIRECT (300 dernières bougies) : oriente le pilote
   let proposed = 0;
   for (const pr of propose(train, m, insight, { aggressive: A.aggressive, fast })) {
     const key = candidateKey(pr.candidate);
@@ -295,7 +305,8 @@ async function runResearch() {
     const e = evaluate(pr.candidate, candles, m);
     rows.push({ key, market: pr.candidate.market, product: pr.candidate.product, symbol: pr.candidate.symbol, interval: pr.candidate.interval, kind: pr.candidate.kind, family: pr.candidate.family, params: pr.candidate.params, train: e.train, test: e.test, score: e.score, verdict: e.verdict, why: e.why, origin: "mathématicien", rationale: pr.rationale });
   }
-  await db.from("math_insights").upsert({ key: `${m.product}|${m.kind}|${m.interval}`, updated_at: new Date().toISOString(), market: m.name, kind: m.kind, interval: m.interval, regime: insight.regime, hurst: insight.hurst, ac1: insight.ac1, half_life: insight.halfLife, significant: insight.significant, vr: insight.vr, note: insight.note, proposed }, { onConflict: "key" });
+  await db.from("math_insights").upsert({ key: `${m.product}|${m.kind}|${m.interval}`, updated_at: new Date().toISOString(), market: m.name, kind: m.kind, interval: m.interval, regime: insight.regime, hurst: insight.hurst, ac1: insight.ac1, half_life: insight.halfLife, significant: insight.significant, vr: insight.vr, note: insight.note, proposed,
+    live_regime: liveInsight.regime, live_note: liveInsight.note }, { onConflict: "key" });
   // 2. le chercheur : moitié améliorations des meilleures (y compris celles du mathématicien), moitié idées nouvelles
   let tries = 0;
   while (rows.length < RESEARCH_MAX && performance.now() - t0 < RESEARCH_BUDGET_MS && tries < RESEARCH_MAX * 5) {
@@ -344,15 +355,27 @@ function qualifies(r: ResearchRow, a: AgentSettings = { aggressive: false, nerve
     && (r.test.maxDrawdownPct ?? 99) <= Q.maxTestDD && (r.train.profitFactor ?? 0) >= Q.minTrainPF;
 }
 /** Classement du pilote : le réel d'abord, puis le score ; en mode nerveux, les stratégies rapides (plus de trades) passent devant. */
-const pilotRank = (a: AgentSettings) => (x: ResearchRow, y: ResearchRow) => {
-  const boost = (r: ResearchRow) => effScore(r) * (a.nerve >= 2 ? 1 + (a.nerve - 1) * 0.3 * tempo(r) : 1);
+/** Régime en direct du marché d'une stratégie : la bonne famille passe devant (tendance ⇄ range/RSI). */
+const REGIME_FIT = { match: 1.4, mismatch: 0.6 };
+function regimeFit(r: ResearchRow, regimes: Map<string, string>) {
+  const reg = regimes.get(`${r.product}|${r.kind}|${r.interval}`);
+  if (!reg || reg === "hasard") return 1;
+  const meanRev = r.family === "range" || r.family === "rsi";
+  return (reg === "tendance") === !meanRev ? REGIME_FIT.match : REGIME_FIT.mismatch;
+}
+async function liveRegimes(): Promise<Map<string, string>> {
+  const { data } = await db.from("math_insights").select("key, live_regime").limit(200);
+  return new Map(((data ?? []) as { key: string; live_regime?: string | null }[]).filter((x) => x.live_regime).map((x) => [x.key, x.live_regime!]));
+}
+const pilotRank = (a: AgentSettings, regimes = new Map<string, string>()) => (x: ResearchRow, y: ResearchRow) => {
+  const boost = (r: ResearchRow) => effScore(r) * regimeFit(r, regimes) * (a.nerve >= 2 ? 1 + (a.nerve - 1) * 0.3 * tempo(r) : 1);
   return tier(y) - tier(x) || boost(y) - boost(x);
 };
 const symbolOfRow = (r: ResearchRow) => r.symbol ?? r.market.replace(/^(Spot|Perps) /, "").split(" ")[0]!;
 const confidenceOf = (r: ResearchRow) => (r.live?.confirmed ? "confirmée" as const : "nouvelle" as const);
-const toSpotPlan = (r: ResearchRow): SpotPlan => ({ symbol: symbolOfRow(r), family: r.family, params: r.family === "rsi" ? sanitizeRsi({ ...(r.params as RsiParams), riskPct: 1, naive: false }) : sanitizeTrend(r.params)!,
+const toSpotPlan = (r: ResearchRow): SpotPlan => ({ symbol: symbolOfRow(r), family: r.family === "rsi" ? "rsi" : "tendance", params: r.family === "rsi" ? sanitizeRsi({ ...(r.params as RsiParams), riskPct: 1, naive: false }) : sanitizeTrend(r.params)!,
   interval: r.interval === "15m" ? "15m" : "1h", source: `chercheur #${r.id} · ${r.market}`, score: effScore(r), confidence: confidenceOf(r) });
-const toPerpsPlan = (r: ResearchRow): PerpsPlan => ({ asset: symbolOfRow(r), params: sanitizeTrend(r.params) as Params, interval: r.interval === "15m" ? "15m" : "1h", source: `chercheur #${r.id} · ${r.market}`, score: effScore(r), confidence: confidenceOf(r) });
+const toPerpsPlan = (r: ResearchRow): PerpsPlan => ({ asset: symbolOfRow(r), ...(r.family === "range" ? { family: "range" as const, params: sanitizeRange(r.params)! } : { params: sanitizeTrend(r.params) as Params }), interval: r.interval === "15m" ? "15m" : "1h", source: `chercheur #${r.id} · ${r.market}`, score: effScore(r), confidence: confidenceOf(r) });
 
 /** Choisit tout seul les tokens et stratégies des bots dont le pilote est activé. Renvoie un résumé des changements. */
 async function autopilot(fresh = false): Promise<string> { // fresh : refaire le choix de zéro (après un changement de réglages)
@@ -361,7 +384,7 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
   if (!spotCfg.autopilot && !perpsCfg.autopilot) return "désactivé";
   const A = agentSettings(bots.spot.config);
   const { data } = await db.from("research").select("*").neq("verdict", "rejetée").order("score", { ascending: false }).limit(300);
-  const good = ((data ?? []) as ResearchRow[]).filter((r) => qualifies(r, A)).sort(pilotRank(A));
+  const good = ((data ?? []) as ResearchRow[]).filter((r) => qualifies(r, A)).sort(pilotRank(A, await liveRegimes()));
   const changes: string[] = [];
   if (spotCfg.autopilot) {
     const spotRows = good.filter((r) => r.kind === "spot");
@@ -486,7 +509,8 @@ async function eveningReport(force = false): Promise<string> {
   let pnlAll = 0;
   for (const k of KINDS) {
     const b = bots[k], mem = loadMemory(b.price_history), pos = Object.values(migratePositions(mem, b));
-    const t = ((trades ?? []) as { bot: string; pnl_usd?: number | null }[]).filter((x) => x.bot === k);
+    const t = ((trades ?? []) as { bot: string; pnl_usd?: number | null; side?: string | null; action?: string | null }[])
+      .filter((x) => x.bot === k && !["deposit", "withdraw"].includes(x.side ?? x.action ?? ""));
     const closed = t.filter((x) => typeof x.pnl_usd === "number"), pnl = closed.reduce((a, x) => a + (x.pnl_usd ?? 0), 0);
     pnlAll += pnl;
     const start = Number(b.start_value_usd) || null, v = b.last_value_usd;
@@ -574,6 +598,7 @@ Règles :
 - Tu apprends des vrais trades des bots (resultats_reels) : une stratégie qui perd en réel après 4 trades est déclassée « déçue en réel », une qui gagne est « confirmée » et prioritaire. Une stratégie nouvelle est tradée avec 75 % du risque normal tant qu'elle n'est pas confirmée. Les résultats réels comptent plus que les simulations.
 - Tu travailles avec l'agent mathématicien (donnees.mathematicien) : sur la partie entraînement de l'historique seulement, il mesure le ratio de variance de Lo-MacKinlay (test z, significatif si |z| > 1,96), l'exposant de Hurst, l'autocorrélation et la demi-vie du retour à la moyenne, en déduit le régime du marché (tendance, retour à la moyenne, ou hasard) et des réglages, puis te les propose. Tu testes ses propositions comme les tiennes, sur la période jamais vue. Explique ses conclusions simplement quand on te le demande, et sois honnête : un marché « hasard » n'a pas d'avantage exploitable, et son taux de réussite comparé au tien dit si ses maths aident vraiment.
 - Réglages des agents (donnees.reglages_agents) : en mode agressif, le pilote accepte aussi les stratégies « à surveiller » (≥ 4 trades, PF ≥ 1,15, baisse ≤ 20 %, entraînement PF ≥ 1) et le bot perps applique son agressivité même en pilote automatique ; sinon il reste plafonné à « Normal ». La nervosité (Calme, Normal, Nerveux, Très nerveux) oriente la recherche vers des stratégies plus rapides (15 min, cassures courtes) et le pilote vers celles qui tradent plus souvent. Rappelle que plus nerveux ou plus agressif = plus de trades et plus de risque, pas forcément plus de gains.
+- Familles de stratégies : « tendance » (cassure, ou achat sur repli vers la moyenne 20 si params.entry = "repli"), « rsi » (spot : achat d'excès de baisse), « range » (perps : bandes de Bollinger, long sous la bande basse, short au-dessus de la bande haute, objectif le retour à la moyenne, seulement en marché sans tendance). Le mathématicien mesure aussi le régime EN DIRECT de chaque marché (live_regime) : le pilote favorise la famille qui colle au régime (tendance ⇄ range/RSI).
 - Chaque stratégie a une « chance » (test.luck) : probabilité, estimée par le mathématicien, que son résultat sur la période jamais vue soit dû au hasard, compte tenu du nombre de stratégies essayées. Au-dessus de 50 % (80 % en mode agressif), le pilote l'écarte. Explique-le simplement si on te le demande.
 - Protections des bots : coffre à gains (une part de chaque gain n'est plus retradée), disjoncteur global (tout s'arrête si les deux bots perdent plus de X % ensemble), filtre BTC pour le spot, prise de bénéfices partielle (spot : moitié vendue à +1,5 R ; perps : stop au prix d'entrée à +1,5 R), jusqu'à 3 positions par bot avec un risque total plafonné.
 - Tu ne donnes pas de conseil d'investissement personnalisé ; rappelle de ne risquer que ce qu'on accepte de perdre si on te demande combien investir.

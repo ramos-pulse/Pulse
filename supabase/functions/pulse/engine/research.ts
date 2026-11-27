@@ -5,9 +5,9 @@
 //  - puis sur le dernier tiers, qu'aucun réglage n'a « vu » (« validation »).
 // Une stratégie qui ne gagne que sur l'entraînement a appris le passé par cœur : elle est rejetée.
 // Les meilleures servent de parents : le chercheur les fait muter légèrement pour trouver mieux.
-import { backtest, backtestRsi, type BacktestResult, type Candle, type Interval, type Params, type RsiParams } from "./strategy.ts";
+import { backtest, backtestRange, backtestRsi, type BacktestResult, type Candle, type Interval, type Params, type RangeParams, type RsiParams } from "./strategy.ts";
 
-export type Family = "tendance" | "rsi";
+export type Family = "tendance" | "rsi" | "range";
 export type BotKind = "spot" | "perps";
 
 export interface Market { name: string; product: string; symbol: string; kind: BotKind; interval: Interval; feePct: number; hourlyCost: number; cap: number }
@@ -19,7 +19,7 @@ export interface Candidate {
   kind: BotKind;
   interval: Interval;        // 1 h, ou 15 min pour le scalping
   family: Family;
-  params: Params | RsiParams;
+  params: Params | RsiParams | RangeParams;
 }
 
 export interface SegmentStats { trades: number; winRate: number; profitFactor: number; returnPct: number; maxDrawdownPct: number; meanPct?: number; sdPct?: number; luck?: number }
@@ -30,20 +30,24 @@ const pick = <T>(rnd: () => number, list: readonly T[]): T => list[Math.floor(rn
 export const SPACE = {
   tendance: { breakout: [12, 24, 36, 48, 72, 96], trailAtr: [2, 2.5, 3, 3.5, 4], minTrend: [0.5, 0.8, 1, 1.2, 1.5, 2] },
   rsi: { rsiPeriod: [7, 10, 14, 21], entry: [20, 25, 30, 35], exit: [45, 50, 55, 60, 65], smaPeriod: [50, 100, 150, 200], swingBars: [5, 10, 15, 20] },
+  range: { bbPeriod: [14, 20, 30], bbK: [1.5, 2, 2.5], stopAtr: [1, 1.5, 2, 3], maxTrend: [0.5, 1, 1.5] },
 } as const;
+/** Part des stratégies de tendance tirées en « achat sur repli » plutôt qu'en cassure. */
+export const PULLBACK_SHARE = 0.4;
 
 /** Réglages supplémentaires explorés quand la nervosité est « Nerveux » ou plus : cassures très courtes, stops serrés, RSI rapide. */
 export const SPACE_FAST = {
   tendance: { breakout: [6, 8], trailAtr: [1.5], minTrend: [0.3] },
   rsi: { rsiPeriod: [5], entry: [40], exit: [] as number[], smaPeriod: [20], swingBars: [3] },
+  range: { bbPeriod: [10], bbK: [1.2], stopAtr: [] as number[], maxTrend: [] as number[] },
 } as const;
-type Space = { tendance: Record<keyof typeof SPACE.tendance, readonly number[]>; rsi: Record<keyof typeof SPACE.rsi, readonly number[]> };
+type Space = { tendance: Record<keyof typeof SPACE.tendance, readonly number[]>; rsi: Record<keyof typeof SPACE.rsi, readonly number[]>; range: Record<keyof typeof SPACE.range, readonly number[]> };
 /** Espace de recherche : normal, ou élargi aux réglages nerveux. Les listes restent triées (les mutations bougent d'un cran). */
 export function space(fast = false): Space {
   if (!fast) return SPACE;
   const merge = <T extends Record<string, readonly number[]>>(a: T, b: Partial<Record<keyof T, readonly number[]>>) =>
     Object.fromEntries(Object.entries(a).map(([k, v]) => [k, [...new Set([...(b[k as keyof T] ?? []), ...v])].sort((x, y) => x - y)])) as unknown as T;
-  return { tendance: merge(SPACE.tendance, SPACE_FAST.tendance), rsi: merge(SPACE.rsi, SPACE_FAST.rsi) };
+  return { tendance: merge(SPACE.tendance, SPACE_FAST.tendance), rsi: merge(SPACE.rsi, SPACE_FAST.rsi), range: merge(SPACE.range, SPACE_FAST.range) };
 }
 
 /**
@@ -51,24 +55,30 @@ export function space(fast = false): Space {
  * Bougies de 15 min, cassures courtes et RSI rapide la rendent plus nerveuse (plus de trades).
  */
 export function tempo(c: { interval?: string | null; family: Family; params: unknown }): number {
-  const p = c.params as Record<string, number>;
+  const p = c.params as Record<string, unknown>;
   let t = 1 + (c.interval === "15m" ? 1 : 0);
   const b = Number(p.breakout), r = Number(p.rsiPeriod);
-  if (c.family === "tendance") t += b <= 12 ? 1 : b >= 48 ? -1 : 0;
+  if (c.family === "range") t += Number(p.bbPeriod) <= 14 ? 1 : 0;
+  else if (c.family === "tendance") t += (b <= 12 ? 1 : b >= 48 ? -1 : 0) + (p.entry === "repli" ? 1 : 0);
   else t += r <= 7 ? 1 : r >= 21 ? -1 : 0;
   return Math.max(0, Math.min(3, t));
 }
 
 /** Une stratégie au hasard dans l'espace de recherche. Le RSI n'existe qu'en spot (achat uniquement). */
 export function randomCandidate(rnd: () => number, m: Market, fast = false): Candidate {
-  const family: Family = m.kind === "spot" && rnd() < 0.5 ? "rsi" : "tendance";
+  // spot : tendance ou RSI (achat seulement) ; perps : tendance ou range (long et short)
+  const family: Family = rnd() < 0.5 ? "tendance" : m.kind === "spot" ? "rsi" : "range";
   return { market: m.name, product: m.product, symbol: m.symbol, kind: m.kind, interval: m.interval, family, params: randomParams(rnd, family, space(fast)) };
 }
 
-function randomParams(rnd: () => number, family: Family, S: Space = SPACE): Params | RsiParams {
+function randomParams(rnd: () => number, family: Family, S: Space = SPACE): Params | RsiParams | RangeParams {
   if (family === "tendance") {
     const t = S.tendance;
-    return { breakout: pick(rnd, t.breakout), trailAtr: pick(rnd, t.trailAtr), minTrend: pick(rnd, t.minTrend) };
+    return { breakout: pick(rnd, t.breakout), trailAtr: pick(rnd, t.trailAtr), minTrend: pick(rnd, t.minTrend), ...(rnd() < PULLBACK_SHARE ? { entry: "repli" as const } : {}) };
+  }
+  if (family === "range") {
+    const g = S.range;
+    return { bbPeriod: pick(rnd, g.bbPeriod), bbK: pick(rnd, g.bbK), stopAtr: pick(rnd, g.stopAtr), maxTrend: pick(rnd, g.maxTrend) };
   }
   const r = S.rsi;
   const entry = pick(rnd, r.entry);
@@ -86,7 +96,7 @@ export function mutate(rnd: () => number, c: Candidate, fast = false): Candidate
   let i = list.indexOf(cur);
   if (i < 0) i = Math.floor(list.length / 2);
   const j = Math.max(0, Math.min(list.length - 1, i + (rnd() < 0.5 ? -1 : 1)));
-  const params = { ...c.params, [k]: list[j] } as Params | RsiParams;
+  const params = { ...c.params, [k]: list[j] } as Params | RsiParams | RangeParams;
   if (c.family === "rsi") { const p = params as RsiParams; if (p.exit <= p.entry + 5) p.exit = Math.min(95, p.entry + 15); }
   return { ...c, params };
 }
@@ -115,6 +125,8 @@ function segment(log: BacktestResult["log"]): SegmentStats {
 export function evaluate(c: Candidate, candles: Candle[], m: Market): Evaluation {
   const r = c.family === "rsi"
     ? backtestRsi(candles, c.params as RsiParams, m.feePct)
+    : c.family === "range"
+    ? backtestRange(candles, c.params as RangeParams, { allowShort: m.kind === "perps", feePct: m.feePct, hourlyCost: m.hourlyCost, leverageCap: m.cap, hoursPerBar: c.interval === "15m" ? 0.25 : 1 })
     : backtest(candles, { allowShort: m.kind === "perps", feePct: m.feePct, hourlyCost: m.hourlyCost, leverageCap: m.cap, params: c.params as Params });
   const split = candles[Math.floor(candles.length * 2 / 3)]?.t ?? Infinity;
   const train = segment(r.log.filter((t) => t.t < split));
@@ -140,8 +152,13 @@ export function describe(c: Pick<Candidate, "family" | "params" | "kind"> & { in
     const p = c.params as RsiParams;
     return `${iv} · RSI(${p.rsiPeriod}) sous ${p.entry} au-dessus de la MM${p.smaPeriod}, sortie RSI > ${p.exit}, stop creux ${p.swingBars} bougies`;
   }
+  if (c.family === "range") {
+    const p = c.params as RangeParams;
+    return `${iv} · range : sortie des bandes de Bollinger (${p.bbPeriod}, ${p.bbK}), retour à la moyenne, stop ${p.stopAtr} ATR, seulement si force < ${p.maxTrend} ATR, long et short`;
+  }
   const p = c.params as Params;
   const span = c.interval === "15m" ? `${p.breakout} bougies (${Math.round(p.breakout / 4)} h)` : `${p.breakout} h`;
+  if (p.entry === "repli") return `${iv} · tendance : achat sur repli vers la moyenne 20 (tendance de ${span}), force ≥ ${p.minTrend} ATR, stop suiveur ${p.trailAtr} ATR${c.kind === "perps" ? ", long et short" : ""}`;
   return `${iv} · tendance : cassure ${span}, force ≥ ${p.minTrend} ATR, stop suiveur ${p.trailAtr} ATR${c.kind === "perps" ? ", long et short" : ""}`;
 }
 

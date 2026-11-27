@@ -138,9 +138,10 @@ export async function verifyToken(t: { symbol: string; mint: string; decimals: n
   try {
     const r = await fetch(`${JUP}/tokens/v2/search?query=${t.mint}`, { signal: AbortSignal.timeout(8_000) });
     if (r.ok) {
-      const list = (await r.json()) as { id?: string; symbol?: string; decimals?: number }[];
+      const list = (await r.json()) as { id?: string; symbol?: string; decimals?: number; isVerified?: boolean }[];
       const info = Array.isArray(list) ? list.find((x) => x.id === t.mint) : undefined;
       if (!info) res = { ok: false, why: "adresse inconnue de Jupiter" };
+      else if (info.isVerified === false) res = { ok: false, why: "token non vérifié par Jupiter" };
       else if (String(info.symbol).toUpperCase() !== t.symbol.toUpperCase()) res = { ok: false, why: `symbole ${info.symbol} au lieu de ${t.symbol}` };
       else if (info.decimals !== t.decimals) res = { ok: false, why: `décimales ${info.decimals} au lieu de ${t.decimals}` };
       else res = { ok: true, why: "vérifié sur Jupiter" };

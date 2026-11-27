@@ -8,7 +8,7 @@ import { candles as getCandles, hourlyCandles, lastClosedCandle } from "./candle
 import { executeSwap, getPrices, getQuote, verifyToken } from "./jupiter.ts";
 import { getBalances, loadKeyPairFrom, txStatus, waitForTx, type Balances } from "./solana.ts";
 import {
-  addToVault, atr, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate,
+  addToVault, applyTransfer, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate,
   rsiExitSignal, rsiSignal, RULES, sampleCurve, SOL_MINT, TOKENS, TOTAL_RISK, tradable, trailStop, trendSignal, USDC_MINT,
   type Interval, type Memory, type Params, type Position, type RsiParams, type Signal, type SpotConfig, type SpotStrategy,
 } from "./strategy.ts";
@@ -86,6 +86,7 @@ export async function runTick(admin: Admin): Promise<string> {
   const cfg = loadConfig(bot.config);
   const patch: Partial<BotRow> = {};
   let message = "";
+  const hadPending = !!mem.pending; // une transaction en cours change les soldes : pas de détection de transfert ce tick
 
   // 1. Données. Sans soldes on ne fait RIEN (mais on ne s'arrête pas pour autant).
   let address: string, keyPair: KeyPair, b: Balances, prices: Record<string, number>;
@@ -115,7 +116,10 @@ export async function runTick(admin: Admin): Promise<string> {
 
   // 3. Réconciliation : les positions, c'est ce que contient le portefeuille, pas ce que dit la base.
   for (const p of Object.values(positions)) {
-    if (!holds(b, p.key, prices)) { message = `Position ${p.symbol} introuvable dans le portefeuille : oubliée.`; delete positions[p.key]; }
+    if (holds(b, p.key, prices)) { p.missing = 0; continue; }
+    // une lecture vide isolée (RPC capricieux) ne doit pas faire oublier une position et son stop : 2 ticks de suite
+    p.missing = (p.missing ?? 0) + 1;
+    if (p.missing >= 2) { message = `Position ${p.symbol} introuvable dans le portefeuille : oubliée.`; delete positions[p.key]; }
   }
   for (const t of TOKENS) {
     if (t.mint === SOL_MINT || positions[t.mint] || !holds(b, t.mint, prices) || !prices[t.mint]) continue;
@@ -124,6 +128,18 @@ export async function runTick(admin: Admin): Promise<string> {
       initialRisk: price * 0.05, openedAt: now, source: "jetons trouvés dans le portefeuille", why: "reprise de jetons présents dans le portefeuille (stop de sécurité −5 %)" };
     message = `Jetons ${t.symbol} trouvés dans le portefeuille : je reprends leur gestion (stop de sécurité −5 %).`;
   }
+  // Dépôt ou retrait (USDC ou SOL arrivés/partis sans trade) : ce n'est ni un gain ni une perte
+  if (!hadPending) {
+    const d = detectTransfer(mem, b.usdc, b.sol, prices[SOL_MINT] ?? 0, value);
+    if (d) {
+      if (bot.start_value_usd != null) patch.start_value_usd = Math.max(0.01, Number(bot.start_value_usd) + d);
+      applyTransfer(mem, d);
+      admin.addTrade("spot", { side: d > 0 ? "deposit" : "withdraw", symbol: "USDC", amount_usd: Math.abs(d), reason: d > 0 ? "dépôt" : "retrait",
+        detail: { pourquoi: `${d > 0 ? "Dépôt" : "Retrait"} de ${Math.abs(d).toFixed(2)} $ détecté (aucun trade en cours) : point de départ, perte du jour et courbe ajustés, ce n'est ni un gain ni une perte.` } });
+      message = `${d > 0 ? "Dépôt" : "Retrait"} de ${Math.abs(d).toFixed(2)} $ détecté : compteurs ajustés (ni gain ni perte).`;
+    }
+  }
+  mem.lastUsdc = b.usdc; mem.lastSol = b.sol;
   sampleCurve(mem, value, now);
 
   // 4. Fin de mission (uniquement sur données complètes : plus jamais de faux arrêt).
@@ -144,6 +160,7 @@ export async function runTick(admin: Admin): Promise<string> {
     // 5. Gestion de chaque position : stop suiveur (à chaque bougie), prise partielle, sortie vérifiée chaque minute.
     //    Une seule transaction par tick : la suivante attend la minute d'après.
     for (const p of Object.values(positions)) {
+      if (p.missing) continue; // pas vue à cette minute : on ne décide rien sur elle
       const token = tokenOf(p.key);
       const amount = b.raw[p.key] ?? 0n;
       let livePrice = prices[p.key];
@@ -188,6 +205,14 @@ export async function runTick(admin: Admin): Promise<string> {
       // Prise de bénéfices partielle : la moitié à +1,5 R, puis stop au prix d'entrée (le reste ne peut plus perdre)
       if (cfg.partialTp && !p.partialDone && (p.initialRisk ?? 0) > 0 && livePrice >= entry + PARTIAL.atR * p.initialRisk!) {
         const half = amount / 2n;
+        const remainder = (b.ui[p.key] ?? 0) * livePrice * (1 - PARTIAL.fraction);
+        if (remainder < MIN_POSITION_USD * 2) { // couper en deux laisserait un reste minuscule : on vend tout, gain encaissé
+          const sig = await sell(p.key, amount, address, keyPair);
+          mem.pending = { kind: "sell", sig, at: now, mint: p.key, usdcBefore: b.usdc, reason: "prise_totale" };
+          const r = (await waitForTx(sig)) === "pending" ? "pending" : await settle(admin, bot, mem, cfg, address, value);
+          await save(admin, mem, { ...patch, ...mirror(positions), last_value_usd: value, last_message: r === "pending" ? `Prise de bénéfices ${p.symbol} envoyée…` : r });
+          return "sell";
+        }
         if (half > 0n && (b.ui[p.key] ?? 0) * livePrice * PARTIAL.fraction >= RISK.minOrderUsd) {
           const sig = await sell(p.key, half, address, keyPair);
           mem.pending = { kind: "partial", sig, at: now, mint: p.key, usdcBefore: b.usdc, rawBefore: amount.toString(), reason: "prise_partielle" };
@@ -335,6 +360,7 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, a
   const [b, prices] = await Promise.all([getBalances(address), getPrices([USDC_MINT, mint]).catch(() => ({} as Record<string, number>))]);
   const held = holds(b, mint, prices);
   mem.pending = undefined;
+  mem.lastUsdc = b.usdc; mem.lastSol = b.sol; // les soldes après le trade deviennent la nouvelle référence
   const sym = symbolOf(mint);
   void bot;
 
@@ -428,6 +454,7 @@ async function save(admin: Admin, mem: Memory, fields: Partial<BotRow>) {
 const fmt = (n: number) => (n >= 1 ? n.toFixed(n >= 100 ? 2 : 4) : n.toPrecision(4));
 function label(reason?: string) {
   return reason === "rsi_exit" ? "RSI repassé au-dessus du seuil de sortie" : reason === "trailing_stop" ? "stop suiveur, gain protégé" : reason === "stop_loss" ? "stop loss"
-    : reason === "time_stop" ? "position sans élan" : reason === "prise_partielle" ? "prise de bénéfices partielle" : reason ?? "sortie";
+    : reason === "time_stop" ? "position sans élan" : reason === "prise_partielle" ? "prise de bénéfices partielle"
+    : reason === "prise_totale" ? "prise de bénéfices (position trop petite pour être coupée en deux)" : reason ?? "sortie";
 }
 export type { TradeRow };

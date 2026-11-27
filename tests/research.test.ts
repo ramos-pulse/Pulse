@@ -11,13 +11,16 @@ function market(seed: number, drift: number): Candle[] {
     c.push({ t: i * 3_600_000, o: p, h: Math.max(p, n) * 1.003, l: Math.min(p, n) * 0.997, c: n }); p = n; }
   return c;
 }
-test("candidats valides, RSI seulement en spot", () => {
+test("candidats valides : RSI seulement en spot, range seulement en perps", () => {
   const rnd = seeded(1);
+  const fam = new Set<string>();
   for (let i = 0; i < 200; i++) {
-    const c = randomCandidate(rnd, perps); assert.equal(c.family, "tendance");
+    const c = randomCandidate(rnd, perps); assert.ok(c.family === "tendance" || c.family === "range"); fam.add(c.family);
     const s = randomCandidate(rnd, spot);
+    assert.ok(s.family === "tendance" || s.family === "rsi");
     if (s.family === "rsi") { const p = s.params as { entry: number; exit: number }; assert.ok(p.exit > p.entry); }
   }
+  assert.ok(fam.has("range") && fam.has("tendance"), "le perps explore les deux familles");
 });
 test("mutation : un seul réglage change, signature différente", () => {
   const rnd = seeded(5);

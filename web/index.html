@@ -217,6 +217,20 @@ async function notifyNew() {
 
 const STATUS = {running: ["run", "En mission"], paused: ["pause", "En pause"], stopped: ["off", "Arrêté"], success: ["win", "Mission réussie"], destroyed: ["off", "Terminée"]};
 
+/** Alertes : pilote sans stratégie, capital trop faible pour le nombre de positions. */
+function alerts(kind, b) {
+  const c = b.config || {}, sc = S.bots.spot.config || {}, out = [];
+  const plans = kind === "spot" ? (c.plans || []) : (c.plans || []);
+  if ((b.status === "running" || b.status === "paused") && c.autopilot && !plans.length)
+    out.push(`Pilote automatique sans stratégie : aucune ne passe tes réglages, ce bot ne tradera pas.${sc.nerve === 3 ? " Ton réglage « Très nerveux » écarte toutes les stratégies lentes : essaie « Nerveux »." : sc.researchAggressive ? "" : " Le mode agressif des agents (Agents) accepterait plus de stratégies, mais moins sûres."}`);
+  const v = Number(b.last_value_usd) - Number(b.vault || 0), n = c.maxPositions || 3;
+  if (v > 0 && kind === "perps") {
+    const min = S.rules.perps?.minCollateralUsd ?? 10, fit = Math.floor(v / min);
+    if (fit < Math.min(n, Math.max(1, plans.length || 1))) out.push(fit < 1 ? `Capital trop faible : Jupiter exige ${min} $ de collatéral par position, il n'y a que ${nf(v)} $. Aucune position perps possible.` : `Capital : ${nf(v)} $ permet au plus ${fit} position(s) perps (${min} $ de collatéral minimum chacune), pas ${n}.`);
+  }
+  if (v > 0 && kind === "spot" && v / n < 4) out.push(`Capital faible : ${nf(v)} $ pour ${n} positions, soit ${nf(v / n)} $ chacune (ordre minimum 2 $). Réduis le nombre de positions dans Réglages → Protections, ou ajoute des USDC.`);
+  return out.map(t => `<div class="warnbox" style="margin-top:10px">⚠ ${esc(t)}</div>`).join("");
+}
 function bilanCard() {
   const b = S.bilan; if (!b) return "";
   return `<div class="card" style="padding:10px 16px"><details data-d="bilan" style="margin:0"><summary>▸ BILAN DU SOIR · ${new Date(b.created_at).toLocaleDateString("fr-FR", {weekday: "long", day: "numeric", month: "long"}).toUpperCase()}</summary>
@@ -282,6 +296,7 @@ function missionCard(kind, title) {
       <div><div class="k">Contrôle</div><div class="v">${hhmm(b.last_tick_at)}</div></div>
       <div><div class="k">Risque</div><div class="v">${br ? nf(br.risk * 100, 1) + " %" : "—"}${br && br.streak ? ` <span class="${br.streak > 0 ? "up" : "down"}">${br.streak > 0 ? "▲" + br.streak : "▼" + -br.streak}</span>` : ""}</div></div>
     </div>
+    ${alerts(kind, b)}
     ${b.vault ? `<div class="l2" style="margin-top:8px" data-tip="Coffre à gains : une part de chaque gain est mise de côté et n'est plus jamais retradée. Elle reste dans le wallet du bot, tu peux la retirer quand tu veux.">🔐 Coffre : <b>${nf(b.vault)} $</b> mis de côté, jamais retradés</div>` : ""}
     <div class="sep"></div>
     <div class="k">Dernière action</div><div class="v txt">${esc(b.last_message)}</div>
@@ -382,9 +397,9 @@ function renderHist() {
       <div><div class="k">Profit factor</div><div class="v ${pf >= 1 ? "up" : "down"}">${closes.length ? (pf === Infinity ? "∞" : nf(pf)) : "—"}</div></div>
     </div></div>
     <div class="card">${rows.map(t => { const act = (t.side || t.action || "").toUpperCase(), sell = act === "SELL" || act === "CLOSE";
-      const label = {BUY: "ACHAT", SELL: "VENTE", OPEN: "OUVRE", CLOSE: "FERME"}[act] || act;
+      const label = {BUY: "ACHAT", SELL: "VENTE", OPEN: "OUVRE", CLOSE: "FERME", DEPOSIT: "DÉPÔT", WITHDRAW: "RETRAIT"}[act] || act;
       const amt = t.amount_usd ?? t.collateral_usd;
-      return `<div class="row" data-tr="${t.k}:${t.id}" style="cursor:pointer"><div><div class="l1"><span class="${sell ? "amber" : "up"}">${label}</span> ${t.k === "perps" && t.side ? esc(t.side.toUpperCase()) + " " : ""}${esc(t.symbol || t.asset)}</div>
+      return `<div class="row" data-tr="${t.k}:${t.id}" style="cursor:pointer"><div><div class="l1"><span class="${act === "DEPOSIT" || act === "WITHDRAW" ? "mut" : sell ? "amber" : "up"}">${label}</span> ${t.k === "perps" && t.side ? esc(t.side.toUpperCase()) + " " : ""}${esc(t.symbol || t.asset)}</div>
         <div class="l2">${new Date(t.created_at).toLocaleString("fr-FR", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"})} · ${esc(t.reason || "")}</div></div>
         <div class="r">${amt != null ? nf(amt) + " $" : ""}${t.pnl_usd != null ? `<div class="${cl(t.pnl_usd)}">${sg(t.pnl_usd)} $</div>` : ""}
         ${t.signature ? `<div class="l2"><a href="https://solscan.io/tx/${esc(t.signature)}" target="_blank" rel="noopener">tx ↗</a></div>` : ""}</div></div>`; }).join("") || `<div class="sub">Aucun trade pour l'instant.</div>`}</div>`;
@@ -395,7 +410,7 @@ function whyTrade(t, k) {
   const d = t.detail || {}, act = (t.side || t.action || "").toUpperCase(), sell = act === "SELL" || act === "CLOSE";
   const line = (label, v) => v == null || v === "" ? "" : `<div class="row"><div class="l2">${label}</div><div class="r" style="text-align:right;max-width:62%">${v}</div></div>`;
   sheet(`<h3>Pourquoi ce trade ?</h3>
-    <p><b>${{BUY: "Achat", SELL: "Vente", OPEN: "Ouverture", CLOSE: "Fermeture"}[act] || act} ${esc(t.symbol || t.asset || "")}</b>${k === "perps" && t.side ? ` (${esc(t.side)})` : ""} · ${new Date(t.created_at).toLocaleString("fr-FR", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"})}</p>
+    <p><b>${{BUY: "Achat", SELL: "Vente", OPEN: "Ouverture", CLOSE: "Fermeture", DEPOSIT: "Dépôt", WITHDRAW: "Retrait"}[act] || act} ${esc(t.symbol || t.asset || "")}</b>${k === "perps" && t.side ? ` (${esc(t.side)})` : ""} · ${new Date(t.created_at).toLocaleString("fr-FR", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"})}</p>
     <p>${esc(d.pourquoi || t.reason || "Raison non enregistrée (trade antérieur à cette mise à jour).")}</p>
     ${sell && d.entree_pourquoi ? `<p class="sub">Entrée : ${esc(d.entree_pourquoi)}</p>` : ""}
     ${line("Résultat", t.pnl_usd != null ? `<span class="${cl(t.pnl_usd)}">${sg(t.pnl_usd)} $</span>` : "")}
@@ -507,7 +522,7 @@ function mathCard() {
   const reg = { "tendance": ["ok", "Tendance"], "retour à la moyenne": ["mid", "Retour à la moyenne"], "hasard": ["", "Hasard"] };
   const rows = m.insights.map(x => { const [c, label] = reg[x.regime] || ["", x.regime];
     return `<div class="row"><div><div class="l1">${esc(x.market)} <span class="mut" style="font-weight:400">${x.interval === "15m" ? "15 min" : "1 h"}</span></div>
-      <div class="l2">Hurst ${nf(x.hurst)}${x.half_life ? ` · demi-vie ${nf(x.half_life, 0)} bougies` : ""}${x.significant ? " · effet significatif" : ""}</div></div>
+      <div class="l2">Hurst ${nf(x.hurst)}${x.half_life ? ` · demi-vie ${nf(x.half_life, 0)} bougies` : ""}${x.significant ? " · effet significatif" : ""}${x.live_regime ? ` · <b>en ce moment : ${esc(x.live_regime)}</b>` : ""}</div></div>
       <div class="r"><span class="pill ${c}">${label}</span></div></div>`; }).join("");
   return `<div class="eyebrow">Agent mathématicien</div><div class="card">
     <div class="status run"><span class="dot ok"></span>Analyse les marchés à chaque cycle</div>
@@ -544,7 +559,9 @@ const TIPS = {
 function explain(r) {
   const p = r.params || {}, iv = r.interval === "15m" ? "bougies de 15 minutes (scalping)" : "bougies d'une heure";
   const span = n => r.interval === "15m" ? `${n} bougies de 15 min (${nf(n / 4, n % 4 ? 1 : 0)} h)` : `${n} h`;
+  if (r.family === "range") return `Range (marché sans tendance), sur ${iv}. Le bot trace des bandes de Bollinger autour de la moyenne des ${p.bbPeriod} dernières bougies (± ${String(p.bbK).replace(".", ",")} écart-type). Quand le prix sort sous la bande basse, il achète (long) ; au-dessus de la bande haute, il vend (short), en pariant sur le retour à la moyenne, qui est son objectif. Stop fixe à ${String(p.stopAtr).replace(".", ",")} ATR. Il ne le fait que si le marché n'est PAS en tendance (force < ${String(p.maxTrend).replace(".", ",")} ATR), et il sort si le retour n'arrive pas à temps.`;
   if (r.family === "rsi") return `Achat d'excès de baisse, sur ${iv}. Le bot achète quand le RSI(${p.rsiPeriod}), un indicateur de 0 à 100 qui mesure la force des derniers mouvements, descend sous ${p.entry} : le prix a chuté trop vite. Il n'achète que si la tendance de fond reste haussière (prix au-dessus de sa moyenne sur ${p.smaPeriod} bougies). Il revend quand le RSI repasse au-dessus de ${p.exit}. Stop de protection sous le plus bas des ${p.swingBars} dernières bougies.`;
+  if (p.entry === "repli") return `Achat sur repli, sur ${iv}. Dans une tendance déjà en place (au moins ${String(p.minTrend).replace(".", ",")} fois la volatilité, ATR), le bot attend que le prix revienne toucher sa moyenne des 20 dernières bougies puis reparte dans le sens de la tendance : il ${r.kind === "perps" ? "achète (ou vend à découvert en tendance baissière)" : "achète"} à ce moment-là, à un meilleur prix qu'une cassure. Stop suiveur à ${String(p.trailAtr).replace(".", ",")} ATR du meilleur prix.`;
   return `Suivi de tendance, sur ${iv}. Le bot ${r.kind === "perps" ? "ouvre un long quand le prix casse son plus haut, ou un short quand il casse son plus bas," : "achète quand le prix casse son plus haut"} des ${span(p.breakout)}, seulement si la tendance est assez forte (au moins ${String(p.minTrend).replace(".", ",")} fois la volatilité moyenne, ATR). Il laisse courir le gain avec un stop suiveur placé à ${String(p.trailAtr).replace(".", ",")} ATR du meilleur prix : le stop monte avec le prix et ne redescend jamais.`;
 }
 // Bulles explicatives : visibles tant qu'on appuie, disparaissent quand on relâche
@@ -572,7 +589,7 @@ function renderAg() {
   const nerveTxt = n => ["Calme : seulement des stratégies lentes et posées (bougies 1 h, cassures longues). Moins de trades.",
     "Normal : toutes les stratégies validées, sans préférence de rythme.",
     "Nerveux : le chercheur explore aussi le scalping 15 min et les cassures courtes, et le pilote préfère les stratégies qui tradent souvent.",
-    "Très nerveux : uniquement des stratégies rapides. Beaucoup plus de trades, plus de frais et de faux signaux."][n] || "";
+    "⚠ Très nerveux : IMPOSE des stratégies rapides et écarte toutes les autres. Si aucune stratégie rapide n'est validée pour un bot, il ne trade plus du tout. Préfère « Nerveux » pour simplement favoriser les stratégies rapides."][n] || "";
   const settings = `<div class="card"><div class="v txt" style="font-weight:600">Réglages des agents</div>
       <label class="field"><span>Mode agressif (chercheur + mathématicien)</span><input type="checkbox" id="agAggr" ${A.aggressive ? "checked" : ""} style="width:26px;height:26px"></label>
       <p class="sub" style="margin:0 0 6px">${A.aggressive ? "⚠ " : ""}Critères de validation assouplis (« à surveiller » accepté, PF ≥ 1,15, baisse ≤ 20 %), propositions plus serrées du mathématicien, et agressivité du bot perps appliquée même en pilote automatique. Plus de stratégies retenues, mais moins sûres.</p>

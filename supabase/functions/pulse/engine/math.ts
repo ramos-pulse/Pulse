@@ -153,6 +153,12 @@ export function propose(trainCandles: Candle[], m: Market, ins = analyze(trainCa
     out.push({ candidate: { ...base, family: "tendance", params: p },
       rationale: `${ins.note} ⇒ suivre la tendance sur ${q} bougies (horizon où l'effet est le plus fort) ; stop ${p.trailAtr} ATR = 70 % des replis observés pendant les tendances ; force ≥ ${p.minTrend} ATR = force typique des vraies cassures` });
   }
+  // TENDANCE : achat sur repli, en plus de la cassure (plus d'entrées, meilleur prix)
+  if (ins.regime === "tendance" && out[0]?.candidate.family === "tendance") {
+    const p0 = out[0].candidate.params as Params;
+    out.push({ candidate: { ...base, family: "tendance", params: { ...p0, entry: "repli" } },
+      rationale: `même tendance mesurée, mais entrée sur repli vers la moyenne 20 au lieu d'attendre une cassure : plus d'entrées, à un meilleur prix` });
+  }
   // NERVEUX : horizon court parmi les cassures rapides, si les rendements s'y prolongent encore (VR > 1)
   if (o.fast && ins.regime !== "retour à la moyenne") {
     const r = logReturns(trainCandles);
@@ -169,6 +175,14 @@ export function propose(trainCandles: Candle[], m: Market, ins = analyze(trainCa
     const p = trendParams(trainCandles, q, true, o.fast);
     if (p.trailAtr !== (out[0].candidate.params as Params).trailAtr || p.minTrend !== (out[0].candidate.params as Params).minTrend)
       out.push({ candidate: { ...base, family: "tendance", params: p }, rationale: `variante agressive : stop au repli médian (${p.trailAtr} ATR) et force ≥ ${p.minTrend} ATR, plus de trades mais plus de faux départs` });
+  }
+  // PERPS en marché qui revient à la moyenne : range (bandes de Bollinger) réglé sur la demi-vie mesurée
+  if (m.kind === "perps" && ins.regime !== "tendance") {
+    const S = space(o.fast).range;
+    const p = { bbPeriod: snap((ins.halfLife ?? 10) * 2, S.bbPeriod), bbK: 2, stopAtr: 1.5, maxTrend: ins.regime === "retour à la moyenne" ? 1.5 : 1 };
+    out.push({ candidate: { ...base, family: "range", params: p },
+      rationale: `${ins.note} ⇒ trader le range : vendre au-dessus de la bande haute, acheter sous la bande basse, objectif le retour à la moyenne ; période ${p.bbPeriod} ≈ 2 × la demi-vie${ins.halfLife ? ` (${ins.halfLife.toFixed(0)} bougies)` : ""}` });
+    if (o.aggressive) out.push({ candidate: { ...base, family: "range", params: { ...p, bbK: 1.5 } }, rationale: "variante agressive : bandes plus étroites (1,5 écart-type), plus de signaux" });
   }
   if (m.kind === "spot" && (ins.regime !== "tendance" || o.aggressive)) {
     const p = rsiParams(trainCandles, ins.halfLife, o);

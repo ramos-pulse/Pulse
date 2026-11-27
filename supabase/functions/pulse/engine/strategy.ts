@@ -34,6 +34,11 @@ export const TOKENS = [
   { symbol: "RENDER", mint: "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof", decimals: 8, candles: "RENDER-USD", verify: true },
   { symbol: "RAY", mint: "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R", decimals: 6, candles: "RAY-USD", verify: true },
   { symbol: "POPCAT", mint: "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr", decimals: 9, candles: "POPCAT-USD", verify: true },
+  // ajoutés le 27/11/2026 : adresses vérifiées (Coinbase, DexTools, Bitquery) ; revérifiées sur Jupiter avant chaque achat
+  { symbol: "ORCA", mint: "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE", decimals: 6, candles: "ORCA-USD", verify: true },
+  { symbol: "HNT", mint: "hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux", decimals: 8, candles: "HNT-USD", verify: true },
+  { symbol: "TRUMP", mint: "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN", decimals: 6, candles: "TRUMP-USD", verify: true },
+  { symbol: "PENGU", mint: "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv", decimals: 6, candles: "PENGU-USD", verify: true },
 ] as const;
 
 /** Unités de temps des bougies : 1 h (suivi de tendance classique) ou 15 min (scalping prudent). */
@@ -44,13 +49,14 @@ export const asInterval = (v: unknown): Interval => (v === "15m" ? "15m" : "1h")
 /** Un « plan » choisi par le chercheur : quel token, quelle stratégie, quels réglages, quelle unité de temps. */
 export type Confidence = "nouvelle" | "confirmée";
 export interface SpotPlan { symbol: string; family: "tendance" | "rsi"; params: Params | RsiParams; interval: Interval; source: string; score: number; confidence: Confidence }
-export interface PerpsPlan { asset: string; params: Params; interval: Interval; source: string; score: number; confidence: Confidence }
+export interface PerpsPlan { asset: string; family?: "tendance" | "range"; params: Params | RangeParams; interval: Interval; source: string; score: number; confidence: Confidence }
 /** Les bots apprennent du chercheur : une stratégie pas encore confirmée en réel est tradée avec 75 % du risque normal. */
 export const PROBATION_RISK = 0.75;
 export const riskFactor = (c: Confidence | undefined) => (c === "confirmée" ? 1 : PROBATION_RISK);
 const asConfidence = (v: unknown): Confidence => (v === "confirmée" ? "confirmée" : "nouvelle");
 
-export interface Params { breakout: number; trailAtr: number; minTrend: number }
+/** Réglages de tendance. entry = "repli" : entrée sur repli vers la moyenne 20 au lieu d'une cassure. */
+export interface Params { breakout: number; trailAtr: number; minTrend: number; entry?: "repli" }
 /** Jeux de paramètres testés chaque jour par le cerveau du bot (peu nombreux pour éviter la sur-optimisation). */
 export const PRESETS: Record<string, Params> = {
   rapide: { breakout: 24, trailAtr: 2.5, minTrend: 1.0 },
@@ -160,6 +166,15 @@ export function trendSignal(candles: Candle[], allowShort: boolean, P: Params = 
   const momentum = last.c / ref - 1;
 
   if (strength < P.minTrend) return empty(`tendance trop faible (${strength.toFixed(1)} ATR < ${P.minTrend})`);
+  if (P.entry === "repli") {
+    // ACHAT SUR REPLI : dans une tendance en place, le prix revient toucher sa moyenne 20 puis repart dans le sens de la tendance
+    const m20 = ema(closes, PULLBACK.ema), m = m20.at(-1)!, mPrev = m20.at(-2)!, prev = candles.at(-2)!;
+    if (fast > slow && slow > slowBefore && last.c > slow && prev.l <= mPrev && last.c > m && last.c > prev.c)
+      return { side: "long", reason: `repli sur la moyenne ${PULLBACK.ema} puis rebond, en tendance haussière (force ${strength.toFixed(1)})`, price: last.c, atr: a, stop: last.c - S.stopAtr * a, candleTime: last.t, score: momentum };
+    if (allowShort && fast < slow && slow < slowBefore && last.c < slow && prev.h >= mPrev && last.c < m && last.c < prev.c)
+      return { side: "short", reason: `remontée sur la moyenne ${PULLBACK.ema} puis rechute, en tendance baissière (force ${strength.toFixed(1)})`, price: last.c, atr: a, stop: last.c + S.stopAtr * a, candleTime: last.t, score: -momentum };
+    return empty(`tendance ${fast > slow ? "haussière" : "baissière"}, pas de repli sur la moyenne ${PULLBACK.ema} (${fmt(m)})`);
+  }
   if (fast > slow && slow > slowBefore && last.c > slow && last.c > hi) {
     return { side: "long", reason: `cassure du plus haut ${P.breakout} h en tendance haussière (force ${strength.toFixed(1)})`, price: last.c, atr: a,
       stop: last.c - S.stopAtr * a, candleTime: last.t, score: momentum };
@@ -173,6 +188,98 @@ export function trendSignal(candles: Candle[], allowShort: boolean, P: Params = 
 }
 
 const fmt = (n: number) => (n >= 1 ? n.toFixed(2) : n.toPrecision(3));
+
+export const PULLBACK = { ema: 20 };
+
+// ---------------------------------------------------------------------------------------------------
+// RANGE (perps) : marché sans tendance. Le prix sort des bandes de Bollinger → on parie sur le retour au milieu.
+// Long sous la bande basse, short au-dessus de la bande haute ; objectif = la moyenne ; stop fixe à k ATR ;
+// sortie forcée après 2 × la période si rien ne s'est passé.
+// ---------------------------------------------------------------------------------------------------
+export interface RangeParams { bbPeriod: number; bbK: number; stopAtr: number; maxTrend: number }
+export const RANGE_RULES = { minAtrPct: 0.0015, maxHoldMult: 2 };
+export function sanitizeRange(t: unknown): RangeParams | null {
+  if (!t || typeof t !== "object") return null;
+  const x = t as Partial<RangeParams>;
+  const n = Number(x.bbPeriod), k = Number(x.bbK), s = Number(x.stopAtr), m = Number(x.maxTrend);
+  if (![n, k, s, m].every(Number.isFinite)) return null;
+  return { bbPeriod: Math.round(Math.min(60, Math.max(8, n))), bbK: Math.min(3.5, Math.max(1, k)), stopAtr: Math.min(5, Math.max(0.5, s)), maxTrend: Math.min(3, Math.max(0.2, m)) };
+}
+export const isRange = (p: unknown): p is RangeParams => !!p && typeof p === "object" && "bbPeriod" in (p as object);
+
+/** Bandes de Bollinger sur la dernière bougie : milieu (moyenne), haut, bas. */
+export function bollinger(closes: number[], n: number, k: number) {
+  const w = closes.slice(-n), mid = w.reduce((a, x) => a + x, 0) / w.length;
+  const sd = Math.sqrt(w.reduce((a, x) => a + (x - mid) ** 2, 0) / w.length);
+  return { mid, up: mid + k * sd, lo: mid - k * sd };
+}
+
+export function rangeSignal(candles: Candle[], allowShort: boolean, P: RangeParams): Signal {
+  const S = STRATEGY;
+  const last = candles[candles.length - 1];
+  const empty = (reason: string): Signal => ({ side: null, reason, price: last?.c ?? 0, atr: 0, stop: 0, candleTime: last?.t ?? 0, score: 0 });
+  if (!last || candles.length < S.emaSlow + 5) return empty(`historique insuffisant (${candles.length} bougies)`);
+  const closes = candles.map((x) => x.c);
+  const a = atr(candles, S.atrPeriod).at(-1)!;
+  if (a / last.c < RANGE_RULES.minAtrPct) return empty(`marché trop calme même pour un range (ATR ${((a / last.c) * 100).toFixed(2)} %)`);
+  if (a / last.c > S.maxAtrPct) return empty(`marché trop agité (ATR ${((a / last.c) * 100).toFixed(2)} %)`);
+  const strength = Math.abs(ema(closes, S.emaFast).at(-1)! - ema(closes, S.emaSlow).at(-1)!) / a;
+  if (strength > P.maxTrend) return empty(`marché en tendance (force ${strength.toFixed(1)} > ${P.maxTrend}) : pas de range`);
+  const b = bollinger(closes, P.bbPeriod, P.bbK);
+  const room = Math.abs(b.mid - last.c) / last.c;
+  if (last.c < b.lo) return { side: "long", reason: `range : sous la bande basse (${fmt(b.lo)}), retour attendu vers ${fmt(b.mid)}`, price: last.c, atr: a, stop: last.c - P.stopAtr * a, candleTime: last.t, score: room };
+  if (allowShort && last.c > b.up) return { side: "short", reason: `range : au-dessus de la bande haute (${fmt(b.up)}), retour attendu vers ${fmt(b.mid)}`, price: last.c, atr: a, stop: last.c + P.stopAtr * a, candleTime: last.t, score: room };
+  return empty(`range : prix dans les bandes (${fmt(b.lo)} – ${fmt(b.up)})`);
+}
+
+/** Sortie d'une position range : objectif = retour à la moyenne, ou trop longtemps sans résultat. */
+export function rangeExit(candles: Candle[], side: Side, P: RangeParams, heldBars: number): "objectif" | "range_temps" | null {
+  const b = bollinger(candles.map((x) => x.c), P.bbPeriod, P.bbK), c = candles.at(-1)!.c;
+  if (side === "long" ? c >= b.mid : c <= b.mid) return "objectif";
+  if (heldBars >= P.bbPeriod * RANGE_RULES.maxHoldMult) return "range_temps";
+  return null;
+}
+
+/** Backtest range : même signal et mêmes sorties que le bot réel, frais et portage inclus, risque 1 % par trade. */
+export function backtestRange(candles: Candle[], P: RangeParams, o: { allowShort: boolean; feePct: number; hourlyCost: number; leverageCap: number; hoursPerBar: number }): BacktestResult {
+  let equity = 1, peak = 1, maxDd = 0;
+  const log: BacktestResult["log"] = [];
+  let pos: { side: Side; entry: number; stop: number; size: number; i: number } | null = null;
+  const start = STRATEGY.emaSlow + 5;
+  for (let i = start; i < candles.length; i++) {
+    const c = candles[i]!;
+    const win = candles.slice(Math.max(0, i - 400), i + 1);
+    if (pos) {
+      let exit: number | null = null, reason = "";
+      if (pos.side === "long" ? c.l <= pos.stop : c.h >= pos.stop) { exit = pos.side === "long" ? Math.min(c.o, pos.stop) : Math.max(c.o, pos.stop); reason = "stop_loss"; }
+      else { const r = rangeExit(win, pos.side, P, i - pos.i); if (r) { exit = c.c; reason = r; } }
+      if (exit !== null) {
+        const move = pos.side === "long" ? exit / pos.entry - 1 : 1 - exit / pos.entry;
+        const pnl = pos.size * (move - 2 * o.feePct - o.hourlyCost * (i - pos.i) * o.hoursPerBar);
+        equity *= 1 + pnl;
+        log.push({ side: pos.side, entry: pos.entry, exit, pnlPct: pnl * 100, reason, t: c.t });
+        pos = null;
+      }
+    } else {
+      const sig = rangeSignal(win, o.allowShort, P);
+      if (sig.side) {
+        const dist = Math.abs(sig.price - sig.stop) / sig.price;
+        pos = { side: sig.side, entry: c.c, stop: sig.stop, size: Math.min(0.01 / dist, o.leverageCap), i };
+      }
+    }
+    peak = Math.max(peak, equity);
+    maxDd = Math.max(maxDd, 1 - equity / peak);
+  }
+  const wins = log.filter((x) => x.pnlPct > 0), losses = log.filter((x) => x.pnlPct <= 0);
+  const gw = wins.reduce((a, x) => a + x.pnlPct, 0), gl = -losses.reduce((a, x) => a + x.pnlPct, 0);
+  const first = candles[start], lastC = candles.at(-1);
+  return {
+    trades: log.length, winRate: log.length ? (wins.length / log.length) * 100 : 0,
+    profitFactor: gl > 0 ? gw / gl : gw > 0 ? Infinity : 0, returnPct: (equity - 1) * 100, maxDrawdownPct: maxDd * 100,
+    avgWinPct: wins.length ? gw / wins.length : 0, avgLossPct: losses.length ? -gl / losses.length : 0,
+    days: first && lastC ? (lastC.t - first.t) / 86_400_000 : 0, log,
+  };
+}
 
 /** Stop suiveur : ne recule jamais. `best` = meilleure clôture depuis l'entrée (la plus haute en long, la plus basse en short). */
 export function trailStop(side: Side, current: number, best: number, atrNow: number, P: Params = DEFAULT_PARAMS): number {
@@ -217,17 +324,24 @@ export function stopSafeLeverage(dist: number): number {
   return 1 / (dist / LIQ.safety + LIQ.maintenance + LIQ.fees);
 }
 
-export function perpsSizing(equity: number, usdc: number, entry: number, stop: number, risk = RISK.perTrade, maxLevWanted: number = PERPS_RULES.maxLeverage) {
+/**
+ * Taille d'une position perps : la perte au stop = le risque choisi.
+ * Petit capital : Jupiter exige 10 $ de collatéral au minimum. Si la taille voulue est plus petite, on prend le minimum
+ * (10 $ à x1,1) SEULEMENT si la perte au stop reste sous `maxRisk` (le plafond du niveau d'agressivité).
+ */
+export function perpsSizing(equity: number, usdc: number, entry: number, stop: number, risk = RISK.perTrade, maxLevWanted: number = PERPS_RULES.maxLeverage, maxRisk = risk) {
   const dist = Math.abs(entry - stop) / entry;
-  if (!(dist > 0)) return null;
+  if (!(dist > 0) || !(equity > 0)) return null;
   const maxLev = Math.max(1.1, Math.min(maxLevWanted, stopSafeLeverage(dist))); // jamais de levier qui liquiderait avant le stop
-  const notional = (equity * risk) / dist;
+  let notional = (equity * risk) / dist;
   let collateral = Math.max(PERPS_RULES.minCollateralUsd, notional / maxLev);
   if (collateral > usdc) return null;
   let leverage = notional / collateral;
-  if (leverage < 1.1) { leverage = 1.1; collateral = notional / leverage; }
-  if (collateral < PERPS_RULES.minCollateralUsd) return null; // capital trop faible pour respecter le risque
-  return { collateral, leverage: Math.min(leverage, maxLev), notional };
+  if (leverage < 1.1) { // la taille voulue est sous le minimum de Jupiter : position minimale, si le risque reste acceptable
+    leverage = 1.1; collateral = PERPS_RULES.minCollateralUsd; notional = collateral * leverage;
+    if ((notional * dist) / equity > maxRisk + 1e-9) return null;
+  }
+  return { collateral, leverage: Math.min(leverage, maxLev), notional, risk: (notional * dist) / equity };
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -290,9 +404,10 @@ export function sanitizePerpsPlan(raw: unknown): PerpsPlan | null {
   if (!raw || typeof raw !== "object") return null;
   const x = raw as Partial<PerpsPlan>;
   if (!PERPS_ASSETS.some((a) => a.asset === x.asset)) return null;
-  const params = sanitizeTrend(x.params);
+  const range = x.family === "range" || isRange(x.params);
+  const params = range ? sanitizeRange(x.params) : sanitizeTrend(x.params);
   if (!params) return null;
-  return { asset: String(x.asset), params, interval: asInterval(x.interval), source: String(x.source ?? "").slice(0, 120), score: Number(x.score) || 0, confidence: asConfidence(x.confidence) };
+  return { asset: String(x.asset), ...(range ? { family: "range" as const } : {}), params, interval: asInterval(x.interval), source: String(x.source ?? "").slice(0, 120), score: Number(x.score) || 0, confidence: asConfidence(x.confidence) };
 }
 
 /** Part de la taille normale accordée à un côté (1 = 100 %, 0 = côté désactivé). Le côté favorisé garde 100 %. */
@@ -313,13 +428,14 @@ export interface Pending { kind: "buy" | "sell" | "partial" | "open" | "close"; 
 export interface Position {
   key: string; symbol: string; side: Side;
   entry?: number; stop?: number; best?: number; initialRisk?: number; stopCandle?: number; openedAt?: number;
-  strategy?: SpotStrategy; posParams?: Params | RsiParams; posInterval?: Interval; source?: string;
+  strategy?: SpotStrategy | "range"; posParams?: Params | RsiParams | RangeParams; posInterval?: Interval; source?: string;
   costUsd?: number;          // spot : USDC encore engagés (après une vente partielle, la moitié)
   collateralUsd?: number;    // perps : collatéral déposé à l'ouverture
   sizeUsd?: number;          // perps : taille de la position
   lastValueUsd?: number;     // perps : dernière valeur vue (collatéral + PnL)
   pubkey?: string;
   partialDone?: boolean;     // prise de bénéfices partielle déjà faite (ou stop remonté au prix d'entrée)
+  missing?: number;          // nombre de ticks où la position n'a pas été vue (on attend 2 ticks avant de la croire fermée)
   why?: string;              // raison de l'entrée (affichée dans « Pourquoi ce trade ? »)
   live?: { price: number; pnlPct: number; at: number };
 }
@@ -352,7 +468,25 @@ export interface Memory {
   vault?: number;            // coffre à gains (USD) : jamais retradé
   curve?: { t: number; v: number }[]; // courbe du capital (un point par heure, 30 jours)
   lastCandleBy?: Record<string, number>; // perps : dernière bougie analysée par marché
-  lastUsdc?: number;         // perps : USDC vus au tick précédent (estimation des stops on-chain)
+  lastUsdc?: number;         // USDC vus au tick précédent (stops on-chain, détection des dépôts et retraits)
+  lastSol?: number;          // SOL vus au tick précédent (détection des dépôts et retraits)
+}
+
+/**
+ * DÉPÔTS ET RETRAITS : de l'argent qui arrive ou part du wallet sans trade n'est ni un gain ni une perte.
+ * Renvoie le montant en $ (positif = dépôt, négatif = retrait) si un transfert est détecté, sinon 0.
+ * Seuil : au moins 1 $ et 3 % de la valeur, pour ignorer les frais de réseau et les arrondis.
+ */
+export const TRANSFER = { minUsd: 1, minPct: 0.03 };
+export function detectTransfer(mem: Memory, usdc: number, sol: number, solPrice: number, valueUsd: number): number {
+  if (mem.lastUsdc == null) return 0;
+  const d = usdc - mem.lastUsdc + (sol - (mem.lastSol ?? sol)) * (solPrice || 0);
+  return Math.abs(d) >= Math.max(TRANSFER.minUsd, valueUsd * TRANSFER.minPct) ? d : 0;
+}
+/** Applique un transfert : la perte du jour et la courbe repartent du nouveau solde (le point de départ est ajusté par l'appelant). */
+export function applyTransfer(mem: Memory, d: number) {
+  if (mem.dayStartValue) mem.dayStartValue = Math.max(0.01, mem.dayStartValue + d);
+  for (const pt of mem.curve ?? []) pt.v = Math.round((pt.v + d) * 100) / 100;
 }
 
 /** Ajoute un point à la courbe du capital (au plus un par heure, 30 jours gardés). */
@@ -523,7 +657,7 @@ export function sanitizeTrend(t: unknown): Params | null {
   const x = t as Partial<Params>;
   const b = Number(x.breakout), a = Number(x.trailAtr), m = Number(x.minTrend);
   if (![b, a, m].every(Number.isFinite)) return null;
-  return { breakout: Math.round(Math.min(168, Math.max(6, b))), trailAtr: Math.min(6, Math.max(1, a)), minTrend: Math.min(4, Math.max(0, m)) };
+  return { breakout: Math.round(Math.min(168, Math.max(6, b))), trailAtr: Math.min(6, Math.max(1, a)), minTrend: Math.min(4, Math.max(0, m)), ...(x.entry === "repli" ? { entry: "repli" as const } : {}) };
 }
 
 const clamp = (v: unknown, lo: number, hi: number, def: number) => {
