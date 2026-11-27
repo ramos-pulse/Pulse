@@ -72,9 +72,12 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
     ({ address, keyPair } = await loadKeyPairFrom(WALLET_ENV));
     [solPrice, b, real] = await Promise.all([perpsPrice(SOL.mint), getBalances(address), perpsPositions(address)]);
   } catch (e) {
+    errStreak(admin, mem, "Bot perps", (e as Error).message);
     await save(admin, mem, { last_message: `Données indisponibles (${(e as Error).message.slice(0, 80)}). Le stop on-chain protège les positions, je réessaie.` });
     return "data_unavailable";
   }
+  const prevErr = mem.errStreak ?? 0;
+  mem.errStreak = 0;
   const prices: Record<string, number> = { SOL: solPrice };
   const priceOf = async (a: Asset) => (prices[a.asset] ??= await perpsPrice(a.mint));
   const value = perpsValue(b, solPrice, real);
@@ -273,6 +276,8 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
     if (notes.length) mem.signal = notes.join(" · ");
     return await hold(notes.length ? `Pas d'entrée : ${notes.join(" · ")}.` : mem.signal || "En attente de la prochaine bougie.");
   } catch (e) {
+    mem.errStreak = prevErr;
+    errStreak(admin, mem, "Bot perps", (e as Error).message);
     await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value, last_message: `Erreur : ${(e as Error).message}`.slice(0, 300) + " — je réessaie au prochain tick." });
     return "error";
   }
@@ -323,4 +328,10 @@ async function save(admin: Admin, mem: Memory, fields: Partial<PerpsRow>) {
 }
 function label(reason?: string) {
   return reason === "objectif" ? "objectif atteint" : reason === "orb_temps" ? "ORB : objectif non atteint à temps" : reason === "vwap_atteint" ? "retour au prix moyen du jour (VWAP) atteint" : reason === "vwap_temps" ? "VWAP : fin de journée sans retour" : reason === "funding_temps" ? "funding : délai écoulé" : reason === "range_temps" ? "range : pas de retour à la moyenne à temps" : reason === "trailing_stop" ? "stop suiveur, gain protégé" : reason === "stop_loss" ? "stop loss" : reason === "time_stop" ? "position sans élan" : reason === "stop_onchain" ? "stop de sécurité on-chain" : reason ?? "sortie";
+}
+
+/** CHIEN DE GARDE : une erreur qui se répète (5 minutes de suite, puis toutes les heures) déclenche une alerte sur le téléphone. */
+function errStreak(admin: Admin, mem: Memory, who: string, msg: string) {
+  mem.errStreak = (mem.errStreak ?? 0) + 1;
+  if (mem.errStreak === 5 || mem.errStreak % 60 === 0) admin.alert?.(`${who} : la même panne se répète depuis ${mem.errStreak} minutes (${msg.slice(0, 120)}). Les positions restent protégées par leurs stops ; vérifie l'app.`);
 }

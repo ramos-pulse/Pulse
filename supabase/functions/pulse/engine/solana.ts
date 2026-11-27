@@ -18,7 +18,7 @@ import {
   getBase58Encoder,
   getProgramDerivedAddress,
 } from "@solana/kit";
-import { SOL_MINT, TOKENS, USDC_MINT } from "./strategy.ts";
+import { SOL_MINT, allTokens, USDC_MINT } from "./strategy.ts";
 
 /** Variables d'environnement : marche sous Deno (Supabase) comme sous Node. */
 export function env(name: string): string | undefined {
@@ -74,7 +74,7 @@ export interface Balances {
 }
 
 export async function getBalances(owner: string): Promise<Balances> {
-  const mints = [USDC_MINT, ...TOKENS.filter((t) => t.mint !== SOL_MINT).map((t) => t.mint)];
+  const mints = [USDC_MINT, ...allTokens().filter((t) => t.mint !== SOL_MINT).map((t) => t.mint)];
   const enc = getAddressEncoder();
   const accounts = await Promise.all(mints.map(async (mint) => {
     const [ata] = await getProgramDerivedAddress({

@@ -9,9 +9,11 @@ import { candles as getCandles, hourlyCandles } from "./engine/candles.ts";
 import { env } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
-import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, tempo, type Candidate, type Market } from "./engine/research.ts";
-import { DbStore, notify, type BotKind, type BotState } from "./store.ts";
+import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, allTokens, setExtraTokens, type TokenInfo, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
+import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, simulate, tempo, type Candidate, type Market } from "./engine/research.ts";
+import { DbStore, notify, pushHook, type BotKind, type BotState } from "./store.ts";
+import { arbScan, FRESH, freshCandidates, freshRefusal, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
+import { newVapid, sendPush, type Subscription, type Vapid } from "./engine/webpush.ts";
 import { cleanWallet, CLEANER } from "./engine/cleaner.ts";
 import { analyze, LUCK, luckProbability, propose } from "./engine/math.ts";
 import { FAMILY_NAMES, isSetup, PERPS_ONLY, sanitizeSetup, type Extra, type SetupParams } from "./engine/setups.ts";
@@ -180,10 +182,10 @@ async function state() {
     out[k] = {
       ...b, price_history: undefined, lock_until: undefined, config: k === "spot" ? loadConfig(b.config) : loadPerpsConfig(b.config),
       positions: Object.values(migratePositions(mem, b)).map((p) => ({ key: p.key, symbol: p.symbol, side: p.side, entry: p.entry, stop: p.stop, best: p.best, live: p.live, openedAt: p.openedAt, strategy: p.strategy,
-        source: p.source, partialDone: !!p.partialDone, interval: p.posInterval })),
+        source: p.source, partialDone: !!p.partialDone, interval: p.posInterval, target: p.target, why: p.why })),
       vault: Math.round((mem.vault ?? 0) * 100) / 100,
       curve: downsample(mem.curve ?? [], 120),
-      memory: { strategy: mem.strategy, stop: mem.stop, best: mem.best, signal: mem.signal, mindset: mem.mindset, live: mem.live, asset: mem.asset, side: mem.side, openedAt: mem.openedAt, costUsd: mem.costUsd, pending: mem.pending ? { kind: mem.pending.kind, at: mem.pending.at } : null },
+      memory: { strategy: mem.strategy, stop: mem.stop, best: mem.best, signal: mem.signal, mindset: mem.mindset, live: mem.live, asset: mem.asset, side: mem.side, openedAt: mem.openedAt, costUsd: mem.costUsd, pending: mem.pending ? { kind: mem.pending.kind, at: mem.pending.at } : null, errStreak: mem.errStreak ?? 0, cooldownUntil: mem.cooldownUntil ?? null },
       brain: mem.brain ? { risk: riskPerTrade(mem.brain), streak: mem.brain.streak, benched: mem.brain.benched, disabled: mem.brain.disabled, report: mem.brain.report ?? {}, preset: mem.brain.preset } : null,
       trades: trades ?? [],
     };
@@ -264,6 +266,9 @@ async function learnFromBots(): Promise<string[]> {
   return news;
 }
 const INTERVALS: Interval[] = ["1h", "15m"];
+/** Marchés étudiés : liste fixe + tokens choisis par le sélectionneur (historique on-chain). */
+const researchMarkets = (): Market[] => [...RESEARCH_MARKETS, ...INTERVALS.flatMap((interval) => allTokens().filter((t) => t.extra === "selection" && t.active !== false).map((t) => ({
+  name: `Spot ${t.symbol}${interval === "15m" ? " · 15 min" : ""}`, product: t.candles, symbol: t.symbol, kind: "spot" as const, interval, feePct: 0.004, hourlyCost: 0, cap: RISK.maxSpotFraction })))];
 const RESEARCH_MARKETS: Market[] = INTERVALS.flatMap((interval) => [
   ...TOKENS.filter((t) => t.symbol !== "JUP").map((t) => ({ name: `Spot ${t.symbol}${interval === "15m" ? " · 15 min" : ""}`, product: t.candles, symbol: t.symbol,
     kind: "spot" as const, interval, feePct: 0.003, hourlyCost: 0, cap: RISK.maxSpotFraction })),
@@ -289,7 +294,8 @@ async function runResearch() {
   const A = agentSettings((await readBots()).spot.config);
   const fast = A.nerve >= 2;
   // nerveux : 2 cycles sur 3 consacrés au scalping 15 min
-  const pool = fast && cycle % 3 !== 0 ? RESEARCH_MARKETS.filter((x) => x.interval === "15m") : RESEARCH_MARKETS;
+  const all = researchMarkets();
+  const pool = fast && cycle % 3 !== 0 ? all.filter((x) => x.interval === "15m") : all;
   const m = pool[cycle % pool.length]!;
   let candles;
   try { candles = await getCandles(m.product, m.interval, HISTORY[m.interval]); }
@@ -608,8 +614,207 @@ async function agentsBoard() {
       rules: CLEANER, log: rows.filter((r) => r.action !== "passage").slice(0, 15), runs: rows.filter((r) => r.action === "passage").slice(0, 5),
     },
     math,
+    ...(await lot2Board().catch(() => ({}))),
   };
 }
+
+// ------------------------------------------------------------------ univers de tokens (sélectionneur + nouveaux tokens)
+type UniverseRow = { mint: string; kind: "selection" | "nouveau"; symbol: string; decimals: number; pool?: string | null; liquidity?: number | null; volume_24h?: number | null; age_days?: number | null;
+  score?: number | null; active: boolean; why?: string | null; data?: Record<string, unknown> | null; added_at: string; updated_at: string; seen_at?: string | null; removed_at?: string | null };
+/** Source d'historique d'un token on-chain : Birdeye si la clé existe (GeckoTerminal en secours), sinon GeckoTerminal. */
+const candleSource = (r: Pick<UniverseRow, "mint" | "pool">) => (env("BIRDEYE_API_KEY") ? `be:${r.mint}|${r.pool ?? ""}` : `gt:${r.pool}`);
+async function loadUniverse() {
+  // tokens actifs + tokens retirés depuis peu (ils peuvent encore être en portefeuille : le bot doit pouvoir les revendre)
+  const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+  const { data } = await db.from("token_universe").select("*").or(`removed_at.is.null,removed_at.gt.${since}`).limit(200);
+  setExtraTokens(((data ?? []) as UniverseRow[]).filter((r) => r.pool).map((r): TokenInfo => ({
+    symbol: r.symbol, mint: r.mint, decimals: r.decimals, candles: candleSource(r), verify: r.kind === "selection", extra: r.kind, active: r.active,
+    ...(r.seen_at ? { seenAt: Date.parse(r.seen_at) } : {}) })));
+}
+
+/** SÉLECTIONNEUR : une fois par jour, les 20 à 30 meilleurs tokens Solana ; ceux qui ne passent plus les filtres sont retirés. */
+async function runSelector(force = false): Promise<string> {
+  const { day } = parisNow();
+  if (!force) { const { data } = await db.from("agent_log").select("id").eq("agent", "selecteur").eq("wallet", day).limit(1); if (data?.length) return "déjà fait aujourd'hui"; }
+  const fixed = new Set<string>(TOKENS.map((t) => t.mint));
+  const { candidates, info } = await selectionCandidates(fixed);
+  const { selected, refused } = rankSelection(candidates, info);
+  if (!selected.length && !candidates.length) throw new Error("aucune donnée de marché");
+  const { data: cur } = await db.from("token_universe").select("*").eq("kind", "selection").limit(500);
+  const current = (cur ?? []) as UniverseRow[];
+  const now = new Date().toISOString(), keep = new Set(selected.map((c) => c.mint));
+  const symbols = new Set<string>(TOKENS.map((t) => t.symbol));
+  const added: string[] = [], removed: string[] = [];
+  for (const c of selected) {
+    if (symbols.has(c.symbol)) continue; // même symbole qu'un token de la liste fixe : ignoré (éviter toute confusion)
+    symbols.add(c.symbol);
+    const was = current.find((r) => r.mint === c.mint);
+    if (!was?.active) added.push(c.symbol);
+    await db.from("token_universe").upsert({ mint: c.mint, kind: "selection", symbol: c.symbol, decimals: c.decimals, pool: c.pool, liquidity: c.liquidity, volume_24h: c.volume24h, age_days: c.ageDays,
+      score: Math.round(Math.sqrt(c.volume24h * c.liquidity)), active: true, why: "passe tous les filtres", updated_at: now, removed_at: null, ...(was ? {} : { added_at: now }) }, { onConflict: "mint" });
+  }
+  for (const r of current.filter((x) => x.active && !keep.has(x.mint))) {
+    const why = refused.find((c) => c.mint === r.mint)?.why ?? "n'est plus parmi les meilleurs tokens";
+    removed.push(`${r.symbol} (${why})`);
+    await db.from("token_universe").update({ active: false, why, removed_at: now, updated_at: now }).eq("mint", r.mint);
+  }
+  const text = `Sélection du jour : ${selected.length} token(s) retenus sur ${candidates.length} candidats${added.length ? ` · ajoutés : ${added.join(", ")}` : ""}${removed.length ? ` · retirés : ${removed.join(", ")}` : ""}.`;
+  await db.from("agent_log").insert({ agent: "selecteur", wallet: day, action: "selection", detail: text, usd: selected.length });
+  if (added.length || removed.length) await notify(text);
+  return text;
+}
+
+/** NOUVEAUX TOKENS : repère les lancements récents qui passent les garde-fous (achat seulement si l'agent est activé). */
+async function runFreshScout(): Promise<string> {
+  const { data: cur } = await db.from("token_universe").select("mint, kind, active, added_at").limit(1000);
+  const known = new Set<string>([...TOKENS.map((t) => t.mint), ...((cur ?? []) as UniverseRow[]).map((r) => r.mint)]);
+  // les « nouveaux » de plus de 24 h ne sont plus des nouveaux
+  const old = new Date(Date.now() - FRESH.maxAgeH * 3_600_000).toISOString();
+  await db.from("token_universe").update({ active: false, removed_at: new Date().toISOString(), why: "plus de 24 h" }).eq("kind", "nouveau").eq("active", true).lt("added_at", old);
+  const { list, info } = await freshCandidates(known);
+  const ok = [], refusals: Record<string, number> = {};
+  for (const f of list) {
+    const why = freshRefusal(f, info.get(f.mint));
+    if (why) { const k = why.split(" (")[0]!.split(" :")[0]!; refusals[k] = (refusals[k] ?? 0) + 1; continue; }
+    if (!f.decimals) continue;
+    ok.push(f);
+    const now = new Date().toISOString();
+    await db.from("token_universe").upsert({ mint: f.mint, kind: "nouveau", symbol: f.symbol, decimals: f.decimals, pool: f.pool, liquidity: f.liquidity, volume_24h: f.volume1h * 24, age_days: f.ageMin / 1440,
+      score: f.change1h, active: true, why: "garde-fous passés", data: { change1h: f.change1h, buys1h: f.buys1h, sells1h: f.sells1h, topHolders: f.topHolders }, added_at: now, updated_at: now, seen_at: now }, { onConflict: "mint" });
+  }
+  const top = Object.entries(refusals).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${k} (${n})`).join(", ");
+  const text = `${list.length} lancement(s) examiné(s), ${ok.length} retenu(s)${ok.length ? ` : ${ok.map((f) => f.symbol).join(", ")}` : ""}${top ? ` · refus : ${top}` : ""}`;
+  if (list.length) await db.from("agent_log").insert({ agent: "nouveaux", wallet: "spot", action: "scan", detail: text, usd: ok.length });
+  await db.from("agent_log").delete().eq("agent", "nouveaux").lt("created_at", new Date(Date.now() - 3 * 86_400_000).toISOString());
+  return text;
+}
+
+/** ARBITRAGE ÉCLAIREUR : écarts de prix entre DEX et boucles de swaps, frais déduits ; aucun argent engagé. */
+async function runArbScout(): Promise<string> {
+  const tokens = allTokens().filter((t) => t.extra !== "nouveau" && t.active !== false);
+  const cycle = Math.floor(Date.now() / 300_000);
+  const obs = await arbScan(tokens, 3, cycle * 3);
+  if (!obs.length) return "aucune donnée";
+  const best = [...obs].sort((a, b) => b.netPct - a.netPct)[0]!;
+  const rows = obs.filter((o) => o.netPct > 0 || o === best).map((o) => ({ kind: o.kind, token: o.token, detail: o.detail, gross_pct: Math.round(o.grossPct * 1000) / 1000, net_pct: Math.round(o.netPct * 1000) / 1000 }));
+  await db.from("arb_log").insert(rows);
+  await db.from("arb_log").delete().lt("created_at", new Date(Date.now() - 14 * 86_400_000).toISOString());
+  return `${obs.length} mesure(s), meilleure : ${best.token} ${best.kind} ${best.netPct.toFixed(2)} % net`;
+}
+
+/** CHIEN DE GARDE : un bot en mission qui ne se contrôle plus depuis 5 minutes déclenche une alerte (au plus une par heure). */
+async function runWatchdog(): Promise<string> {
+  const bots = await readBots(), out: string[] = [];
+  for (const k of KINDS) {
+    const b = bots[k];
+    if (b.status !== "running") continue;
+    const age = b.last_tick_at ? (Date.now() - Date.parse(b.last_tick_at)) / 60_000 : Infinity;
+    if (age < 5) continue;
+    const { data } = await db.from("agent_log").select("id").eq("agent", "garde").eq("wallet", k).gt("created_at", new Date(Date.now() - 3_600_000).toISOString()).limit(1);
+    if (data?.length) { out.push(`${k} : déjà signalé`); continue; }
+    const text = `${k === "spot" ? "Bot spot" : "Bot perps"} : aucun contrôle depuis ${Number.isFinite(age) ? Math.round(age) + " minutes" : "le démarrage"}. Les positions perps gardent leur stop on-chain ; vérifie l'app.`;
+    await db.from("agent_log").insert({ agent: "garde", wallet: k, action: "alerte", detail: text });
+    await notify(text); out.push(text);
+  }
+  return out.join(" · ") || "tout va bien";
+}
+
+/** Tableau des nouveaux agents (onglet Agents). */
+async function lot2Board() {
+  const [{ data: uni }, { data: logs }, { data: arb }, { count: subs }, bots] = await Promise.all([
+    db.from("token_universe").select("*").order("score", { ascending: false }).limit(200),
+    db.from("agent_log").select("*").in("agent", ["selecteur", "nouveaux", "garde"]).order("created_at", { ascending: false }).limit(40),
+    db.from("arb_log").select("*").order("created_at", { ascending: false }).limit(300),
+    db.from("push_subs").select("endpoint", { count: "exact", head: true }),
+    readBots(),
+  ]);
+  const U = (uni ?? []) as UniverseRow[], L = (logs ?? []) as { agent: string; created_at: string; detail: string }[], A = (arb ?? []) as { created_at: string; kind: string; token: string; detail: string; net_pct: number; gross_pct: number }[];
+  const pos = A.filter((x) => x.net_pct > 0);
+  return {
+    selector: { tokens: U.filter((r) => r.kind === "selection" && r.active), removed: U.filter((r) => r.kind === "selection" && !r.active).slice(0, 10), last: L.find((x) => x.agent === "selecteur") ?? null, rules: SELECT },
+    fresh: { on: loadConfig(bots.spot.config).newTokens, tokens: U.filter((r) => r.kind === "nouveau" && r.active), last: L.filter((x) => x.agent === "nouveaux").slice(0, 5), rules: FRESH },
+    arb: { measures: A.length, positives: pos.length, best: [...A].sort((a, b) => b.net_pct - a.net_pct).slice(0, 5), since: A.at(-1)?.created_at ?? null },
+    watchdog: { last: L.filter((x) => x.agent === "garde").slice(0, 5) },
+    push: { subscribers: subs ?? 0 },
+  };
+}
+
+/** BILAN PAR STRATÉGIE : résultats réels de chaque stratégie (60 derniers jours). */
+async function strategyReport() {
+  const since = new Date(Date.now() - 60 * 86_400_000).toISOString();
+  const { data } = await db.from("trades").select("*").gt("created_at", since).limit(5000);
+  const by = new Map<string, { source: string; bot: string; trades: number; wins: number; gain: number; loss: number; last: string }>();
+  for (const t of (data ?? []) as { bot: string; source?: string | null; pnl_usd?: number | null; created_at: string }[]) {
+    if (typeof t.pnl_usd !== "number") continue;
+    const key = `${t.bot}|${t.source ?? "réglages de l'app"}`;
+    const e = by.get(key) ?? { source: t.source ?? "réglages de l'app", bot: t.bot, trades: 0, wins: 0, gain: 0, loss: 0, last: t.created_at };
+    e.trades++; if (t.pnl_usd > 0) { e.wins++; e.gain += t.pnl_usd; } else e.loss -= t.pnl_usd;
+    if (t.created_at > e.last) e.last = t.created_at;
+    by.set(key, e);
+  }
+  const ids = [...by.values()].map((e) => /chercheur #(\d+)/.exec(e.source)?.[1]).filter(Boolean).map(Number);
+  const { data: rs } = ids.length ? await db.from("research").select("id, family, interval, market").in("id", ids) : { data: [] };
+  const fam = new Map(((rs ?? []) as { id: number; family: string; interval: string }[]).map((r) => [r.id, r]));
+  return { since, rows: [...by.values()].map((e) => { const id = Number(/chercheur #(\d+)/.exec(e.source)?.[1]); const r = fam.get(id);
+    return { ...e, pnl: Math.round((e.gain - e.loss) * 100) / 100, winRate: Math.round((e.wins / e.trades) * 100), profitFactor: e.loss > 0 ? Math.round((e.gain / e.loss) * 100) / 100 : e.gain > 0 ? 99 : 0,
+      family: r?.family ?? null, interval: r?.interval ?? null }; }).sort((a, b) => b.pnl - a.pnl) };
+}
+
+// ------------------------------------------------------------------ graphiques (positions, mini-jeu) et backtest visuel
+const productOf = (symbol: string, kind: "spot" | "perps") => kind === "perps" ? PERPS_ASSETS.find((a) => a.asset === symbol)?.candles : allTokens().find((t) => t.symbol === symbol)?.candles;
+async function chartData(symbol: string, kind: "spot" | "perps", interval: Interval, count: number) {
+  const product = productOf(symbol, kind);
+  if (!product) throw new Error("marché inconnu");
+  const c = await getCandles(product, interval, Math.min(1000, Math.max(30, count)));
+  const { data: trades } = await db.from("trades").select("*").eq("bot", kind).gt("created_at", new Date(c[0]?.t ?? Date.now()).toISOString()).limit(200);
+  const mine = ((trades ?? []) as { symbol?: string; asset?: string; side?: string; action?: string; price?: number; created_at: string; pnl_usd?: number }[])
+    .filter((t) => (t.symbol ?? t.asset) === symbol && t.price).map((t) => ({ t: Date.parse(t.created_at), price: t.price, what: t.side ?? t.action, pnl: t.pnl_usd ?? null }));
+  return { symbol, kind, interval, candles: c.map((x) => [x.t, x.o, x.h, x.l, x.c]), trades: mine };
+}
+/** Backtest visuel : rejoue une stratégie du chercheur sur l'historique récent et renvoie les trades et la courbe. */
+async function researchSim(id: number) {
+  const { data } = await db.from("research").select("*").eq("id", id).limit(1);
+  const r = data?.[0] as ResearchRow | undefined;
+  if (!r) throw new Error("stratégie introuvable");
+  const iv: Interval = r.interval === "15m" ? "15m" : "1h";
+  const m = researchMarkets().find((x) => x.product === r.product && x.kind === r.kind && x.interval === iv);
+  if (!m) throw new Error("marché introuvable");
+  const candles = await getCandles(m.product, iv, HISTORY[iv]);
+  const ctx: { extra?: Extra } = r.family === "funding" ? { extra: { funding: await fundingHistory(m.symbol, candles[0]!.t - 86_400_000).catch(() => []) } } : {};
+  const res = simulate({ market: r.market, product: r.product, symbol: m.symbol, kind: r.kind, interval: iv, family: r.family, params: r.params }, candles, m, ctx);
+  let eq = 1; const curve = res.log.map((t) => ({ t: t.t, v: Math.round((eq *= 1 + t.pnlPct / 100) * 10000) / 10000 }));
+  const step = Math.max(1, Math.floor(candles.length / 300));
+  return { id, market: r.market, family: r.family, interval: iv, description: describe({ ...r, interval: iv }), split: candles[Math.floor(candles.length * 2 / 3)]?.t ?? null,
+    candles: candles.filter((_, i) => i % step === 0 || i === candles.length - 1).map((x) => [x.t, x.c]),
+    trades: res.log.map((t) => ({ t: t.t, t0: t.t0 ?? null, side: t.side, entry: t.entry, exit: t.exit, pnl: Math.round(t.pnlPct * 100) / 100, reason: t.reason })).slice(-150), curve,
+    stats: { trades: res.trades, winRate: Math.round(res.winRate), profitFactor: Number.isFinite(res.profitFactor) ? Math.round(res.profitFactor * 100) / 100 : 99, returnPct: Math.round(res.returnPct * 100) / 100, maxDrawdownPct: Math.round(res.maxDrawdownPct * 100) / 100 } };
+}
+
+// ------------------------------------------------------------------ notifications push
+let VAPID: Vapid | null = null;
+async function vapid(): Promise<Vapid> {
+  if (VAPID) return VAPID;
+  const { data } = await db.from("app_kv").select("value").eq("key", "vapid").limit(1);
+  const v = (data?.[0] as { value?: Vapid } | undefined)?.value;
+  if (v?.publicKey && v.privateJwk) return (VAPID = v);
+  const fresh = await newVapid("mailto:pulse@ramos-pulse.github.io");
+  await db.from("app_kv").upsert({ key: "vapid", value: fresh, updated_at: new Date().toISOString() }, { onConflict: "key" });
+  return (VAPID = fresh);
+}
+async function pushAll(text: string): Promise<number> {
+  const { data } = await db.from("push_subs").select("*").limit(20);
+  const subs = (data ?? []) as Subscription[];
+  if (!subs.length) return 0;
+  const v = await vapid();
+  let sent = 0;
+  for (const sub of subs) {
+    const st = await sendPush(sub, v, { title: "Pulse", body: text.slice(0, 300), tag: text.startsWith("Bilan") ? "bilan" : undefined, url: "./" }).catch(() => 0);
+    if (st === 404 || st === 410) await db.from("push_subs").delete().eq("endpoint", sub.endpoint);
+    else if (st >= 200 && st < 300) sent++;
+  }
+  return sent;
+}
+pushHook.send = (text) => pushAll(text).then(() => undefined);
 
 // ------------------------------------------------------------------ discussion avec le chercheur
 async function agentChat(messages: { role: string; content: string }[]) {
@@ -673,14 +878,22 @@ Deno.serve(async (req) => {
   try {
     if (route === "/research" && req.method === "POST") {
       if (!TOKEN || !safeEqual(req.headers.get("x-cron-secret") ?? "", await cronSecret())) return json({ error: "interdit" }, 403);
-      const research = await runResearch();
-      const swap = (await swapAgentDue().catch(() => false)) ? await runSwapAgent("auto").catch((e) => `erreur : ${(e as Error).message}`) : "pas encore l'heure";
-      const bilan = await eveningReport().catch((e) => `erreur : ${(e as Error).message}`);
-      return json({ research, swap, bilan });
+      await loadUniverse().catch(() => null);
+      const err = (e: unknown) => `erreur : ${(e as Error).message}`;
+      // chaque agent est indépendant : la panne de l'un n'empêche jamais les autres de tourner
+      const watchdog = await runWatchdog().catch(err);
+      const research = await runResearch().catch(err);
+      const swap = (await swapAgentDue().catch(() => false)) ? await runSwapAgent("auto").catch(err) : "pas encore l'heure";
+      const bilan = await eveningReport().catch(err);
+      const selector = await runSelector().catch(err);
+      const fresh = await runFreshScout().catch(err);
+      const arb = await runArbScout().catch(err);
+      return json({ watchdog, research, swap, bilan, selector, fresh, arb });
     }
     if (route === "/tick" && req.method === "POST") {
       if (!TOKEN || !safeEqual(req.headers.get("x-cron-secret") ?? "", await cronSecret())) return json({ error: "interdit" }, 403);
       // les deux bots tournent en parallèle et indépendamment : la panne de l'un ne bloque jamais l'autre
+      await loadUniverse().catch(() => null); // tokens des agents : le bot spot doit pouvoir les évaluer et les revendre
       const breaker = await checkBreaker().catch((e) => `disjoncteur : ${(e as Error).message}`);
       if (breaker && breaker.startsWith("DÉCLENCHÉ")) return json({ breaker });
       const results = await Promise.all(KINDS.map((k) => tickBot(k).catch((e: unknown) => `erreur : ${String(e)}`)));
@@ -690,6 +903,7 @@ Deno.serve(async (req) => {
     if (!TOKEN) return json({ error: "Secret DASHBOARD_TOKEN manquant dans Supabase" }, 401);
     if (!safeEqual((req.headers.get("x-token") ?? "").trim(), TOKEN)) return json({ error: "token invalide" }, 401);
     await ensureCron();
+    await loadUniverse().catch(() => null);
 
     if (req.method === "GET" && route === "/api/state") return json(await state());
     if (req.method === "GET" && route === "/api/research") return json(await researchBoard());
@@ -699,6 +913,34 @@ Deno.serve(async (req) => {
     }
     if (req.method === "POST" && route === "/api/research/run") return json(await runResearch()); // lancer une recherche tout de suite
     if (req.method === "GET" && route === "/api/agents") return json(await agentsBoard());
+    if (req.method === "GET" && route === "/api/report") return json(await strategyReport());
+    if (req.method === "GET" && route === "/api/curve") { // courbes complètes du capital (un point par heure, 30 jours) pour le grand graphique
+      const bots = await readBots();
+      return json(Object.fromEntries(KINDS.map((k) => [k, loadMemory(bots[k].price_history).curve ?? []])));
+    }
+    if (req.method === "GET" && route === "/api/chart") return json(await chartData(url.searchParams.get("symbol") ?? "SOL", url.searchParams.get("kind") === "perps" ? "perps" : "spot", url.searchParams.get("interval") === "15m" ? "15m" : "1h", Number(url.searchParams.get("count") ?? 120)));
+    if (req.method === "GET" && route === "/api/research/sim") return json(await researchSim(Number(url.searchParams.get("id"))));
+    if (req.method === "GET" && route === "/api/push/key") return json({ key: (await vapid()).publicKey });
+    if (req.method === "POST" && route === "/api/push/subscribe") {
+      const b = (await req.json().catch(() => ({}))) as { endpoint?: string; keys?: { p256dh?: string; auth?: string } };
+      if (!b.endpoint?.startsWith("https://") || !b.keys?.p256dh || !b.keys?.auth) return json({ error: "abonnement invalide" }, 400);
+      await db.from("push_subs").upsert({ endpoint: b.endpoint, p256dh: b.keys.p256dh, auth: b.keys.auth }, { onConflict: "endpoint" });
+      return json({ ok: true });
+    }
+    if (req.method === "POST" && route === "/api/push/unsubscribe") {
+      const b = (await req.json().catch(() => ({}))) as { endpoint?: string };
+      if (b.endpoint) await db.from("push_subs").delete().eq("endpoint", b.endpoint);
+      return json({ ok: true });
+    }
+    if (req.method === "POST" && route === "/api/push/test") return json({ sent: await pushAll("Test : les notifications de Pulse fonctionnent ✅") });
+    if (req.method === "POST" && route === "/api/agents/selector/run") return json({ result: await runSelector(true) });
+    if (req.method === "POST" && route === "/api/agents/fresh") {
+      const b = (await req.json().catch(() => ({}))) as { on?: boolean };
+      const sc = loadConfig((await readBots()).spot.config);
+      await setBot("spot", { config: { ...sc, newTokens: b.on === true } });
+      await notify(`Agent nouveaux tokens : ${b.on === true ? "ACTIVÉ (toute petite mise, garde-fous stricts)" : "désactivé"}`);
+      return json({ ok: true, on: b.on === true });
+    }
     if (req.method === "POST" && route === "/api/bilan") return json({ result: await eveningReport(true) });
     if (req.method === "POST" && route === "/api/agents/swap/run") return json(await runSwapAgent("manuel"));
     if (req.method === "POST" && route === "/api/agents/swap/auto") {

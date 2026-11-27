@@ -35,8 +35,24 @@ export async function getQuote(inputMint: string, outputMint: string, amount: bi
   return q;
 }
 
+/**
+ * ANTI-SANDWICH : par défaut, le swap part en ENVOI PRIVÉ par Jito (« bundleOnly ») au lieu d'être diffusé publiquement :
+ * les robots qui guettent les transactions en attente ne le voient pas avant son exécution, et il ne peut pas être
+ * coincé entre leur achat et leur vente. Petit pourboire Jito (0,00002 SOL ≈ 0,003 $). Si Jito refuse l'envoi,
+ * la même transaction part par la voie normale.
+ */
+export const PROTECT = { jitoTipLamports: 20_000, url: "https://mainnet.block-engine.jito.wtf/api/v1/transactions?bundleOnly=true" };
+async function sendProtected(wireBase64: string): Promise<string> {
+  const res = await fetch(PROTECT.url, { method: "POST", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(10_000),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "sendTransaction", params: [wireBase64, { encoding: "base64" }] }) });
+  const j = (await res.json().catch(() => ({}))) as { result?: string; error?: { message?: string } };
+  if (!res.ok || !j.result) throw new Error(`Jito : ${j.error?.message ?? res.status}`);
+  return j.result;
+}
+
 /** Construit, signe et envoie le swap. Renvoie la signature (à CONFIRMER ensuite). */
-export async function executeSwap(quote: Quote, owner: string, keyPair: KeyPair): Promise<string> {
+export async function executeSwap(quote: Quote, owner: string, keyPair: KeyPair, opts: { protect?: boolean } = {}): Promise<string> {
+  const protect = opts.protect !== false;
   const res = await fetch(`${JUP}/swap/v1/swap`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -47,15 +63,17 @@ export async function executeSwap(quote: Quote, owner: string, keyPair: KeyPair)
       wrapAndUnwrapSol: true,
       dynamicComputeUnitLimit: true,
       dynamicSlippage: true,
-      // frais de priorité plafonnés : avec un petit capital, des frais « auto » illimités mangent les gains
-      prioritizationFeeLamports: { priorityLevelWithMaxLamports: { priorityLevel: "high", maxLamports: 150_000 } },
+      // envoi privé : pourboire Jito ; sinon frais de priorité plafonnés (avec un petit capital, des frais illimités mangent les gains)
+      prioritizationFeeLamports: protect ? { jitoTipLamports: PROTECT.jitoTipLamports } : { priorityLevelWithMaxLamports: { priorityLevel: "high", maxLamports: 150_000 } },
     }),
   });
   const json = (await res.json()) as { swapTransaction?: string; error?: string };
   if (!json.swapTransaction) throw new Error(`Swap refusé : ${json.error ?? res.status}`);
   const tx = getTransactionDecoder().decode(b64ToBytes(json.swapTransaction));
   const signed = await signTransaction([keyPair], tx as Parameters<typeof signTransaction>[1]);
-  return sendRaw(getBase64EncodedWireTransaction(signed));
+  const wire = getBase64EncodedWireTransaction(signed);
+  if (protect) { try { return await sendProtected(wire); } catch { /* Jito indisponible : voie normale */ } }
+  return sendRaw(wire);
 }
 
 // ------------------------------------ Jupiter Perps ------------------------------------

@@ -120,8 +120,12 @@ export class DbStore implements Store {
   }
 }
 
+/** Notifications push sur le téléphone (branché par la fonction principale, qui a accès à la base). */
+export const pushHook: { send: null | ((text: string) => Promise<void>) } = { send: null };
+
 export async function notify(text: string): Promise<void> {
   console.log(text);
+  await pushHook.send?.(text).catch(() => {});
   const token = env("TELEGRAM_BOT_TOKEN"), chat = env("TELEGRAM_CHAT_ID");
   if (!token || !chat) return;
   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {

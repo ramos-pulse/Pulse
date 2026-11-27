@@ -8,24 +8,25 @@ import { candles as getCandles, hourlyCandles, lastClosedCandle } from "./candle
 import { executeSwap, getPrices, getQuote, verifyToken } from "./jupiter.ts";
 import { getBalances, loadKeyPairFrom, txStatus, waitForTx, type Balances } from "./solana.ts";
 import { tokenLiquidity } from "./dex.ts";
+import { FRESH, freshStake } from "./agents.ts";
 import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type SetupParams } from "./setups.ts";
 import {
   addToVault, applyTransfer, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate,
   cooldownMs, exitSlippageBps, floorOf, solReserveAlert, volScale, groupOf, LIQUIDITY, type SpotFamily,
-  rsiExitSignal, rsiSignal, RULES, sampleCurve, SOL_MINT, TOKENS, TOTAL_RISK, tradable, trailStop, trendSignal, USDC_MINT,
+  rsiExitSignal, rsiSignal, RULES, sampleCurve, SOL_MINT, TOKENS, allTokens, type TokenInfo, TOTAL_RISK, tradable, trailStop, trendSignal, USDC_MINT,
   type Interval, type Memory, type Params, type Position, type RsiParams, type Signal, type SpotConfig, type SpotStrategy,
 } from "./strategy.ts";
 
 type Admin = Store;
 type BotRow = BotState;
-type Token = (typeof TOKENS)[number];
+type Token = TokenInfo;
 type KeyPair = Parameters<typeof executeSwap>[2];
 
 const WALLET_ENV = "BOT_WALLET_PRIVATE_KEY";
 const MIN_POSITION_USD = 1.5;    // en dessous : poussière, pas une position
 const SPOT_COST = 0.003;         // coût estimé par côté (frais + slippage) pour le backtest
-const ALL_MINTS = [USDC_MINT, ...TOKENS.map((t) => t.mint)];
-const tokenOf = (mint: string | null | undefined) => TOKENS.find((t) => t.mint === mint);
+const allMints = () => [USDC_MINT, ...allTokens().map((t) => t.mint)];
+const tokenOf = (mint: string | null | undefined) => allTokens().find((t) => t.mint === mint);
 const symbolOf = (mint: string) => tokenOf(mint)?.symbol ?? mint.slice(0, 4);
 
 export async function getWalletAddress(): Promise<string | null> {
@@ -38,7 +39,7 @@ export function portfolio(b: Balances, prices: Record<string, number>, totalSol:
   let complete = true;
   const solP = prices[SOL_MINT];
   if (solP) value += totalSol * solP; else if (totalSol > 0.001) complete = false;
-  for (const t of TOKENS) {
+  for (const t of allTokens()) {
     if (t.mint === SOL_MINT) continue;
     const q = b.ui[t.mint] ?? 0;
     if (q <= 0) continue;
@@ -50,7 +51,7 @@ export function portfolio(b: Balances, prices: Record<string, number>, totalSol:
 
 export async function currentValue() {
   const { address } = await loadKeyPairFrom(WALLET_ENV);
-  const [prices, b] = await Promise.all([getPrices(ALL_MINTS), getBalances(address)]);
+  const [prices, b] = await Promise.all([getPrices(allMints()), getBalances(address)]);
   return { address, valueUsd: portfolio(b, prices, b.sol).value };
 }
 
@@ -62,13 +63,18 @@ function holds(b: Balances, mint: string, prices: Record<string, number>): boole
   return p ? (b.ui[mint] ?? 0) * p >= MIN_POSITION_USD : true;
 }
 
-async function sell(mint: string, amount: bigint, owner: string, keyPair: KeyPair) {
+/** Vente avec marge de prix adaptée à la liquidité et envoi privé. Renvoie la signature et les USDC attendus (contrôle après coup). */
+async function sell(mint: string, amount: bigint, owner: string, keyPair: KeyPair, protect = true) {
   if (amount <= 0n) throw new Error("rien à vendre");
   const probe = await getQuote(mint, USDC_MINT, amount, RULES.exitSlippageBps);
   const bps = exitSlippageBps(Number(probe.priceImpactPct));
   const quote = bps === RULES.exitSlippageBps ? probe : await getQuote(mint, USDC_MINT, amount, bps).catch(() => probe);
-  return executeSwap(quote, owner, keyPair);
+  return { sig: await executeSwap(quote, owner, keyPair, { protect }), expectedUsd: Number(quote.outAmount) / 1e6 };
 }
+/** Envoi privé (Jito) sauf si un envoi privé vient d'échouer : on repasse par la voie normale pendant 15 minutes. */
+const protectNow = (mem: Memory, now: number) => !(mem.jitoMissAt && now - mem.jitoMissAt < 15 * 60_000);
+/** Écart toléré entre le prix coté et le prix obtenu avant alerte (sandwich probable). */
+const FILL_ALERT = 0.006;
 
 /** Perte si le stop de chaque position est touché, en part du capital. */
 function openRisk(positions: Position[], b: Balances, valueUsd: number) {
@@ -98,11 +104,14 @@ export async function runTick(admin: Admin): Promise<string> {
   let address: string, keyPair: KeyPair, b: Balances, prices: Record<string, number>;
   try {
     ({ address, keyPair } = await loadKeyPairFrom(WALLET_ENV));
-    [b, prices] = await Promise.all([getBalances(address), getPrices(ALL_MINTS).catch(() => ({} as Record<string, number>))]);
+    [b, prices] = await Promise.all([getBalances(address), getPrices(allMints()).catch(() => ({} as Record<string, number>))]);
   } catch (e) {
+    errStreak(admin, mem, "Bot spot", (e as Error).message);
     await save(admin, mem, { last_message: `Données indisponibles (${(e as Error).message.slice(0, 80)}). Je réessaie dans une minute.` });
     return "data_unavailable";
   }
+  const prevErr = mem.errStreak ?? 0;
+  mem.errStreak = 0;
   patch.wallet_address = address;
   let { value, complete } = portfolio(b, prices, b.sol);
   mem.brain = mem.brain ?? newBrain(value);
@@ -127,7 +136,7 @@ export async function runTick(admin: Admin): Promise<string> {
     p.missing = (p.missing ?? 0) + 1;
     if (p.missing >= 2) { message = `Position ${p.symbol} introuvable dans le portefeuille : oubliée.`; delete positions[p.key]; }
   }
-  for (const t of TOKENS) {
+  for (const t of allTokens()) {
     if (t.mint === SOL_MINT || positions[t.mint] || !holds(b, t.mint, prices) || !prices[t.mint]) continue;
     const price = prices[t.mint]!;
     positions[t.mint] = { key: t.mint, symbol: t.symbol, side: "long", entry: price, costUsd: (b.ui[t.mint] ?? 0) * price, best: price, stop: price * 0.95,
@@ -184,7 +193,8 @@ export async function runTick(admin: Admin): Promise<string> {
       const fam = p.strategy && isSetup(p.strategy) ? p.strategy : null;
       const fixed = !!fam && !TRAILING.includes(fam); // ORB, VWAP : stop fixe, objectif, sortie à la clôture des bougies
       let rsiExit = false, setupOut: string | null = null;
-      if (token && p.stopCandle !== closed) {
+      const isFresh = p.strategy === "nouveau";
+      if (token && !isFresh && p.stopCandle !== closed) {
         if (fixed) {
           const c = await getCandles(token.candles, iv, 260, now).catch(() => []);
           if (c.length > 40) { setupOut = setupExit(fam!, c, "long", p.posParams as SetupParams, Math.round((now - (p.openedAt ?? now)) / (iv === "15m" ? 900_000 : 3_600_000)), p.openedAt ?? now); p.stopCandle = closed; }
@@ -207,37 +217,39 @@ export async function runTick(admin: Admin): Promise<string> {
       p.live = { price: livePrice, pnlPct, at: now };
       // Sortie d'urgence : la liquidité du token s'effondre (souvent le début d'une arnaque) — vérifiée toutes les 10 minutes
       let liqOut: string | null = null;
-      if (p.liqAtEntry && now - (p.liqCheckedAt ?? 0) >= LIQUIDITY.checkMs) {
+      if (p.liqAtEntry && now - (p.liqCheckedAt ?? 0) >= (isFresh ? 2 * 60_000 : LIQUIDITY.checkMs)) {
         p.liqCheckedAt = now;
         const liq = (await tokenLiquidity([p.key]).catch(() => ({} as Record<string, number>)))[p.key];
         if (liq != null && liq < p.liqAtEntry * LIQUIDITY.collapse) liqOut = "liquidite_effondree";
       }
-      const exit = liqOut ?? (isRsi
+      const exit = liqOut ?? (isFresh
+        ? (livePrice <= stop ? "stop_loss" : p.target != null && livePrice >= p.target ? "objectif" : now - (p.openedAt ?? now) >= FRESH.maxHoldMs ? "nouveau_temps" : null)
+        : isRsi
         ? (livePrice <= stop ? "stop_loss" : rsiExit ? "rsi_exit" : null)
         : fixed
         ? (livePrice <= stop ? "stop_loss" : p.target != null && livePrice >= p.target ? "objectif" : setupOut)
         : exitCheck({ side: "long", entry, price: livePrice, stop, initialRisk: p.initialRisk ?? entry * 0.05, openedAt: p.openedAt ?? now, interval: iv }, now));
       if (exit) {
-        const sig = await sell(p.key, amount, address, keyPair);
-        mem.pending = { kind: "sell", sig, at: now, mint: p.key, usdcBefore: b.usdc, reason: exit };
+        const { sig, expectedUsd } = await sell(p.key, amount, address, keyPair, protectNow(mem, now));
+        mem.pending = { kind: "sell", sig, at: now, mint: p.key, usdcBefore: b.usdc, reason: exit, expectedUsd };
         const r = (await waitForTx(sig)) === "pending" ? "pending" : await settle(admin, bot, mem, cfg, address, value);
         await save(admin, mem, { ...patch, ...mirror(positions), last_value_usd: value, last_message: r === "pending" ? `Vente ${p.symbol} envoyée (${label(exit)}), confirmation en cours…` : r });
         return "sell";
       }
       // Prise de bénéfices partielle : la moitié à +1,5 R, puis stop au prix d'entrée (le reste ne peut plus perdre)
-      if (cfg.partialTp && !fixed && !p.partialDone && (p.initialRisk ?? 0) > 0 && livePrice >= entry + PARTIAL.atR * p.initialRisk!) {
+      if (cfg.partialTp && !fixed && !isFresh && !p.partialDone && (p.initialRisk ?? 0) > 0 && livePrice >= entry + PARTIAL.atR * p.initialRisk!) {
         const half = amount / 2n;
         const remainder = (b.ui[p.key] ?? 0) * livePrice * (1 - PARTIAL.fraction);
         if (remainder < MIN_POSITION_USD * 2) { // couper en deux laisserait un reste minuscule : on vend tout, gain encaissé
-          const sig = await sell(p.key, amount, address, keyPair);
-          mem.pending = { kind: "sell", sig, at: now, mint: p.key, usdcBefore: b.usdc, reason: "prise_totale" };
+          const { sig, expectedUsd } = await sell(p.key, amount, address, keyPair, protectNow(mem, now));
+          mem.pending = { kind: "sell", sig, at: now, mint: p.key, usdcBefore: b.usdc, reason: "prise_totale", expectedUsd };
           const r = (await waitForTx(sig)) === "pending" ? "pending" : await settle(admin, bot, mem, cfg, address, value);
           await save(admin, mem, { ...patch, ...mirror(positions), last_value_usd: value, last_message: r === "pending" ? `Prise de bénéfices ${p.symbol} envoyée…` : r });
           return "sell";
         }
         if (half > 0n && (b.ui[p.key] ?? 0) * livePrice * PARTIAL.fraction >= RISK.minOrderUsd) {
-          const sig = await sell(p.key, half, address, keyPair);
-          mem.pending = { kind: "partial", sig, at: now, mint: p.key, usdcBefore: b.usdc, rawBefore: amount.toString(), reason: "prise_partielle" };
+          const { sig, expectedUsd } = await sell(p.key, half, address, keyPair, protectNow(mem, now));
+          mem.pending = { kind: "partial", sig, at: now, mint: p.key, usdcBefore: b.usdc, rawBefore: amount.toString(), reason: "prise_partielle", expectedUsd };
           const r = (await waitForTx(sig)) === "pending" ? "pending" : await settle(admin, bot, mem, cfg, address, value);
           await save(admin, mem, { ...patch, ...mirror(positions), last_value_usd: value, last_message: r === "pending" ? `Prise de bénéfices partielle ${p.symbol} envoyée…` : r });
           return "partial";
@@ -269,6 +281,11 @@ export async function runTick(admin: Admin): Promise<string> {
     if (held.length >= cfg.maxPositions) return await hold(`${held.length} position(s) ouverte(s), maximum atteint`);
     const blocked = riskGate(mem, value, now);
     if (blocked) { mem.mindset = mindset(brain, { inPosition: held.length > 0, blocked, goalPct: (value / Number(bot.goal_usd)) * 100 }); return await hold(blocked); }
+    // AGENT NOUVEAUX TOKENS (si activé) : un seul token récent à la fois, toute petite mise, 3 par jour au plus
+    if (cfg.newTokens && !held.some((p) => p.strategy === "nouveau")) {
+      const r = await freshEntry(admin, bot, mem, cfg, address, keyPair, b, value, now);
+      if (r) { await save(admin, mem, { ...patch, ...mirror(positions), last_value_usd: value, last_message: r }); return "buy"; }
+    }
     if (usePlans && cfg.plans.length === 0) { mem.signal = "Pilote automatique : aucune stratégie n'a encore passé la validation du chercheur."; return await hold("Pilote automatique : j'attends que le chercheur valide une stratégie."); }
 
     type Choice = { token: Token; sig: Signal & { target?: number }; strategy: SpotStrategy | SpotFamily; params: Params | RsiParams | SetupParams; interval: Interval; rank: number; risk: number; source: string; seenKey: string; closed: number };
@@ -277,7 +294,7 @@ export async function runTick(admin: Admin): Promise<string> {
     let analysed = 0;
     mem.seen = mem.seen ?? {};
     const candidates = usePlans
-      ? cfg.plans.map((plan) => ({ plan, token: TOKENS.find((t) => t.symbol === plan.symbol) })).filter((x) => x.token && !positions[x.token.mint])
+      ? cfg.plans.map((plan) => ({ plan, token: allTokens().find((t) => t.symbol === plan.symbol) })).filter((x) => x.token && !positions[x.token.mint])
       : [];
     for (const { plan, token } of candidates) {
       const key = `${plan.symbol}|${plan.interval}`, closedP = lastClosedCandle(now, plan.interval);
@@ -360,9 +377,9 @@ export async function runTick(admin: Admin): Promise<string> {
     const fillPrice = sizeUsd / (Number(quote.outAmount) / 10 ** pick.token.decimals);
     if (impact > RULES.maxPriceImpactPct || fillPrice <= pick.sig.stop * 1.003) return await hold(`Signal ${pick.token.symbol} ignoré : exécution trop chère (impact ${impact.toFixed(2)} %) ou prix déjà trop loin.`);
     const liqAtEntry = pick.token.mint === SOL_MINT ? undefined : (await tokenLiquidity([pick.token.mint]).catch(() => ({} as Record<string, number>)))[pick.token.mint];
-    const sig = await executeSwap(quote, address, keyPair);
+    const sig = await executeSwap(quote, address, keyPair, { protect: protectNow(mem, now) });
     mem.signal = `${pick.token.symbol} : ${pick.sig.reason}`;
-    mem.pending = { kind: "buy", sig, at: now, mint: pick.token.mint, usdcBefore: b.usdc, draft: {
+    mem.pending = { kind: "buy", sig, at: now, mint: pick.token.mint, usdcBefore: b.usdc, expectedPrice: fillPrice, draft: {
       key: pick.token.mint, symbol: pick.token.symbol, side: "long", stop: pick.sig.stop, best: fillPrice, initialRisk: fillPrice - pick.sig.stop, openedAt: now,
       strategy: pick.strategy, posParams: pick.params, posInterval: pick.interval, source: pick.source, stopCandle: closed,
       ...(pick.sig.target != null ? { target: pick.sig.target * (fillPrice / pick.sig.price) } : {}), ...(liqAtEntry ? { liqAtEntry, liqCheckedAt: now } : {}),
@@ -372,9 +389,45 @@ export async function runTick(admin: Admin): Promise<string> {
     await save(admin, mem, { ...patch, ...mirror(positions), last_value_usd: value, last_message: r === "pending" ? `Achat ${pick.token.symbol} envoyé, confirmation en cours…` : r });
     return "buy";
   } catch (e) {
+    mem.errStreak = prevErr;
+    errStreak(admin, mem, "Bot spot", (e as Error).message);
     await save(admin, mem, { ...patch, ...mirror(positions), last_value_usd: value, last_message: `Erreur : ${(e as Error).message}`.slice(0, 300) + " — je réessaie au prochain tick." });
     return "error";
   }
+}
+
+// ------------------------------------------------------------------------------------------------
+/**
+ * Achat d'un token tout juste lancé repéré par l'agent (garde-fous déjà passés : émission et gel désactivés, liquidité,
+ * ventes réelles, concentration). Mise de 2 à 5 $, stop −20 %, objectif +40 %, 4 h maximum, sortie d'urgence si la
+ * liquidité s'effondre (contrôlée toutes les 2 minutes). Renvoie le message, ou null si rien n'est acheté.
+ */
+async function freshEntry(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, address: string, keyPair: KeyPair, b: Balances, value: number, now: number): Promise<string | null> {
+  const today = dayKey(now);
+  mem.fresh ??= {};
+  for (const [k, d] of Object.entries(mem.fresh)) if (d < dayKey(now - 7 * 86_400_000)) delete mem.fresh[k];
+  if (Object.values(mem.fresh).filter((d) => d === today).length >= FRESH.maxPerDay) return null;
+  const T = tradable(value, b.usdc, mem.vault);
+  const stake = Math.min(freshStake(T.equity), T.usdc);
+  if (!(stake >= RISK.minOrderUsd) || stake * FRESH.stopPct > T.equity * 0.04) return null;
+  const pick = allTokens().find((t) => t.extra === "nouveau" && t.active !== false && t.seenAt && now - t.seenAt < 15 * 60_000 && !mem.fresh![t.mint] && !(b.raw[t.mint] ?? 0n));
+  if (!pick) return null;
+  mem.fresh[pick.mint] = today; // jamais deux tentatives sur le même token
+  const quote = await getQuote(USDC_MINT, pick.mint, BigInt(Math.floor(stake * 1e6)), 100).catch(() => null);
+  if (!quote) return `Nouveau token ${pick.symbol} : pas de cotation Jupiter, ignoré.`;
+  const impact = Number(quote.priceImpactPct) * 100;
+  if (impact > 1) return `Nouveau token ${pick.symbol} ignoré : impact de prix ${impact.toFixed(2)} % (trop peu liquide pour ${stake.toFixed(2)} $).`;
+  const fillPrice = stake / (Number(quote.outAmount) / 10 ** pick.decimals);
+  const liqAtEntry = (await tokenLiquidity([pick.mint]).catch(() => ({} as Record<string, number>)))[pick.mint];
+  const sig = await executeSwap(quote, address, keyPair, { protect: protectNow(mem, now) });
+  mem.signal = `${pick.symbol} : nouveau token repéré par l'agent`;
+  mem.pending = { kind: "buy", sig, at: now, mint: pick.mint, usdcBefore: b.usdc, expectedPrice: fillPrice, draft: {
+    key: pick.mint, symbol: pick.symbol, side: "long", stop: fillPrice * (1 - FRESH.stopPct), target: fillPrice * (1 + FRESH.targetPct), best: fillPrice, initialRisk: fillPrice * FRESH.stopPct,
+    openedAt: now, strategy: "nouveau", posInterval: "15m", source: "agent nouveaux tokens", ...(liqAtEntry ? { liqAtEntry, liqCheckedAt: now } : {}),
+    why: `token lancé récemment, garde-fous anti-arnaque passés (émission et gel désactivés, liquidité, vraies ventes, pas de concentration) · mise ${stake.toFixed(2)} $, stop −${FRESH.stopPct * 100} %, objectif +${FRESH.targetPct * 100} %, 4 h maximum`,
+  } };
+  const r = (await waitForTx(sig)) === "pending" ? "pending" : await settle(admin, bot, mem, cfg, address, value);
+  return r === "pending" ? `Achat du nouveau token ${pick.symbol} envoyé (${stake.toFixed(2)} $)…` : r;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -392,16 +445,21 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, a
   const sym = symbolOf(mint);
   void bot;
 
+  const fillAlert = (what: string, gapPct: number) => {
+    admin.alert?.(`Bot spot : ${what} ${sym} exécuté ${gapPct.toFixed(2)} % moins bien que le prix coté — possible sandwich ou marché très rapide.`);
+  };
   if (p.kind === "buy") {
-    if (!held) return `Achat ${sym} non exécuté (${st}). Aucun fonds engagé.`;
+    if (!held) { if (st !== "failed") mem.jitoMissAt = Date.now(); return `Achat ${sym} non exécuté (${st}). Aucun fonds engagé.`; }
     const cost = Math.max(0.01, (p.usdcBefore ?? 0) - b.usdc);
     const qty = b.ui[mint] ?? 0;
     const entry = qty > 0 ? cost / qty : prices[mint] ?? 0;
     const d = p.draft ?? { key: mint, symbol: sym, side: "long" as const };
     const stop = d.stop && d.stop < entry ? d.stop : entry * 0.95;
     positions[mint] = { ...d, entry, costUsd: cost, best: Math.max(d.best ?? entry, entry), stop, initialRisk: entry - stop };
+    const gap = p.expectedPrice ? (entry / p.expectedPrice - 1) * 100 : 0;
+    if (gap > FILL_ALERT * 100) fillAlert("achat", gap);
     admin.addTrade("spot", { side: "buy", symbol: sym, mint, amount_usd: cost, price: entry, reason: mem.signal ?? "tendance", signature: p.sig, source: d.source,
-      detail: { pourquoi: d.why, stop, strategie: d.source, unite: d.posInterval === "15m" ? "15 min" : "1 h" } });
+      detail: { pourquoi: d.why, stop, strategie: d.source, unite: d.posInterval === "15m" ? "15 min" : "1 h", ecart_prix_pct: Math.round(gap * 100) / 100 } });
     return `Achat ${sym} confirmé : ${cost.toFixed(2)} $ à ${fmt(entry)} $, stop à ${fmt(stop)} $.`;
   }
 
@@ -409,7 +467,8 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, a
   const proceeds = Math.max(0, b.usdc - (p.usdcBefore ?? 0));
   if (p.kind === "partial") {
     const before = BigInt(p.rawBefore ?? "0"), now = b.raw[mint] ?? 0n;
-    if (!(before > 0n && now < (before * 3n) / 4n)) return `Prise de bénéfices partielle ${sym} non exécutée (${st}) : je réessaie.`;
+    if (!(before > 0n && now < (before * 3n) / 4n)) { if (st !== "failed") mem.jitoMissAt = Date.now(); return `Prise de bénéfices partielle ${sym} non exécutée (${st}) : je réessaie.`; }
+    if (p.expectedUsd && proceeds < p.expectedUsd * (1 - FILL_ALERT)) fillAlert("vente partielle", (1 - proceeds / p.expectedUsd) * 100);
     const soldFrac = Number(before - now) / Number(before);
     const cost = (pos?.costUsd ?? proceeds) * soldFrac;
     const pnl = proceeds - cost;
@@ -421,7 +480,8 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, a
   }
 
   // vente complète
-  if (held) return `Vente ${sym} non exécutée (${st}) : je réessaie.`;
+  if (held) { if (st !== "failed") mem.jitoMissAt = Date.now(); return `Vente ${sym} non exécutée (${st}) : je réessaie (par la voie normale).`; }
+  if (p.expectedUsd && proceeds < p.expectedUsd * (1 - FILL_ALERT)) fillAlert("vente", (1 - proceeds / p.expectedUsd) * 100);
   const cost = pos?.costUsd ?? proceeds;
   const pnl = proceeds - cost;
   const pnlPct = cost > 0 ? (pnl / cost) * 100 : 0;
@@ -443,13 +503,13 @@ export async function liquidate(admin: Admin, bot: BotRow, outcome: "success" | 
   const mem = loadMemory(bot.price_history);
   const positions = migratePositions(mem, bot);
   let b = await getBalances(address);
-  const prices = await getPrices(ALL_MINTS).catch(() => ({} as Record<string, number>));
+  const prices = await getPrices(allMints()).catch(() => ({} as Record<string, number>));
   const failures: string[] = [];
-  for (const t of TOKENS) {
+  for (const t of allTokens()) {
     if (t.mint === SOL_MINT || !holds(b, t.mint, prices)) continue;
     try {
       const usdcBefore = b.usdc;
-      const sig = await sell(t.mint, b.raw[t.mint] ?? 0n, address, keyPair);
+      const { sig } = await sell(t.mint, b.raw[t.mint] ?? 0n, address, keyPair, false); // fin de mission : voie normale, rapide
       const st = await waitForTx(sig, 25_000);
       if (st !== "confirmed") throw new Error(`transaction ${st}`);
       b = await getBalances(address);
@@ -484,7 +544,13 @@ function label(reason?: string) {
   return reason === "rsi_exit" ? "RSI repassé au-dessus du seuil de sortie" : reason === "trailing_stop" ? "stop suiveur, gain protégé" : reason === "stop_loss" ? "stop loss"
     : reason === "time_stop" ? "position sans élan" : reason === "prise_partielle" ? "prise de bénéfices partielle"
     : reason === "objectif" ? "objectif atteint" : reason === "orb_temps" ? "ORB : objectif non atteint à temps" : reason === "vwap_atteint" ? "retour au prix moyen du jour (VWAP) atteint"
-    : reason === "vwap_temps" ? "VWAP : fin de journée sans retour" : reason === "liquidite_effondree" ? "sortie d'urgence : la liquidité du token s'est effondrée"
+    : reason === "nouveau_temps" ? "nouveau token : délai de 4 h écoulé" : reason === "vwap_temps" ? "VWAP : fin de journée sans retour" : reason === "liquidite_effondree" ? "sortie d'urgence : la liquidité du token s'est effondrée"
     : reason === "prise_totale" ? "prise de bénéfices (position trop petite pour être coupée en deux)" : reason ?? "sortie";
 }
 export type { TradeRow };
+
+/** CHIEN DE GARDE : une erreur qui se répète (5 minutes de suite, puis toutes les heures) déclenche une alerte sur le téléphone. */
+function errStreak(admin: Admin, mem: Memory, who: string, msg: string) {
+  mem.errStreak = (mem.errStreak ?? 0) + 1;
+  if (mem.errStreak === 5 || mem.errStreak % 60 === 0) admin.alert?.(`${who} : la même panne se répète depuis ${mem.errStreak} minutes (${msg.slice(0, 120)}). Les positions restent protégées par leurs stops ; vérifie l'app.`);
+}

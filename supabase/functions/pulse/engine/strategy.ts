@@ -43,6 +43,18 @@ export const TOKENS = [
   { symbol: "PENGU", mint: "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv", decimals: 6, candles: "PENGU-USD", verify: true },
 ] as const;
 
+/** Un token tradable : liste fixe ci-dessus + tokens choisis par le sélectionneur ou l'agent nouveaux tokens. */
+export interface TokenInfo { symbol: string; mint: string; decimals: number; candles: string; verify: boolean; extra?: "selection" | "nouveau"; seenAt?: number; active?: boolean }
+let EXTRA: TokenInfo[] = [];
+/**
+ * Tokens ajoutés par les agents (chargés depuis la base à chaque appel). Un token retiré de la sélection reste connu tant
+ * qu'il peut être en portefeuille : le bot doit toujours pouvoir l'évaluer et le revendre.
+ */
+export function setExtraTokens(list: TokenInfo[]) {
+  EXTRA = list.filter((t) => !TOKENS.some((x) => x.mint === t.mint || x.symbol === t.symbol)).filter((t, i, a) => a.findIndex((y) => y.mint === t.mint || y.symbol === t.symbol) === i);
+}
+export const allTokens = (): readonly TokenInfo[] => [...TOKENS, ...EXTRA];
+
 /** Unités de temps des bougies : 1 h (suivi de tendance classique) ou 15 min (scalping prudent). */
 export type Interval = "1h" | "15m";
 export const INTERVAL_MS: Record<Interval, number> = { "1h": 3_600_000, "15m": 900_000 };
@@ -465,13 +477,14 @@ export function perpsChange(side: Side, entry: number, current: number): number 
 // ---------------------------------------------------------------------------------------------------
 // Mémoire du bot (stockée dans la colonne JSON `price_history`, aucune migration de base nécessaire)
 // ---------------------------------------------------------------------------------------------------
-export interface Pending { kind: "buy" | "sell" | "partial" | "open" | "close"; sig: string; at: number; mint?: string; asset?: string; usdcBefore?: number; rawBefore?: string; reason?: string; draft?: Position }
+export interface Pending { kind: "buy" | "sell" | "partial" | "open" | "close"; sig: string; at: number; mint?: string; asset?: string; usdcBefore?: number; rawBefore?: string; reason?: string; draft?: Position;
+  expectedPrice?: number; expectedUsd?: number } // prix / USDC cotés : contrôle anti-sandwich après exécution
 
 /** Une position (spot : clé = mint du token ; perps : clé = marché SOL/ETH/BTC). */
 export interface Position {
   key: string; symbol: string; side: Side;
   entry?: number; stop?: number; best?: number; initialRisk?: number; stopCandle?: number; openedAt?: number;
-  strategy?: SpotStrategy | SetupFamily; posParams?: Params | RsiParams | SetupParams; posInterval?: Interval; source?: string;
+  strategy?: SpotStrategy | SetupFamily | "nouveau"; posParams?: Params | RsiParams | SetupParams; posInterval?: Interval; source?: string;
   target?: number;           // objectif de prix (familles « à objectif » : ORB, VWAP, funding)
   liqAtEntry?: number;       // liquidité du token à l'entrée (spot) : sortie d'urgence si elle s'effondre
   liqCheckedAt?: number;
@@ -517,6 +530,9 @@ export interface Memory {
   lastUsdc?: number;         // USDC vus au tick précédent (stops on-chain, détection des dépôts et retraits)
   lastSol?: number;          // SOL vus au tick précédent (détection des dépôts et retraits)
   solWarnDay?: string;       // dernière alerte « réserve de SOL basse »
+  jitoMissAt?: number;
+  fresh?: Record<string, string>; // agent nouveaux tokens : tokens déjà achetés (mint → jour), jamais rachetés       // dernier envoi privé (Jito) non exécuté : voie normale pendant 15 min
+  errStreak?: number;        // erreurs consécutives (chien de garde)
 }
 
 /**
@@ -635,7 +651,7 @@ export function missionEnd(p: { now: number; endAt: number; goalUsd: number; val
 // ---------------------------------------------------------------------------------------------------
 export interface BacktestResult {
   trades: number; winRate: number; profitFactor: number; returnPct: number; maxDrawdownPct: number;
-  avgWinPct: number; avgLossPct: number; days: number; log: { side: Side; entry: number; exit: number; pnlPct: number; reason: string; t: number }[];
+  avgWinPct: number; avgLossPct: number; days: number; log: { side: Side; entry: number; exit: number; pnlPct: number; reason: string; t: number; t0?: number }[];
 }
 
 /**
@@ -673,7 +689,7 @@ export function backtest(candles: Candle[], o: SimOpts & { params?: Params }): B
     const hours = (t - pos!.openedAt) / 3_600_000;
     const pnl = pos!.size * frac * (move - 2 * o.feePct - (o.hourlyCost ?? 0) * hours);
     equity *= 1 + pnl;
-    log.push({ side: pos!.side, entry: pos!.entry, exit, pnlPct: pnl * 100, reason, t });
+    log.push({ side: pos!.side, entry: pos!.entry, exit, pnlPct: pnl * 100, reason, t, t0: pos!.openedAt });
     return pnl;
   };
 
@@ -748,6 +764,7 @@ export const NAIVE_EXIT = 70;
 
 export type SpotStrategy = "tendance" | "rsi";
 export interface SpotConfig { strategy: SpotStrategy; rsi: RsiParams; trend: Params | null; source?: string; autopilot: boolean; plans: SpotPlan[]; swapAuto: boolean; researchAggressive: boolean; nerve: number;
+  newTokens: boolean; // agent nouveaux tokens : achète (toute petite mise) les tokens tout juste lancés qui passent les garde-fous
   maxPositions: number; vaultPct: number; partialTp: boolean; marketFilter: boolean;
   breakerPct: number; breakerBase: number | null; breakerTrippedAt: number | null }
 
@@ -787,7 +804,7 @@ export function loadConfig(raw: unknown): SpotConfig {
   const o = (raw && typeof raw === "object" ? raw : {}) as Partial<SpotConfig>;
   return { strategy: o.strategy === "rsi" ? "rsi" : "tendance", rsi: sanitizeRsi(o.rsi), trend: sanitizeTrend(o.trend), ...(typeof o.source === "string" ? { source: o.source.slice(0, 120) } : {}),
     autopilot: o.autopilot === true, plans: sanitizeSpotPlans(o.plans), swapAuto: o.swapAuto !== false,
-    researchAggressive: o.researchAggressive === true, nerve: Number.isFinite(Number(o.nerve)) ? Math.round(Math.min(3, Math.max(0, Number(o.nerve)))) : 1,
+    researchAggressive: o.researchAggressive === true, newTokens: o.newTokens === true, nerve: Number.isFinite(Number(o.nerve)) ? Math.round(Math.min(3, Math.max(0, Number(o.nerve)))) : 1,
     ...protections(o),
     marketFilter: o.marketFilter !== false,
     breakerPct: (BREAKER_STEPS as readonly number[]).includes(Number(o.breakerPct)) ? Number(o.breakerPct) : BREAKER_DEFAULT,
@@ -838,9 +855,9 @@ export function marketFilter(btc: Candle[]): { blocked: boolean; change24h: numb
   return { blocked: change24h <= MARKET_FILTER.hardDrop || (change24h <= MARKET_FILTER.softDrop && belowEma), change24h, belowEma };
 }
 
-const SYMBOLS = new Set<string>(TOKENS.map((t) => t.symbol));
 export function sanitizeSpotPlans(raw: unknown): SpotPlan[] {
   if (!Array.isArray(raw)) return [];
+  const SYMBOLS = new Set<string>(allTokens().map((t) => t.symbol));
   const out: SpotPlan[] = [];
   for (const x of raw as Partial<SpotPlan>[]) {
     if (out.length >= 3) break; // 3 plans maximum, comptés après avoir écarté les tokens inconnus
@@ -931,12 +948,12 @@ export function backtestRsi(candles: Candle[], p: RsiParams, feePct: number, o: 
   const T = tfOf(candles);
   let equity = 1, peak = 1, maxDd = 0, cooldownUntil = 0;
   const log: BacktestResult["log"] = [];
-  let pos: { entry: number; stop: number; size: number; risk: number; partial: boolean } | null = null;
+  let pos: { entry: number; stop: number; size: number; risk: number; partial: boolean; t0: number } | null = null;
   const start = Math.max(p.smaPeriod, p.rsiPeriod) + 2;
   const close = (exit: number, reason: string, t: number, frac = 1) => {
     const pnl = pos!.size * frac * ((exit - pos!.entry) / pos!.entry - 2 * feePct);
     equity *= 1 + pnl;
-    log.push({ side: "long", entry: pos!.entry, exit, pnlPct: pnl * 100, reason, t });
+    log.push({ side: "long", entry: pos!.entry, exit, pnlPct: pnl * 100, reason, t, t0: pos!.t0 });
     return pnl;
   };
   for (let i = start; i < candles.length; i++) {
@@ -958,7 +975,7 @@ export function backtestRsi(candles: Candle[], p: RsiParams, feePct: number, o: 
       const hit = rsiEntryAt(candles, r, s, i, p);
       if (hit) {
         const dist = (c.c - hit.stop) / c.c;
-        pos = { entry: c.c, stop: hit.stop, size: Math.min((p.riskPct / 100) / dist, RISK.maxSpotFraction), risk: c.c - hit.stop, partial: false };
+        pos = { entry: c.c, stop: hit.stop, size: Math.min((p.riskPct / 100) / dist, RISK.maxSpotFraction), risk: c.c - hit.stop, partial: false, t0: c.t };
       }
     }
     peak = Math.max(peak, equity);

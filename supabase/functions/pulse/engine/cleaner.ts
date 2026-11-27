@@ -4,7 +4,7 @@
 //  Il ne détruit jamais de tokens : un reste qui vaut moins de 0,50 $ est laissé tel quel.
 import { executeSwap, getQuote } from "./jupiter.ts";
 import { closeTokenAccounts, listTokenAccounts, loadKeyPairFrom, waitForTx, WSOL_MINT, type TokenAccount } from "./solana.ts";
-import { TOKENS, USDC_MINT } from "./strategy.ts";
+import { allTokens, USDC_MINT } from "./strategy.ts";
 
 export const CLEANER = { minSellUsd: 0.5, maxImpactPct: 5, slippageBps: 300, batch: 8, maxSales: 3, maxCloseTx: 3 };
 
@@ -18,7 +18,7 @@ export interface CleanReport {
   errors: string[];
 }
 
-const symbolOf = (mint: string) => TOKENS.find((t) => t.mint === mint)?.symbol ?? `${mint.slice(0, 4)}…`;
+const symbolOf = (mint: string) => allTokens().find((t) => t.mint === mint)?.symbol ?? `${mint.slice(0, 4)}…`;
 
 /**
  * @param keepMints  tokens à ne jamais toucher (USDC, position en cours, transaction en attente)
@@ -27,7 +27,7 @@ const symbolOf = (mint: string) => TOKENS.find((t) => t.mint === mint)?.symbol ?
 export async function cleanWallet(o: { envKey: string; keepMints: Set<string>; sellUniverse: boolean }): Promise<CleanReport> {
   const { address, keyPair } = await loadKeyPairFrom(o.envKey);
   const r: CleanReport = { wallet: address, sold: [], closed: 0, solRecovered: 0, closeSigs: [], skipped: [], errors: [] };
-  const universe = new Set<string>(TOKENS.map((t) => t.mint));
+  const universe = new Set<string>(allTokens().map((t) => t.mint));
   const keep = new Set([...o.keepMints, USDC_MINT]);
 
   // 1. Revendre les restes

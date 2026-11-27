@@ -276,7 +276,7 @@ export function backtestSetup(family: SetupFamily, candles: Candle[], P: SetupPa
     const move = perpsChange(pos!.side, pos!.entry, exit);
     const pnl = pos!.size * frac * (move - 2 * o.feePct - (o.hourlyCost ?? 0) * ((t - pos!.t) / 3_600_000));
     equity *= 1 + pnl;
-    log.push({ side: pos!.side, entry: pos!.entry, exit, pnlPct: pnl * 100, reason, t });
+    log.push({ side: pos!.side, entry: pos!.entry, exit, pnlPct: pnl * 100, reason, t, t0: pos!.t });
     return pnl;
   };
   for (let i = start; i < candles.length; i++) {
