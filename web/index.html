@@ -602,16 +602,18 @@ function mathCard() {
   const m = AGS?.math; if (!m) return "";
   const pct = x => x == null ? "—" : `${nf(x, 1)} %`;
   const reg = { "tendance": ["ok", "Tendance"], "retour à la moyenne": ["mid", "Retour moy."], "hasard": ["", "Hasard"] };
-  const rows = m.insights.map(x => { const [c, label] = reg[x.regime] || ["", x.regime];
-    const name = String(x.market).replace(/ · 15 min$/, ""); // le nom contient déjà « · 15 min » : pas de doublon
-    return `<div class="mrow"><div class="top2"><div class="l1">${esc(name)} <span class="mut" style="font-weight:400">${x.interval === "15m" ? "15 min" : "1 h"}</span></div><span class="pill ${c}">${label}</span></div>
-      <div class="l2" style="line-height:1.5">Hurst ${nf(x.hurst)}${x.half_life ? ` · demi-vie ${nf(x.half_life, 0)} bougies` : ""}${x.significant ? " · effet significatif" : ""}${x.live_regime ? ` · <b>en ce moment : ${esc(x.live_regime)}</b>` : ""}</div></div>`; }).join("");
+  // une ligne par marché : nom, unité, régime actuel ; les chiffres (Hurst, demi-vie) passent en info-bulle
+  const rows = m.insights.map(x => { const now_ = x.live_regime || x.regime, [c, label] = reg[now_] || ["", now_];
+    const name = String(x.market).replace(/ · 15 min$/, "").replace(/^(Spot|Perps) /, "");
+    const tip = `Hurst ${nf(x.hurst)}${x.half_life ? ` · demi-vie ${nf(x.half_life, 0)} bougies` : ""}${x.significant ? " · effet significatif" : ""}`;
+    return `<div class="row" style="padding:7px 0" data-tip="${esc(tip)}"><div class="l1" style="font-size:14px">${esc(name)} <span class="mut" style="font-weight:400">${/^Perps/.test(x.market) ? "perps" : "spot"} · ${x.interval === "15m" ? "15 min" : "1 h"}</span></div><span class="pill ${c}">${label}</span></div>`; }).join("");
+  const trend = m.insights.filter(x => (x.live_regime || x.regime) === "tendance").length;
   return `<div class="eyebrow">Agent mathématicien</div><div class="card">
     <div class="agh">${avatar("math", true)}<div class="status run" style="font-size:12px;letter-spacing:.12em">Analyse les marchés à chaque cycle</div></div>
-    <p class="sub" style="margin:10px 0 0">Il mesure chaque marché avec des outils statistiques (ratio de variance de Lo-MacKinlay, exposant de Hurst, demi-vie du retour à la moyenne) pour savoir si les mouvements se prolongent, se corrigent, ou relèvent du hasard. Il en déduit des réglages et les propose au chercheur, qui les teste sur la période jamais vue comme les autres. Un marché « hasard » n'a pas d'avantage exploitable.</p>
+    <p class="sub" style="margin:10px 0 0">Il dit si chaque marché suit une tendance, revient à la moyenne ou joue au hasard, et propose des réglages au chercheur.</p>
     <div class="grid"><div><div class="k">Ses idées validées</div><div class="v">${pct(m.stats.math.rate)}</div><div class="l2">${m.stats.math.promising} / ${m.stats.math.tested}</div></div>
       <div><div class="k">Idées du chercheur</div><div class="v">${pct(m.stats.chercheur.rate)}</div><div class="l2">${m.stats.chercheur.promising} / ${m.stats.chercheur.tested}</div></div></div>
-    ${rows ? `<div class="sep"></div>${rows}` : `<p class="sub" style="margin:10px 0 0">Première analyse dans les 5 minutes.</p>`}
+    ${rows ? `<details data-d="math-list" style="margin:10px 0 0"><summary>▸ ${m.insights.length} MARCHÉS · ${trend} EN TENDANCE</summary>${rows}</details>` : `<p class="sub" style="margin:10px 0 0">Première analyse dans les 5 minutes.</p>`}
   </div>`;
 }
 function swapCard() {
@@ -668,6 +670,17 @@ for (const ev of ["pointerup", "pointercancel", "scroll"]) window.addEventListen
 window.addEventListener("blur", hideTip); // seulement quand l'app perd le focus (pas quand un champ le perd)
 document.addEventListener("contextmenu", e => { if (e.target.closest("[data-tip]")) e.preventDefault(); });
 
+/** Page Agents : les longues explications sont repliées derrière « ⓘ Comment ça marche » (ouvertes ou non, mémorisé). */
+function foldLongText(root) {
+  root.querySelectorAll(".card").forEach((card, i) => {
+    const p = [...card.children].find(x => x.classList.contains("sub")); // seulement l'explication en tête de carte
+    if (!p || p.textContent.trim().length < 140) return;
+    const d = document.createElement("details"); d.dataset.d = `info-${i}`; d.style.margin = "8px 0 0"; d.open = OPEN.has(d.dataset.d);
+    d.innerHTML = `<summary style="font-size:13px">ⓘ Comment ça marche</summary>`;
+    p.replaceWith(d); p.style.marginTop = "6px"; d.appendChild(p);
+  });
+  root.querySelectorAll("details[data-d]").forEach(d => { if (OPEN.has(d.dataset.d)) d.open = true; });
+}
 function renderAg() {
   const el = $("#p-ag"); if (!el) return;
   const keepDraft = $("#chatIn")?.value || "";
@@ -737,6 +750,7 @@ function renderAg() {
       ${CHAT.length ? `<button class="btn sm" style="margin-top:10px" id="chatClear">Effacer la discussion</button>` : ""}
       ${S?.secrets && !S.secrets.anthropic ? `<p class="sub" style="margin:12px 0 0;font-size:13px">Sans le secret ANTHROPIC_API_KEY dans Supabase, il ne peut que résumer ses résultats. Avec, il discute vraiment.</p>` : ""}
     </div>`;
+  foldLongText(el);
 }
 async function sendChat() {
   const txt = $("#chatIn").value.trim(); if (!txt || AG_BUSY) return;
