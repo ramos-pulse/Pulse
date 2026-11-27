@@ -49,7 +49,7 @@ jobs:
           q "select symbol, kind, active, liquidity, volume_24h, pool, left(why,60) from token_universe order by score desc nulls last limit 15"
           q "select jobname, schedule, active from cron.job"
           q "select status, left(return_message,200), start_time from cron.job_run_details order by start_time desc limit 10"
-          A=0x28b3057a0803361be4333e7010e57f7dfaede306
+          A=0xfa361f55480739ce3412f0461576796bec710268
           echo "=== HL perps ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"clearinghouseState\",\"user\":\"$A\"}" | head -c 600; echo
           echo "=== HL spot ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"spotClearinghouseState\",\"user\":\"$A\"}" | head -c 400; echo
           echo "=== HL agents ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"extraAgents\",\"user\":\"$A\"}" | head -c 600; echo
