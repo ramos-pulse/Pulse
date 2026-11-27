@@ -41,3 +41,9 @@ jobs:
           q "select symbol, kind, active, liquidity, volume_24h, pool, left(why,60) from token_universe order by score desc nulls last limit 15"
           q "select jobname, schedule, active from cron.job"
           q "select status, left(return_message,200), start_time from cron.job_run_details order by start_time desc limit 10"
+          echo "=== NINE dexscreener ==="
+          curl -s "https://api.dexscreener.com/tokens/v1/solana/5KSw6G5P1dwgKLWp31Cj5ie8WGg5YEfUWz7gCxYxJLqh" | jq -c '.[] | {dex: .dexId, pair: .pairAddress, quote: .quoteToken.symbol, price: .priceUsd, liq: .liquidity.usd, ch: .priceChange, txns: .txns.h1}' | head -5
+          echo "=== NINE jupiter quote ==="
+          curl -s "https://lite-api.jup.ag/swap/v1/quote?inputMint=5KSw6G5P1dwgKLWp31Cj5ie8WGg5YEfUWz7gCxYxJLqh&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=17000000000&slippageBps=300" | head -c 400; echo
+          echo "=== NINE jupiter token ==="
+          curl -s "https://lite-api.jup.ag/tokens/v2/search?query=5KSw6G5P1dwgKLWp31Cj5ie8WGg5YEfUWz7gCxYxJLqh" | jq -c '.[0] | {symbol, decimals, tokenProgram, usdPrice, liquidity, audit}' | head -c 600; echo
