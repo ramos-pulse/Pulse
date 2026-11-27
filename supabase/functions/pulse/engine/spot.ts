@@ -7,8 +7,11 @@ import { isBenched, learn, mindset, newBrain, optimize, riskPerTrade } from "./b
 import { candles as getCandles, hourlyCandles, lastClosedCandle } from "./candles.ts";
 import { executeSwap, getPrices, getQuote, verifyToken } from "./jupiter.ts";
 import { getBalances, loadKeyPairFrom, txStatus, waitForTx, type Balances } from "./solana.ts";
+import { tokenLiquidity } from "./dex.ts";
+import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type SetupParams } from "./setups.ts";
 import {
   addToVault, applyTransfer, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate,
+  cooldownMs, exitSlippageBps, floorOf, solReserveAlert, volScale, groupOf, LIQUIDITY, type SpotFamily,
   rsiExitSignal, rsiSignal, RULES, sampleCurve, SOL_MINT, TOKENS, TOTAL_RISK, tradable, trailStop, trendSignal, USDC_MINT,
   type Interval, type Memory, type Params, type Position, type RsiParams, type Signal, type SpotConfig, type SpotStrategy,
 } from "./strategy.ts";
@@ -61,7 +64,9 @@ function holds(b: Balances, mint: string, prices: Record<string, number>): boole
 
 async function sell(mint: string, amount: bigint, owner: string, keyPair: KeyPair) {
   if (amount <= 0n) throw new Error("rien à vendre");
-  const quote = await getQuote(mint, USDC_MINT, amount, RULES.exitSlippageBps);
+  const probe = await getQuote(mint, USDC_MINT, amount, RULES.exitSlippageBps);
+  const bps = exitSlippageBps(Number(probe.priceImpactPct));
+  const quote = bps === RULES.exitSlippageBps ? probe : await getQuote(mint, USDC_MINT, amount, bps).catch(() => probe);
   return executeSwap(quote, owner, keyPair);
 }
 
@@ -81,7 +86,8 @@ export async function runTick(admin: Admin): Promise<string> {
   const positions = migratePositions(mem, bot);
   // En pause : plus aucune entrée, mais les positions ouvertes restent gérées (le spot n'a pas de stop on-chain).
   const paused = bot.status === "paused";
-  if (!(bot.status === "running" || (paused && (Object.keys(positions).length || mem.pending)))) return "idle";
+  // En pause sans position : on relit quand même le portefeuille (valeur à jour, dépôts et retraits détectés).
+  if (!(bot.status === "running" || paused)) return "idle";
   const now = Date.now();
   const cfg = loadConfig(bot.config);
   const patch: Partial<BotRow> = {};
@@ -141,16 +147,18 @@ export async function runTick(admin: Admin): Promise<string> {
   }
   mem.lastUsdc = b.usdc; mem.lastSol = b.sol;
   sampleCurve(mem, value, now);
+  const solAlert = solReserveAlert(mem, b.sol, now, "Bot spot");
+  if (solAlert) { admin.alert?.(solAlert); message ||= solAlert; }
 
   // 4. Fin de mission (uniquement sur données complètes : plus jamais de faux arrêt).
   const end = missionEnd({
     now, endAt: RULES.destroyAtDeadline && bot.end_at ? Date.parse(bot.end_at) : Infinity,
-    goalUsd: Number(bot.goal_usd), valueUsd: value, floorUsd: RULES.floorUsd, complete,
+    goalUsd: Number(bot.goal_usd), valueUsd: value, floorUsd: floorOf(bot.start_value_usd, RULES.floorUsd), complete,
   });
   if (end && !paused) {
     const outcome = end === "success" ? "success" : end === "destroyed" ? "destroyed" : "stopped";
     const msg = end === "success" ? "Mission réussie ! Objectif atteint, gains sécurisés en USDC."
-      : end === "destroyed" ? "Date limite atteinte : positions vendues." : `Capital sous ${RULES.floorUsd} $ : je protège ce qui reste.`;
+      : end === "destroyed" ? "Date limite atteinte : positions vendues." : `Capital sous ${floorOf(bot.start_value_usd, RULES.floorUsd).toFixed(2)} $ (30 % du départ) : je protège ce qui reste.`;
     await save(admin, mem, { ...patch, ...mirror(positions), last_value_usd: value });
     await liquidate(admin, { ...bot, ...patch, price_history: mem } as BotRow, outcome, msg);
     return outcome;
@@ -173,14 +181,19 @@ export async function runTick(admin: Admin): Promise<string> {
       const iv: Interval = p.posInterval ?? "1h";
       const closed = lastClosedCandle(now, iv);
       const isRsi = p.strategy === "rsi";
-      let rsiExit = false;
+      const fam = p.strategy && isSetup(p.strategy) ? p.strategy : null;
+      const fixed = !!fam && !TRAILING.includes(fam); // ORB, VWAP : stop fixe, objectif, sortie à la clôture des bougies
+      let rsiExit = false, setupOut: string | null = null;
       if (token && p.stopCandle !== closed) {
-        if (isRsi) { // décision à la clôture de chaque bougie : RSI repassé au-dessus du seuil de sortie ?
+        if (fixed) {
+          const c = await getCandles(token.candles, iv, 260, now).catch(() => []);
+          if (c.length > 40) { setupOut = setupExit(fam!, c, "long", p.posParams as SetupParams, Math.round((now - (p.openedAt ?? now)) / (iv === "15m" ? 900_000 : 3_600_000)), p.openedAt ?? now); p.stopCandle = closed; }
+        } else if (isRsi) { // décision à la clôture de chaque bougie : RSI repassé au-dessus du seuil de sortie ?
           const rp = (p.posParams as RsiParams | undefined) ?? cfg.rsi;
           const c = await getCandles(token.candles, iv, rp.rsiPeriod * 6 + 10, now).catch(() => []);
           if (c.length > rp.rsiPeriod + 2) { const r = rsiExitSignal(c, rp); rsiExit = r.exit; p.stopCandle = closed; }
         } else {
-          const params = (p.posParams as Params | undefined) ?? cfg.trend ?? PRESETS[brain.preset[p.symbol] ?? "standard"];
+          const params = fam ? trailParams(p.posParams as SetupParams) : (p.posParams as Params | undefined) ?? cfg.trend ?? PRESETS[brain.preset[p.symbol] ?? "standard"];
           const c = await getCandles(token.candles, iv, 40, now).catch(() => []);
           if (c.length > 20) {
             p.best = Math.max(p.best ?? entry, c.at(-1)!.c);
@@ -192,9 +205,18 @@ export async function runTick(admin: Admin): Promise<string> {
       const stop = p.stop ?? entry * 0.95;
       const pnlPct = p.costUsd ? (((b.ui[p.key] ?? 0) * livePrice) / p.costUsd - 1) * 100 : (livePrice / entry - 1) * 100;
       p.live = { price: livePrice, pnlPct, at: now };
-      const exit = isRsi
+      // Sortie d'urgence : la liquidité du token s'effondre (souvent le début d'une arnaque) — vérifiée toutes les 10 minutes
+      let liqOut: string | null = null;
+      if (p.liqAtEntry && now - (p.liqCheckedAt ?? 0) >= LIQUIDITY.checkMs) {
+        p.liqCheckedAt = now;
+        const liq = (await tokenLiquidity([p.key]).catch(() => ({} as Record<string, number>)))[p.key];
+        if (liq != null && liq < p.liqAtEntry * LIQUIDITY.collapse) liqOut = "liquidite_effondree";
+      }
+      const exit = liqOut ?? (isRsi
         ? (livePrice <= stop ? "stop_loss" : rsiExit ? "rsi_exit" : null)
-        : exitCheck({ side: "long", entry, price: livePrice, stop, initialRisk: p.initialRisk ?? entry * 0.05, openedAt: p.openedAt ?? now }, now);
+        : fixed
+        ? (livePrice <= stop ? "stop_loss" : p.target != null && livePrice >= p.target ? "objectif" : setupOut)
+        : exitCheck({ side: "long", entry, price: livePrice, stop, initialRisk: p.initialRisk ?? entry * 0.05, openedAt: p.openedAt ?? now, interval: iv }, now));
       if (exit) {
         const sig = await sell(p.key, amount, address, keyPair);
         mem.pending = { kind: "sell", sig, at: now, mint: p.key, usdcBefore: b.usdc, reason: exit };
@@ -203,7 +225,7 @@ export async function runTick(admin: Admin): Promise<string> {
         return "sell";
       }
       // Prise de bénéfices partielle : la moitié à +1,5 R, puis stop au prix d'entrée (le reste ne peut plus perdre)
-      if (cfg.partialTp && !p.partialDone && (p.initialRisk ?? 0) > 0 && livePrice >= entry + PARTIAL.atR * p.initialRisk!) {
+      if (cfg.partialTp && !fixed && !p.partialDone && (p.initialRisk ?? 0) > 0 && livePrice >= entry + PARTIAL.atR * p.initialRisk!) {
         const half = amount / 2n;
         const remainder = (b.ui[p.key] ?? 0) * livePrice * (1 - PARTIAL.fraction);
         if (remainder < MIN_POSITION_USD * 2) { // couper en deux laisserait un reste minuscule : on vend tout, gain encaissé
@@ -249,7 +271,7 @@ export async function runTick(admin: Admin): Promise<string> {
     if (blocked) { mem.mindset = mindset(brain, { inPosition: held.length > 0, blocked, goalPct: (value / Number(bot.goal_usd)) * 100 }); return await hold(blocked); }
     if (usePlans && cfg.plans.length === 0) { mem.signal = "Pilote automatique : aucune stratégie n'a encore passé la validation du chercheur."; return await hold("Pilote automatique : j'attends que le chercheur valide une stratégie."); }
 
-    type Choice = { token: Token; sig: Signal; strategy: SpotStrategy; params: Params | RsiParams; interval: Interval; rank: number; risk: number; source: string; seenKey: string; closed: number };
+    type Choice = { token: Token; sig: Signal & { target?: number }; strategy: SpotStrategy | SpotFamily; params: Params | RsiParams | SetupParams; interval: Interval; rank: number; risk: number; source: string; seenKey: string; closed: number };
     const choices: Choice[] = [];
     const notes: string[] = [];
     let analysed = 0;
@@ -269,10 +291,12 @@ export async function runTick(admin: Admin): Promise<string> {
       if (!check.ok) { notes.push(`${token!.symbol} : refusé (${check.why})`); done(); continue; }
       try {
         const rsi = plan.family === "rsi";
+        const setup = isSetup(plan.family) ? plan.family : null;
         const rp = plan.params as RsiParams;
         const c = await getCandles(token!.candles, plan.interval, rsi ? Math.max(rp.smaPeriod, rp.rsiPeriod * 6) + 40 : 400, now);
-        const sig = rsi ? rsiSignal(c, rp) : trendSignal(c, false, plan.params as Params);
-        const risk = (rsi ? rp.riskPct / 100 : riskPerTrade(brain)) * riskFactor(plan.confidence); // stratégie non confirmée en réel : 75 %
+        const sig = rsi ? rsiSignal(c, rp) : setup ? setupSignal(setup, c, false, plan.params as SetupParams) : trendSignal(c, false, plan.params as Params);
+        // stratégie non confirmée en réel : 75 % ; marché agité : taille réduite
+        const risk = (rsi ? rp.riskPct / 100 : riskPerTrade(brain)) * riskFactor(plan.confidence) * volScale(c);
         if (sig.side === "long") choices.push({ token: token!, sig, strategy: plan.family, params: plan.params, interval: plan.interval, rank: plan.score, risk, source: plan.source, seenKey: key, closed: closedP });
         else { notes.push(`${token!.symbol} ${plan.interval === "15m" ? "15 min" : "1 h"} : ${sig.reason}`); done(); }
       } catch { notes.push(`${token!.symbol} : historique indisponible`); }
@@ -319,7 +343,9 @@ export async function runTick(admin: Admin): Promise<string> {
     // 7. Entrée : taille au risque (hors coffre, risque total plafonné), cotation vérifiée, swap, confirmation.
     const T = tradable(value, b.usdc, mem.vault);
     const room = TOTAL_RISK.spot - openRisk(held, b, value);
-    const risk = Math.min(pick.risk, room);
+    // tokens qui bougent ensemble (mêmes familles : grandes cryptos, memecoins, DeFi Solana) : une 2e position du même groupe = demi-risque
+    const sameGroup = held.filter((p) => groupOf(p.symbol) === groupOf(pick.token.symbol)).length;
+    const risk = Math.min(pick.risk * (sameGroup ? 0.5 : 1), room);
     if (risk < 0.002) { for (const c of choices) mem.seen[c.seenKey] = c.closed; }
     if (risk < 0.002) return await hold(`Signal ${pick.token.symbol} ignoré : risque total des positions ouvertes déjà au plafond (${(TOTAL_RISK.spot * 100).toFixed(0)} %).`);
     const perPositionCap = T.equity * Math.min(RISK.maxSpotFraction, 1 / cfg.maxPositions); // part égale : de la place pour chaque position
@@ -333,12 +359,14 @@ export async function runTick(admin: Admin): Promise<string> {
     const impact = Number(quote.priceImpactPct) * 100;
     const fillPrice = sizeUsd / (Number(quote.outAmount) / 10 ** pick.token.decimals);
     if (impact > RULES.maxPriceImpactPct || fillPrice <= pick.sig.stop * 1.003) return await hold(`Signal ${pick.token.symbol} ignoré : exécution trop chère (impact ${impact.toFixed(2)} %) ou prix déjà trop loin.`);
+    const liqAtEntry = pick.token.mint === SOL_MINT ? undefined : (await tokenLiquidity([pick.token.mint]).catch(() => ({} as Record<string, number>)))[pick.token.mint];
     const sig = await executeSwap(quote, address, keyPair);
     mem.signal = `${pick.token.symbol} : ${pick.sig.reason}`;
     mem.pending = { kind: "buy", sig, at: now, mint: pick.token.mint, usdcBefore: b.usdc, draft: {
       key: pick.token.mint, symbol: pick.token.symbol, side: "long", stop: pick.sig.stop, best: fillPrice, initialRisk: fillPrice - pick.sig.stop, openedAt: now,
       strategy: pick.strategy, posParams: pick.params, posInterval: pick.interval, source: pick.source, stopCandle: closed,
-      why: `${pick.sig.reason} · stratégie : ${pick.source} · risque ${(risk * 100).toFixed(1)} % du capital tradable${mem.vault ? ` (coffre de ${mem.vault.toFixed(2)} $ exclu)` : ""}`,
+      ...(pick.sig.target != null ? { target: pick.sig.target * (fillPrice / pick.sig.price) } : {}), ...(liqAtEntry ? { liqAtEntry, liqCheckedAt: now } : {}),
+      why: `${pick.sig.reason} · stratégie : ${pick.source} · risque ${(risk * 100).toFixed(1)} % du capital tradable${sameGroup ? " (demi-risque : un token du même groupe est déjà en portefeuille)" : ""}${mem.vault ? ` (coffre de ${mem.vault.toFixed(2)} $ exclu)` : ""}`,
     } };
     const r = (await waitForTx(sig)) === "pending" ? "pending" : await settle(admin, bot, mem, cfg, address, value);
     await save(admin, mem, { ...patch, ...mirror(positions), last_value_usd: value, last_message: r === "pending" ? `Achat ${pick.token.symbol} envoyé, confirmation en cours…` : r });
@@ -404,7 +432,7 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, a
   });
   const brain = mem.brain ?? newBrain(valueBefore);
   learn(brain, sym, pnlPct, valueBefore + pnl, Date.now());
-  if (pnl < 0) mem.cooldownUntil = Date.now() + RISK.cooldownAfterLossMs;
+  if (pnl < 0) mem.cooldownUntil = Date.now() + cooldownMs(pos?.posInterval);
   delete positions[mint];
   return `Vente ${sym} confirmée (${label(p.reason)}) : ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ (${pnlPct.toFixed(1)} %), frais inclus.${pnl > 0 && cfg.vaultPct ? ` ${cfg.vaultPct} % du gain mis au coffre.` : ""}`;
 }
@@ -455,6 +483,8 @@ const fmt = (n: number) => (n >= 1 ? n.toFixed(n >= 100 ? 2 : 4) : n.toPrecision
 function label(reason?: string) {
   return reason === "rsi_exit" ? "RSI repassé au-dessus du seuil de sortie" : reason === "trailing_stop" ? "stop suiveur, gain protégé" : reason === "stop_loss" ? "stop loss"
     : reason === "time_stop" ? "position sans élan" : reason === "prise_partielle" ? "prise de bénéfices partielle"
+    : reason === "objectif" ? "objectif atteint" : reason === "orb_temps" ? "ORB : objectif non atteint à temps" : reason === "vwap_atteint" ? "retour au prix moyen du jour (VWAP) atteint"
+    : reason === "vwap_temps" ? "VWAP : fin de journée sans retour" : reason === "liquidite_effondree" ? "sortie d'urgence : la liquidité du token s'est effondrée"
     : reason === "prise_totale" ? "prise de bénéfices (position trop petite pour être coupée en deux)" : reason ?? "sortie";
 }
 export type { TradeRow };

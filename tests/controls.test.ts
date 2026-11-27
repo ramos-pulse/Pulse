@@ -10,10 +10,10 @@ test("garde-fou : le stop est toujours touché avant la liquidation, même à x2
   for (const dist of [0.003, 0.01, 0.02, 0.05]) {
     const s = perpsSizing(1000, 1000, 100, 100 * (1 - dist), 0.015, 250)!;
     const liqDist = 1 / s.leverage - 0.002; // perte qui déclenche la liquidation sur Jupiter
-    assert.ok(dist < liqDist * 0.75, `stop ${dist} vs liquidation ${liqDist.toFixed(4)} à x${s.leverage.toFixed(1)}`);
+    assert.ok(dist * 3 <= liqDist + 1e-9, `liquidation au moins 3 fois plus loin que le stop : stop ${dist} vs liquidation ${liqDist.toFixed(4)} à x${s.leverage.toFixed(1)}`);
     assert.ok(Math.abs(s.notional * dist - 15) < 1e-6, "la perte au stop reste le risque choisi (1,5 % de 1000 $)");
   }
-  assert.ok(stopSafeLeverage(0.02) < 35 && stopSafeLeverage(0.002) > 100);
+  assert.ok(stopSafeLeverage(0.02) < 17 && stopSafeLeverage(0.002) > 90);
 });
 test("plus de levier = moins de collatéral bloqué, même perte au stop", () => {
   const a = perpsSizing(1000, 1000, 100, 99, 0.015, 3)!, b = perpsSizing(1000, 1000, 100, 99, 0.015, 10)!;

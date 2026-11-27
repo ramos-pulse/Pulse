@@ -5,9 +5,11 @@ import { isBenched, learn, mindset, newBrain, optimize, riskPerTrade } from "./b
 import { candles as getCandles, hourlyCandles, lastClosedCandle } from "./candles.ts";
 import { perpsClose, perpsOpen, perpsPositions, perpsPrice, type PerpPosition } from "./jupiter.ts";
 import { getBalances, loadKeyPairFrom, type Balances } from "./solana.ts";
+import { fundingHistory } from "./funding.ts";
+import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type Extra, type SetupParams } from "./setups.ts";
 import {
   addToVault, applyTransfer, detectTransfer, AGGR_AGGRESSIVE, AGGR_LEVELS, effectiveAggr, atr, dayKey, exitCheck, loadMemory, loadPerpsConfig, migratePositions, missionEnd, PARTIAL, PERPS_ASSETS, PERPS_RULES,
-  perpsChange, perpsSizing, PRESETS, rangeExit, rangeSignal, type RangeParams, RISK, riskFactor, sampleCurve, sideMult, riskGate, RULES, TOTAL_RISK, tradable, trailStop, trendSignal, DEFAULT_PARAMS,
+  perpsChange, perpsSizing, PRESETS, RISK, riskFactor, cooldownMs, floorOf, solReserveAlert, volScale, sampleCurve, sideMult, riskGate, RULES, TOTAL_RISK, tradable, trailStop, trendSignal, DEFAULT_PARAMS,
   type Interval, type Memory, type Params, type PerpsConfig, type PerpsPlan, type Position,
 } from "./strategy.ts";
 
@@ -54,7 +56,8 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
   const mine = migratePositions(mem, bot);
   // En pause : plus aucune entrée, mais les positions ouvertes restent gérées (stop suiveur).
   const paused = bot.status === "paused";
-  if (!(bot.status === "running" || (paused && (Object.keys(mine).length || mem.pending)))) return "idle";
+  // En pause sans position : on relit quand même le portefeuille (valeur à jour, dépôts et retraits détectés).
+  if (!(bot.status === "running" || paused)) return "idle";
   const now = Date.now();
   const cfg = loadPerpsConfig(bot.config);
   // Agressivité choisie dans l'app (plafonnée à « Normal » en pilote automatique, sauf mode agressif des agents)
@@ -139,16 +142,18 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
     }
   }
   sampleCurve(mem, value, now);
+  const solAlert = solReserveAlert(mem, b.sol, now, "Bot perps");
+  if (solAlert) { admin.alert?.(solAlert); message ||= solAlert; }
   if (rebase) { mem.lastUsdc = b.usdc; mem.lastSol = b.sol; }
 
   // 4. Fin de mission (données complètes uniquement).
   const end = missionEnd({ now, endAt: RULES.destroyAtDeadline && bot.end_at ? Date.parse(bot.end_at) : Infinity,
-    goalUsd: Number(bot.goal_usd), valueUsd: value, floorUsd: PERPS_RULES.floorUsd, complete: true });
+    goalUsd: Number(bot.goal_usd), valueUsd: value, floorUsd: floorOf(bot.start_value_usd, PERPS_RULES.floorUsd), complete: true });
   if (end && !paused) {
     const outcome = end === "success" ? "success" : end === "destroyed" ? "destroyed" : "stopped";
     await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value });
     await liquidatePerps(admin, { ...bot, ...patch, price_history: mem } as PerpsRow, outcome,
-      end === "success" ? "Mission réussie ! Objectif atteint, gains sécurisés." : end === "destroyed" ? "Date limite atteinte." : `Capital sous ${PERPS_RULES.floorUsd} $ : je protège ce qui reste.`);
+      end === "success" ? "Mission réussie ! Objectif atteint, gains sécurisés." : end === "destroyed" ? "Date limite atteinte." : `Capital sous ${floorOf(bot.start_value_usd, PERPS_RULES.floorUsd).toFixed(2)} $ (30 % du départ) : je protège ce qui reste.`);
     return outcome;
   }
 
@@ -161,13 +166,15 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
       const entry = p.entry ?? o.entryPrice;
       const iv: Interval = p.posInterval ?? "1h";
       const closed = lastClosedCandle(now, iv);
-      const isRangePos = p.strategy === "range";
-      const params = (p.posParams as Params | undefined) ?? cfg.trend ?? PRESETS[brain.preset[p.key] ?? "standard"] ?? DEFAULT_PARAMS;
+      // familles « à objectif » (range, ORB, VWAP, funding) : stop fixe, objectif, sortie jugée à la clôture des bougies ;
+      // tendance et familles suiveuses (compression, volume) : stop suiveur
+      const fam = p.strategy && isSetup(p.strategy) ? p.strategy : null;
+      const isRangePos = !!fam && !TRAILING.includes(fam);
+      const params = fam ? trailParams(p.posParams as SetupParams) : (p.posParams as Params | undefined) ?? cfg.trend ?? PRESETS[brain.preset[p.key] ?? "standard"] ?? DEFAULT_PARAMS;
       let rangeOut: string | null = null;
-      if (isRangePos && p.stopCandle !== closed) { // range : stop fixe ; sortie au retour à la moyenne (jugée à la clôture de chaque bougie)
-        const c = await getCandles(A.candles, iv, 60, now).catch(() => []);
-        const rp = p.posParams as RangeParams;
-        if (c.length > rp.bbPeriod) { rangeOut = rangeExit(c, p.side, rp, Math.round((now - (p.openedAt ?? now)) / (iv === "15m" ? 900_000 : 3_600_000))); p.stopCandle = closed; }
+      if (isRangePos && p.stopCandle !== closed) {
+        const c = await getCandles(A.candles, iv, 260, now).catch(() => []);
+        if (c.length > 40) { rangeOut = setupExit(fam!, c, p.side, p.posParams as SetupParams, Math.round((now - (p.openedAt ?? now)) / (iv === "15m" ? 900_000 : 3_600_000)), p.openedAt ?? now); p.stopCandle = closed; }
       } else if (!isRangePos && p.stopCandle !== closed) {
         const c = await getCandles(A.candles, iv, 40, now).catch(() => []);
         if (c.length > 20) {
@@ -186,9 +193,10 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
       }
       const move = perpsChange(p.side, entry, price) * 100;
       p.live = { price, pnlPct: move, at: now };
+      const hitTarget = p.target != null && (p.side === "long" ? price >= p.target : price <= p.target);
       const exit = isRangePos
-        ? ((p.side === "long" ? price <= (p.stop ?? 0) : price >= (p.stop ?? Infinity)) ? "stop_loss" : rangeOut)
-        : exitCheck({ side: p.side, entry, price, stop: p.stop ?? entry, initialRisk: p.initialRisk ?? entry * 0.03, openedAt: p.openedAt ?? now }, now);
+        ? ((p.side === "long" ? price <= (p.stop ?? 0) : price >= (p.stop ?? Infinity)) ? "stop_loss" : hitTarget ? "objectif" : rangeOut)
+        : exitCheck({ side: p.side, entry, price, stop: p.stop ?? entry, initialRisk: p.initialRisk ?? entry * 0.03, openedAt: p.openedAt ?? now, interval: iv }, now);
       if (exit) {
         const sig = await perpsClose(o.pubkey, PERPS_RULES.slippageBps * 2, keyPair);
         mem.pending = { kind: "close", sig, at: now, asset: p.key, usdcBefore: b.usdc, reason: exit };
@@ -215,7 +223,8 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
     for (const plan of plans) {
       const A = plan ? assetOf(plan.asset) : SOL;
       if (!A || mine[A.asset] || mem.pending) continue;
-      const isRangePlan = plan?.family === "range";
+      const setup = plan?.family && isSetup(plan.family) ? plan.family : null;
+      const isRangePlan = !!setup;
       const params = (plan ? plan.params : cfg.trend ?? PRESETS[brain.preset[A.asset] ?? "standard"] ?? DEFAULT_PARAMS) as Params;
       const iv: Interval = plan?.interval ?? "1h";
       const closed = lastClosedCandle(now, iv);
@@ -232,7 +241,8 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
       const benched = aggressive || cfg.trend || plan ? (brain.benched[A.asset] ?? 0) > now : isBenched(brain, A.asset, now);
       if (benched) { notes.push((!aggressive && !plan && brain.disabled[A.asset]) || `${A.asset} sur le banc après une série difficile`); continue; }
       const c = await getCandles(A.candles, iv, 400, now);
-      const sig = isRangePlan ? rangeSignal(c, sideMult(cfg.bias, "short") > 0, plan!.params as RangeParams) : trendSignal(c, sideMult(cfg.bias, "short") > 0, params);
+      const extra: Extra = setup === "funding" ? { funding: await fundingHistory(A.asset, now - 2 * 86_400_000, now).catch(() => []) } : {};
+      const sig = setup ? setupSignal(setup, c, sideMult(cfg.bias, "short") > 0, plan!.params as SetupParams, extra) : trendSignal(c, sideMult(cfg.bias, "short") > 0, params);
       mem.signal = `${A.asset} : ${sig.reason}`;
       const mult = sig.side ? sideMult(cfg.bias, sig.side) : 0;
       if (!sig.side || mult === 0) { notes.push(sig.side ? `${A.asset} : ${sig.side} désactivé par ta barre longs/shorts` : `${A.asset} : ${sig.reason}`); continue; }
@@ -240,7 +250,8 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
       const dist = Math.abs(sig.price - sig.stop);
       const stop = sig.side === "long" ? price - dist : price + dist;
       const confidence = plan ? riskFactor(plan.confidence) : 1; // stratégie du chercheur pas encore confirmée en réel : 75 %
-      const wanted = Math.min(L.maxRisk, riskPerTrade(brain) * L.riskMult) * mult * confidence;
+      const vol = volScale(c); // marché agité : risque réduit (les stops sautent plus souvent)
+      const wanted = Math.min(L.maxRisk, riskPerTrade(brain) * L.riskMult) * mult * confidence * vol;
       const room = L.maxRisk * TOTAL_RISK.perpsMult - openRisk(held, value); // risque total plafonné
       const risk = Math.min(wanted, room);
       if (risk < 0.002) { notes.push(`${A.asset} : risque total des positions déjà au plafond`); continue; }
@@ -251,9 +262,9 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
       const source = plan?.source ?? cfg.source ?? "réglages de l'app";
       mem.pending = { kind: "open", sig: txid, at: now, asset: A.asset, draft: {
         key: A.asset, symbol: A.asset, side: sig.side, stop, best: price, initialRisk: dist, openedAt: now, stopCandle: closed, posParams: isRangePlan ? plan!.params : params, posInterval: iv, source,
-        ...(isRangePlan ? { strategy: "range" as const } : {}),
+        ...(setup ? { strategy: setup } : {}), ...("target" in sig && sig.target != null ? { target: (sig.target as number) + (price - sig.price) } : {}),
         collateralUsd: size.collateral, sizeUsd: size.notional,
-        why: `${sig.reason} · stratégie : ${source} · ${L.name.toLowerCase()}, risque ${(size.risk * 100).toFixed(1)} %${size.risk > risk * 1.05 ? " (position minimale de Jupiter : 10 $ de collatéral)" : ""}, levier x${size.leverage.toFixed(1)}${mem.vault ? ` (coffre de ${mem.vault.toFixed(2)} $ exclu)` : ""}`,
+        why: `${sig.reason} · stratégie : ${source} · ${L.name.toLowerCase()}, risque ${(size.risk * 100).toFixed(1)} %${size.risk > risk * 1.05 ? " (position minimale de Jupiter : 10 $ de collatéral)" : ""}, levier x${size.leverage.toFixed(1)}${vol < 1 ? `, taille réduite (marché agité ×${vol})` : ""}${mem.vault ? ` (coffre de ${mem.vault.toFixed(2)} $ exclu)` : ""}`,
       } };
       await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value,
         last_message: `${sig.side === "long" ? "Long" : "Short"} ${A.asset} demandé (${L.name.toLowerCase()}) : ${size.collateral.toFixed(2)} $ x${size.leverage.toFixed(1)}, risque ${(size.risk * 100).toFixed(1)} %, stop ${stop.toFixed(2)} $ (${sig.reason}).` });
@@ -277,7 +288,7 @@ function recordClose(admin: Admin, mem: Memory, cfg: PerpsConfig, asset: string,
   admin.addTrade("perps", { action: "close", asset, side: p?.side, collateral_usd: proceeds, price: p?.live?.price, pnl_usd: pnl, reason, signature: sig, source: p?.source,
     detail: { pourquoi: label(reason), entree: p?.entry, stop: p?.stop, strategie: p?.source, duree_h: p?.openedAt ? Math.round((Date.now() - p.openedAt) / 360_000) / 10 : null, entree_pourquoi: p?.why, coffre: mem.vault } });
   learn(mem.brain ?? newBrain(value), asset, pnlPct, value, Date.now());
-  if (pnl < 0) mem.cooldownUntil = Date.now() + RISK.cooldownAfterLossMs;
+  if (pnl < 0) mem.cooldownUntil = Date.now() + cooldownMs(p?.posInterval);
   if (mem.positions) delete mem.positions[asset];
   return `Position ${asset} fermée (${label(reason)}) : ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ (${pnlPct.toFixed(1)} % du capital).${pnl > 0 && cfg.vaultPct ? ` ${cfg.vaultPct} % du gain mis au coffre.` : ""}`;
 }
@@ -311,5 +322,5 @@ async function save(admin: Admin, mem: Memory, fields: Partial<PerpsRow>) {
   admin.update("perps", { price_history: mem, last_tick_at: new Date().toISOString(), ...fields });
 }
 function label(reason?: string) {
-  return reason === "objectif" ? "retour à la moyenne atteint (objectif du range)" : reason === "range_temps" ? "range : pas de retour à la moyenne à temps" : reason === "trailing_stop" ? "stop suiveur, gain protégé" : reason === "stop_loss" ? "stop loss" : reason === "time_stop" ? "position sans élan" : reason === "stop_onchain" ? "stop de sécurité on-chain" : reason ?? "sortie";
+  return reason === "objectif" ? "objectif atteint" : reason === "orb_temps" ? "ORB : objectif non atteint à temps" : reason === "vwap_atteint" ? "retour au prix moyen du jour (VWAP) atteint" : reason === "vwap_temps" ? "VWAP : fin de journée sans retour" : reason === "funding_temps" ? "funding : délai écoulé" : reason === "range_temps" ? "range : pas de retour à la moyenne à temps" : reason === "trailing_stop" ? "stop suiveur, gain protégé" : reason === "stop_loss" ? "stop loss" : reason === "time_stop" ? "position sans élan" : reason === "stop_onchain" ? "stop de sécurité on-chain" : reason ?? "sortie";
 }

@@ -124,17 +124,17 @@ function trendParams(c: Candle[], q: number, tight = false, fast = false): Param
   return {
     breakout: q,
     // agressif : stop au repli médian (plus serré) et force minimale plus basse ⇒ plus de trades, plus de faux signaux
-    trailAtr: snap(Number.isFinite(quantile(pullbacks, tight ? 0.5 : 0.7)) ? quantile(pullbacks, tight ? 0.5 : 0.7) : 3, space(fast).tendance.trailAtr),
-    minTrend: snap(Number.isFinite(quantile(strengths, tight ? 0.25 : 0.4)) ? quantile(strengths, tight ? 0.25 : 0.4) : 1, space(fast).tendance.minTrend),
+    trailAtr: snap(Number.isFinite(quantile(pullbacks, tight ? 0.5 : 0.7)) ? quantile(pullbacks, tight ? 0.5 : 0.7) : 3, space(fast).tendance.trailAtr as readonly number[]),
+    minTrend: snap(Number.isFinite(quantile(strengths, tight ? 0.25 : 0.4)) ? quantile(strengths, tight ? 0.25 : 0.4) : 1, space(fast).tendance.minTrend as readonly number[]),
   };
 }
 
 /** Réglages RSI déduits des données : période ≈ demi-vie, seuils = niveaux de RSI réellement rares sur ce marché. */
 function rsiParams(c: Candle[], hl: number | null, o: ProposeOptions = {}): RsiParams {
   const S = space(o.fast);
-  const rsiPeriod = snap(hl ?? 14, S.rsi.rsiPeriod);
+  const rsiPeriod = snap(hl ?? 14, S.rsi.rsiPeriod as readonly number[]);
   const rs = rsiSeries(c.map((x) => x.c), rsiPeriod);
-  const entry = snap(quantile(rs, o.aggressive ? 0.12 : 0.07), S.rsi.entry); // agressif : excès moins rares ⇒ plus de signaux
+  const entry = snap(quantile(rs, o.aggressive ? 0.12 : 0.07), S.rsi.entry as readonly number[]); // agressif : excès moins rares ⇒ plus de signaux
   const exits = SPACE.rsi.exit.filter((x) => x > entry + 10);
   return { rsiPeriod, entry, exit: snap(quantile(rs, 0.55), exits.length ? exits : [entry + 20]), smaPeriod: snap((hl ?? 20) * 8, SPACE.rsi.smaPeriod), swingBars: snap(hl ?? 10, SPACE.rsi.swingBars), riskPct: 1, naive: false };
 }
@@ -179,7 +179,7 @@ export function propose(trainCandles: Candle[], m: Market, ins = analyze(trainCa
   // PERPS en marché qui revient à la moyenne : range (bandes de Bollinger) réglé sur la demi-vie mesurée
   if (m.kind === "perps" && ins.regime !== "tendance") {
     const S = space(o.fast).range;
-    const p = { bbPeriod: snap((ins.halfLife ?? 10) * 2, S.bbPeriod), bbK: 2, stopAtr: 1.5, maxTrend: ins.regime === "retour à la moyenne" ? 1.5 : 1 };
+    const p = { bbPeriod: snap((ins.halfLife ?? 10) * 2, S.bbPeriod as readonly number[]), bbK: 2, stopAtr: 1.5, maxTrend: ins.regime === "retour à la moyenne" ? 1.5 : 1 };
     out.push({ candidate: { ...base, family: "range", params: p },
       rationale: `${ins.note} ⇒ trader le range : vendre au-dessus de la bande haute, acheter sous la bande basse, objectif le retour à la moyenne ; période ${p.bbPeriod} ≈ 2 × la demi-vie${ins.halfLife ? ` (${ins.halfLife.toFixed(0)} bougies)` : ""}` });
     if (o.aggressive) out.push({ candidate: { ...base, family: "range", params: { ...p, bbK: 1.5 } }, rationale: "variante agressive : bandes plus étroites (1,5 écart-type), plus de signaux" });
@@ -191,6 +191,21 @@ export function propose(trainCandles: Candle[], m: Market, ins = analyze(trainCa
     const p2 = { ...p, entry: snap(p.entry - 5, SPACE.rsi.entry) };
     if (p2.entry !== p.entry) out.push({ candidate: { ...base, family: "rsi", params: p2 }, rationale: `variante plus sélective de la précédente (entrée sous ${p2.entry}) : moins de trades, chaque signal plus extrême` });
   }
+  // RETOUR AU VWAP : même logique que le range (les écarts se corrigent), mais autour du prix moyen du jour
+  if (ins.regime !== "tendance" || o.aggressive) {
+    const dev = ins.regime === "retour à la moyenne" ? 2 : 2.5;
+    out.push({ candidate: { ...base, family: "vwap", params: { dev: o.aggressive ? dev - 0.5 : dev, stopAtr: 1.5, maxTrend: 1.5 } },
+      rationale: `${ins.note} ⇒ quand le prix s'écarte de ${o.aggressive ? dev - 0.5 : dev} ATR de son prix moyen du jour (VWAP), parier sur le retour vers ce prix moyen` });
+  }
+  // COMPRESSION : la volatilité revient toujours après une période calme (regroupement de la volatilité) ; marche dans tous les régimes
+  {
+    const p = trendParams(trainCandles, 24, o.aggressive, o.fast);
+    out.push({ candidate: { ...base, family: "squeeze", params: { bbPeriod: 20, bbK: 2, lookback: 100, pct: o.aggressive ? 0.2 : 0.1, trailAtr: p.trailAtr } },
+      rationale: `la volatilité se regroupe : après une compression des bandes de Bollinger (parmi les ${o.aggressive ? 20 : 10} % les plus serrées), le prix part souvent fort d'un côté ⇒ suivre la cassure, stop suiveur ${p.trailAtr} ATR (replis typiques mesurés)` });
+  }
+  // ORB : en 15 min, l'ouverture de Wall Street donne le plus gros afflux de volume de la journée
+  if (m.interval === "15m") out.push({ candidate: { ...base, family: "orb", params: { session: "us", zoneMin: 30, target: 2, window: 4 } },
+    rationale: "l'ouverture de Wall Street concentre le volume de la journée : la cassure de la zone des 30 premières minutes donne souvent la direction ; objectif 2 × la zone" });
   return out;
 }
 

@@ -37,6 +37,8 @@ export interface Store {
   bot(kind: BotKind): BotState;
   update(kind: BotKind, patch: Partial<BotState>): void;
   addTrade(kind: BotKind, row: TradeRow): void;
+  /** Alerte envoyée sur le téléphone (en plus des trades). */
+  alert?(text: string): void;
 }
 
 const LOCK_MS = 140_000;
@@ -98,11 +100,13 @@ export class DbStore implements Store {
 
   addTrade(kind: BotKind, row: TradeRow): void {
     this.inserts.push({ ...row, bot: kind });
-    const raw = (row.side ?? row.action ?? "").toUpperCase();
+    const raw = (row.action ?? row.side ?? "").toUpperCase();
     const what = ({ BUY: "ACHAT", SELL: "VENTE", OPEN: "OUVERTURE", CLOSE: "FERMETURE", DEPOSIT: "DÉPÔT", WITHDRAW: "RETRAIT" } as Record<string, string>)[raw] ?? raw;
     const pnl = typeof row.pnl_usd === "number" ? ` · ${row.pnl_usd >= 0 ? "+" : ""}${row.pnl_usd.toFixed(2)} $` : "";
     this.messages.push(`${what} ${row.symbol ?? row.asset ?? ""}${pnl}${row.reason ? ` (${row.reason})` : ""}`);
   }
+
+  alert(text: string): void { this.messages.push(text); }
 
   /** Écrit les trades puis les champs modifiés, libère le verrou, envoie les notifications. */
   async release(): Promise<void> {

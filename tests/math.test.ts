@@ -32,7 +32,8 @@ test("marché à tendance : VR > 1 significatif, Hurst > 0,5 ⇒ propose du suiv
   const c = series(3000, "tendance"), ins = analyze(c);
   assert.equal(ins.regime, "tendance"); assert.ok(ins.hurst > 0.55 && ins.significant);
   const p = propose(c, market);
-  assert.ok(p.length >= 1 && p.every((x) => x.candidate.family === "tendance"));
+  // tendance : seulement des stratégies qui suivent le mouvement (tendance, cassure de compression), jamais de retour à la moyenne
+  assert.ok(p.some((x) => x.candidate.family === "tendance") && p.every((x) => x.candidate.family === "tendance" || x.candidate.family === "squeeze"), JSON.stringify(p.map((x) => x.candidate.family)));
 });
 test("marché qui revient à la moyenne : VR < 1, demi-vie retrouvée ⇒ propose du RSI", () => {
   const c = series(3000, "retour"), ins = analyze(c);
@@ -42,5 +43,5 @@ test("marché qui revient à la moyenne : VR < 1, demi-vie retrouvée ⇒ propos
   assert.ok(p.some((x) => x.candidate.family === "rsi")); assert.ok(p.every((x) => x.rationale.length > 20));
   // en perps (pas de RSI) : un marché qui revient à la moyenne reçoit des stratégies RANGE, pas de tendance
   const pp = propose(c, { ...market, kind: "perps" });
-  assert.ok(pp.length >= 1 && pp.every((x) => x.candidate.family === "range"), JSON.stringify(pp.map((x) => x.candidate.family)));
+  assert.ok(pp.some((x) => x.candidate.family === "range") && pp.every((x) => ["range", "vwap", "squeeze"].includes(x.candidate.family)), JSON.stringify(pp.map((x) => x.candidate.family)));
 });

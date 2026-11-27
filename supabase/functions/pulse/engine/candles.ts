@@ -9,7 +9,7 @@ async function page(product: string, granSec: number, startMs: number, endMs: nu
   const res = await fetch(url, { headers: { "user-agent": "pulse-autopilot" }, signal: AbortSignal.timeout(12_000) });
   if (!res.ok) throw new Error(`Bougies ${product} indisponibles (${res.status})`);
   const rows = (await res.json()) as number[][];
-  return rows.map(([t, l, h, o, c]) => ({ t: t! * 1000, o: o!, h: h!, l: l!, c: c! }));
+  return rows.map(([t, l, h, o, c, v]) => ({ t: t! * 1000, o: o!, h: h!, l: l!, c: c!, v: v ?? 0 }));
 }
 
 /** Bougies CLÔTURÉES uniquement, de la plus ancienne à la plus récente. */

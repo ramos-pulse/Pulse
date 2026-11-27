@@ -14,6 +14,8 @@
 // Résultat attendu d'un suivi de tendance : 35-45 % de trades gagnants, mais des gains moyens 2 à 3 fois plus gros
 // que les pertes. Peu de trades (quelques-uns par semaine). VALIDER AVEC LE BACKTEST AVANT DE METTRE DE L'ARGENT.
 
+import { isSetup, PERPS_ONLY, sanitizeSetup, type SetupFamily, type SetupParams } from "./setups.ts";
+
 export const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -48,15 +50,16 @@ export const asInterval = (v: unknown): Interval => (v === "15m" ? "15m" : "1h")
 
 /** Un « plan » choisi par le chercheur : quel token, quelle stratégie, quels réglages, quelle unité de temps. */
 export type Confidence = "nouvelle" | "confirmée";
-export interface SpotPlan { symbol: string; family: "tendance" | "rsi"; params: Params | RsiParams; interval: Interval; source: string; score: number; confidence: Confidence }
-export interface PerpsPlan { asset: string; family?: "tendance" | "range"; params: Params | RangeParams; interval: Interval; source: string; score: number; confidence: Confidence }
+export type SpotFamily = "tendance" | "rsi" | Exclude<SetupFamily, "range" | "funding">;
+export interface SpotPlan { symbol: string; family: SpotFamily; params: Params | RsiParams | SetupParams; interval: Interval; source: string; score: number; confidence: Confidence }
+export interface PerpsPlan { asset: string; family?: "tendance" | SetupFamily; params: Params | SetupParams; interval: Interval; source: string; score: number; confidence: Confidence }
 /** Les bots apprennent du chercheur : une stratégie pas encore confirmée en réel est tradée avec 75 % du risque normal. */
 export const PROBATION_RISK = 0.75;
 export const riskFactor = (c: Confidence | undefined) => (c === "confirmée" ? 1 : PROBATION_RISK);
 const asConfidence = (v: unknown): Confidence => (v === "confirmée" ? "confirmée" : "nouvelle");
 
 /** Réglages de tendance. entry = "repli" : entrée sur repli vers la moyenne 20 au lieu d'une cassure. */
-export interface Params { breakout: number; trailAtr: number; minTrend: number; entry?: "repli" }
+export interface Params { breakout: number; trailAtr: number; minTrend: number; entry?: "repli"; hours?: "actives" }
 /** Jeux de paramètres testés chaque jour par le cerveau du bot (peu nombreux pour éviter la sur-optimisation). */
 export const PRESETS: Record<string, Params> = {
   rapide: { breakout: 24, trailAtr: 2.5, minTrend: 1.0 },
@@ -119,7 +122,44 @@ export type Side = PerpsSide;
 // ---------------------------------------------------------------------------------------------------
 // Bougies & indicateurs
 // ---------------------------------------------------------------------------------------------------
-export interface Candle { t: number; o: number; h: number; l: number; c: number } // t = ouverture, en ms
+export interface Candle { t: number; o: number; h: number; l: number; c: number; v?: number } // t = ouverture, en ms ; v = volume
+
+/**
+ * SEUILS ADAPTÉS À L'UNITÉ DE TEMPS : une bougie de 15 min bouge environ 2 fois moins qu'une bougie d'1 h (racine de 4).
+ * Avant, le filtre « marché trop calme » (0,4 %), la sortie d'une position qui stagne (96 h) et la pause après une perte (1 h)
+ * étaient les mêmes en 15 min : les stratégies rapides étaient presque toujours bloquées.
+ */
+export const TF = {
+  "1h": { minAtrPct: 0.004, maxAtrPct: 0.05, maxHoldHours: 96, cooldownMs: 60 * 60_000, hoursPerBar: 1 },
+  "15m": { minAtrPct: 0.002, maxAtrPct: 0.025, maxHoldHours: 24, cooldownMs: 15 * 60_000, hoursPerBar: 0.25 },
+} as const;
+/** Unité de temps déduite des bougies elles-mêmes (écart entre les deux dernières). */
+export const barMsOf = (c: Candle[]) => (c.length > 1 ? c[c.length - 1]!.t - c[c.length - 2]!.t : 3_600_000);
+export const ivOfMs = (ms: number): Interval => (ms <= 900_000 ? "15m" : "1h");
+export const tfOf = (c: Candle[]) => TF[ivOfMs(barMsOf(c))];
+/** Pause après une perte, selon l'unité de temps de la position. */
+export const cooldownMs = (iv: Interval | undefined) => TF[iv ?? "1h"].cooldownMs;
+
+/**
+ * HEURES ACTIVES (filtre « heures creuses », testé par le chercheur) : du lundi au vendredi, 7 h – 21 h UTC.
+ * La nuit et le week-end, les volumes baissent et les fausses cassures sont plus fréquentes.
+ */
+export function activeHour(t: number): boolean {
+  const d = new Date(t), h = d.getUTCHours(), wd = d.getUTCDay();
+  return wd >= 1 && wd <= 5 && h >= 7 && h < 21;
+}
+
+/**
+ * TAILLE SELON LA VOLATILITÉ : quand l'ATR actuel dépasse nettement sa médiane récente, le marché s'agite
+ * (les stops sautent plus souvent) : le risque est réduit. 1 = normal, 0,7 = agité, 0,5 = très agité.
+ */
+export function volScale(c: Candle[], period = 14, lookback = 200): number {
+  if (c.length < period + 30) return 1;
+  const a = atr(c, period).slice(-lookback).map((x, i, arr) => x / c[c.length - arr.length + i]!.c);
+  const now = a.at(-1)!, med = [...a].sort((x, y) => x - y)[Math.floor(a.length / 2)]!;
+  if (!(med > 0)) return 1;
+  return now > 2 * med ? 0.5 : now > 1.5 * med ? 0.7 : 1;
+}
 
 export function ema(values: number[], period: number): number[] {
   if (!values.length) return [];
@@ -155,8 +195,10 @@ export function trendSignal(candles: Candle[], allowShort: boolean, P: Params = 
   const slowBefore = slowLine.at(-1 - S.slopeBars)!;
   const a = atr(candles, S.atrPeriod).at(-1)!;
   const atrPct = a / last.c;
-  if (atrPct < S.minAtrPct) return empty(`marché trop calme (ATR ${(atrPct * 100).toFixed(2)} %)`);
-  if (atrPct > S.maxAtrPct) return empty(`marché trop agité (ATR ${(atrPct * 100).toFixed(2)} %)`);
+  const T = tfOf(candles);
+  if (atrPct < T.minAtrPct) return empty(`marché trop calme (ATR ${(atrPct * 100).toFixed(2)} % < ${(T.minAtrPct * 100).toFixed(1)} %)`);
+  if (atrPct > T.maxAtrPct) return empty(`marché trop agité (ATR ${(atrPct * 100).toFixed(2)} %)`);
+  if (P.hours === "actives" && !activeHour(last.t + barMsOf(candles))) return empty("heures creuses (nuit ou week-end) : pas d'entrée");
 
   const strength = Math.abs(fast - slow) / a; // écart des moyennes en nombre d'ATR = force de la tendance
   const window = candles.slice(-P.breakout - 1, -1);
@@ -196,14 +238,14 @@ export const PULLBACK = { ema: 20 };
 // Long sous la bande basse, short au-dessus de la bande haute ; objectif = la moyenne ; stop fixe à k ATR ;
 // sortie forcée après 2 × la période si rien ne s'est passé.
 // ---------------------------------------------------------------------------------------------------
-export interface RangeParams { bbPeriod: number; bbK: number; stopAtr: number; maxTrend: number }
+export interface RangeParams { bbPeriod: number; bbK: number; stopAtr: number; maxTrend: number; hours?: "actives" }
 export const RANGE_RULES = { minAtrPct: 0.0015, maxHoldMult: 2 };
 export function sanitizeRange(t: unknown): RangeParams | null {
   if (!t || typeof t !== "object") return null;
   const x = t as Partial<RangeParams>;
   const n = Number(x.bbPeriod), k = Number(x.bbK), s = Number(x.stopAtr), m = Number(x.maxTrend);
   if (![n, k, s, m].every(Number.isFinite)) return null;
-  return { bbPeriod: Math.round(Math.min(60, Math.max(8, n))), bbK: Math.min(3.5, Math.max(1, k)), stopAtr: Math.min(5, Math.max(0.5, s)), maxTrend: Math.min(3, Math.max(0.2, m)) };
+  return { bbPeriod: Math.round(Math.min(60, Math.max(8, n))), bbK: Math.min(3.5, Math.max(1, k)), stopAtr: Math.min(5, Math.max(0.5, s)), maxTrend: Math.min(3, Math.max(0.2, m)), ...(x.hours === "actives" ? { hours: "actives" as const } : {}) };
 }
 export const isRange = (p: unknown): p is RangeParams => !!p && typeof p === "object" && "bbPeriod" in (p as object);
 
@@ -222,7 +264,8 @@ export function rangeSignal(candles: Candle[], allowShort: boolean, P: RangePara
   const closes = candles.map((x) => x.c);
   const a = atr(candles, S.atrPeriod).at(-1)!;
   if (a / last.c < RANGE_RULES.minAtrPct) return empty(`marché trop calme même pour un range (ATR ${((a / last.c) * 100).toFixed(2)} %)`);
-  if (a / last.c > S.maxAtrPct) return empty(`marché trop agité (ATR ${((a / last.c) * 100).toFixed(2)} %)`);
+  if (a / last.c > tfOf(candles).maxAtrPct) return empty(`marché trop agité (ATR ${((a / last.c) * 100).toFixed(2)} %)`);
+  if (P.hours === "actives" && !activeHour(last.t + barMsOf(candles))) return empty("heures creuses (nuit ou week-end) : pas d'entrée");
   const strength = Math.abs(ema(closes, S.emaFast).at(-1)! - ema(closes, S.emaSlow).at(-1)!) / a;
   if (strength > P.maxTrend) return empty(`marché en tendance (force ${strength.toFixed(1)} > ${P.maxTrend}) : pas de range`);
   const b = bollinger(closes, P.bbPeriod, P.bbK);
@@ -290,7 +333,7 @@ export function trailStop(side: Side, current: number, best: number, atrNow: num
 export type ExitReason = "stop_loss" | "trailing_stop" | "time_stop";
 
 /** Sortie vérifiée à chaque tick (prix en direct) contre le stop calculé sur les bougies. */
-export function exitCheck(p: { side: Side; entry: number; price: number; stop: number; initialRisk: number; openedAt: number }, now: number): ExitReason | null {
+export function exitCheck(p: { side: Side; entry: number; price: number; stop: number; initialRisk: number; openedAt: number; interval?: Interval }, now: number): ExitReason | null {
   const hit = p.side === "long" ? p.price <= p.stop : p.price >= p.stop;
   if (hit) {
     const locked = p.side === "long" ? p.stop >= p.entry : p.stop <= p.entry;
@@ -298,7 +341,7 @@ export function exitCheck(p: { side: Side; entry: number; price: number; stop: n
   }
   const hours = (now - p.openedAt) / 3_600_000;
   const r = p.initialRisk > 0 ? ((p.side === "long" ? p.price - p.entry : p.entry - p.price) / p.initialRisk) : 0;
-  if (hours >= STRATEGY.maxHoldHours && r < STRATEGY.minProgressR) return "time_stop";
+  if (hours >= TF[p.interval ?? "1h"].maxHoldHours && r < STRATEGY.minProgressR) return "time_stop";
   return null;
 }
 
@@ -317,9 +360,9 @@ export function spotSizeUsd(equity: number, usdc: number, entry: number, stop: n
 /**
  * Levier maximum que permet un stop : le stop doit TOUJOURS être touché bien avant la liquidation.
  * Sur Jupiter, liquidation quand le collatéral restant < 0,2 % de la taille, soit une perte ≈ 1/levier − 0,2 % (− frais).
- * On garde une marge : distance du stop ≤ 70 % de la distance de liquidation.
+ * On garde une grosse marge : le prix de liquidation est au moins 3 fois plus loin que le stop.
  */
-export const LIQ = { maintenance: 0.002, fees: 0.002, safety: 0.7 };
+export const LIQ = { maintenance: 0.002, fees: 0.002, safety: 1 / 3 }; // liquidation au moins 3 fois plus loin que le stop
 export function stopSafeLeverage(dist: number): number {
   return 1 / (dist / LIQ.safety + LIQ.maintenance + LIQ.fees);
 }
@@ -404,10 +447,10 @@ export function sanitizePerpsPlan(raw: unknown): PerpsPlan | null {
   if (!raw || typeof raw !== "object") return null;
   const x = raw as Partial<PerpsPlan>;
   if (!PERPS_ASSETS.some((a) => a.asset === x.asset)) return null;
-  const range = x.family === "range" || isRange(x.params);
-  const params = range ? sanitizeRange(x.params) : sanitizeTrend(x.params);
+  const fam = isSetup(x.family) ? x.family : isRange(x.params) ? "range" : null;
+  const params = fam ? sanitizeSetup(fam, x.params) : sanitizeTrend(x.params);
   if (!params) return null;
-  return { asset: String(x.asset), ...(range ? { family: "range" as const } : {}), params, interval: asInterval(x.interval), source: String(x.source ?? "").slice(0, 120), score: Number(x.score) || 0, confidence: asConfidence(x.confidence) };
+  return { asset: String(x.asset), ...(fam ? { family: fam } : {}), params, interval: asInterval(x.interval), source: String(x.source ?? "").slice(0, 120), score: Number(x.score) || 0, confidence: asConfidence(x.confidence) };
 }
 
 /** Part de la taille normale accordée à un côté (1 = 100 %, 0 = côté désactivé). Le côté favorisé garde 100 %. */
@@ -428,7 +471,10 @@ export interface Pending { kind: "buy" | "sell" | "partial" | "open" | "close"; 
 export interface Position {
   key: string; symbol: string; side: Side;
   entry?: number; stop?: number; best?: number; initialRisk?: number; stopCandle?: number; openedAt?: number;
-  strategy?: SpotStrategy | "range"; posParams?: Params | RsiParams | RangeParams; posInterval?: Interval; source?: string;
+  strategy?: SpotStrategy | SetupFamily; posParams?: Params | RsiParams | SetupParams; posInterval?: Interval; source?: string;
+  target?: number;           // objectif de prix (familles « à objectif » : ORB, VWAP, funding)
+  liqAtEntry?: number;       // liquidité du token à l'entrée (spot) : sortie d'urgence si elle s'effondre
+  liqCheckedAt?: number;
   costUsd?: number;          // spot : USDC encore engagés (après une vente partielle, la moitié)
   collateralUsd?: number;    // perps : collatéral déposé à l'ouverture
   sizeUsd?: number;          // perps : taille de la position
@@ -470,6 +516,7 @@ export interface Memory {
   lastCandleBy?: Record<string, number>; // perps : dernière bougie analysée par marché
   lastUsdc?: number;         // USDC vus au tick précédent (stops on-chain, détection des dépôts et retraits)
   lastSol?: number;          // SOL vus au tick précédent (détection des dépôts et retraits)
+  solWarnDay?: string;       // dernière alerte « réserve de SOL basse »
 }
 
 /**
@@ -534,6 +581,41 @@ export function riskGate(mem: Memory, valueUsd: number, now: number, dailyLoss: 
   return null;
 }
 
+/** Réserve de SOL pour les frais de transaction : sans SOL, le bot ne peut même plus vendre ou fermer. */
+export const SOL_RESERVE = { warn: 0.01 };
+/** Alerte une fois par jour si la réserve de SOL est trop basse. Renvoie le texte de l'alerte, ou null. */
+export function solReserveAlert(mem: Memory, sol: number, now: number, who: string): string | null {
+  if (sol >= SOL_RESERVE.warn) return null;
+  const today = dayKey(now);
+  if (mem.solWarnDay === today) return null;
+  mem.solWarnDay = today;
+  return `${who} : réserve de SOL basse (${sol.toFixed(4)} SOL) — ajoute environ 0,02 SOL au portefeuille du bot, sinon il ne pourra plus payer les frais de ses transactions.`;
+}
+
+/**
+ * Vente : la marge de prix (slippage) s'adapte à la liquidité. Un token très liquide (impact faible) n'a besoin que
+ * de 0,5 % de marge ; on n'élargit jusqu'à 1,5 % que si la vente déplace vraiment le prix. Une marge plus serrée
+ * laisse moins de place aux sandwichs.
+ */
+export function exitSlippageBps(impactPct: number): number {
+  const impactBps = Math.max(0, impactPct) * 10_000;
+  return Math.round(Math.min(RULES.exitSlippageBps, Math.max(RULES.spotSlippageBps, RULES.spotSlippageBps + 3 * impactBps)));
+}
+/** Groupes de tokens qui bougent ensemble : 2 positions du même groupe = presque le même pari. */
+export const GROUPS: Record<string, string[]> = {
+  grandes: ["SOL", "WBTC", "WETH"],
+  memes: ["BONK", "WIF", "POPCAT", "PENGU", "TRUMP"],
+  defi: ["JUP", "JTO", "PYTH", "RAY", "ORCA", "RENDER", "HNT"],
+};
+export const groupOf = (symbol: string) => Object.entries(GROUPS).find(([, l]) => l.includes(symbol))?.[0] ?? symbol;
+/** Sortie d'urgence si la liquidité d'un token tombe sous 50 % de celle de l'entrée (vérifiée toutes les 10 min). */
+export const LIQUIDITY = { collapse: 0.5, checkMs: 10 * 60_000 };
+
+/** Seuil d'arrêt de mission : 30 % de la valeur de départ (au moins 1 $), au lieu de 5 $ fixes. */
+export const FLOOR = { pct: 0.3, minUsd: 1 };
+export const floorOf = (startValue: number | null | undefined, fallback: number) =>
+  Number(startValue) > 0 ? Math.max(FLOOR.minUsd, Number(startValue) * FLOOR.pct) : fallback;
+
 export function endDate(start: Date): Date {
   return new Date(start.getTime() + RULES.durationDays * 24 * 60 * 60 * 1000);
 }
@@ -556,14 +638,44 @@ export interface BacktestResult {
   avgWinPct: number; avgLossPct: number; days: number; log: { side: Side; entry: number; exit: number; pnlPct: number; reason: string; t: number }[];
 }
 
+/**
+ * Options communes des backtests, pour qu'ils rejouent EXACTEMENT ce que font les bots réels :
+ *  - partial : prise de bénéfices à +1,5 R (« half » = spot, la moitié vendue ; « breakeven » = perps, stop au prix d'entrée)
+ *  - pause après une perte (durée selon l'unité de temps), taille réduite quand le marché s'agite (volScale)
+ *  - blockedAt : filtre de marché (ex. BTC qui chute) qui bloque les entrées du spot à cet instant
+ */
+export interface SimOpts { allowShort: boolean; feePct: number; hourlyCost?: number; leverageCap?: number; risk?: number; bias?: number;
+  partial?: "half" | "breakeven" | null; blockedAt?: (t: number) => boolean; noCooldown?: boolean; noVolScale?: boolean }
+
+/** Résultat final d'une simulation (log des trades → statistiques). */
+export function summarize(log: BacktestResult["log"], equityCurve: { maxDd: number; equity: number }, first?: Candle, lastC?: Candle): BacktestResult {
+  const wins = log.filter((x) => x.pnlPct > 0), losses = log.filter((x) => x.pnlPct <= 0);
+  const gw = wins.reduce((s, x) => s + x.pnlPct, 0), gl = -losses.reduce((s, x) => s + x.pnlPct, 0);
+  return {
+    trades: log.length, winRate: log.length ? (wins.length / log.length) * 100 : 0,
+    profitFactor: gl > 0 ? gw / gl : gw > 0 ? Infinity : 0, returnPct: (equityCurve.equity - 1) * 100, maxDrawdownPct: equityCurve.maxDd * 100,
+    avgWinPct: wins.length ? gw / wins.length : 0, avgLossPct: losses.length ? -gl / losses.length : 0,
+    days: first && lastC ? (lastC.t - first.t) / 86_400_000 : 0, log,
+  };
+}
+
 /** feePct = coût par côté (frais + slippage), en fraction. hourlyCost = coût de portage par heure (perps). */
-export function backtest(candles: Candle[], o: { allowShort: boolean; feePct: number; hourlyCost?: number; leverageCap?: number; params?: Params; risk?: number; bias?: number }): BacktestResult {
+export function backtest(candles: Candle[], o: SimOpts & { params?: Params }): BacktestResult {
   const P = o.params ?? DEFAULT_PARAMS;
+  const T = tfOf(candles);
   let equity = 1, peak = 1, maxDd = 0;
   const log: BacktestResult["log"] = [];
-  let pos: { side: Side; entry: number; stop: number; best: number; risk: number; openedAt: number; size: number } | null = null;
+  let pos: { side: Side; entry: number; stop: number; best: number; risk: number; openedAt: number; size: number; partial: boolean } | null = null;
   let cooldownUntil = 0;
   const atrs = atr(candles, STRATEGY.atrPeriod);
+  const close = (exit: number, reason: string, t: number, frac = 1) => {
+    const move = perpsChange(pos!.side, pos!.entry, exit);
+    const hours = (t - pos!.openedAt) / 3_600_000;
+    const pnl = pos!.size * frac * (move - 2 * o.feePct - (o.hourlyCost ?? 0) * hours);
+    equity *= 1 + pnl;
+    log.push({ side: pos!.side, entry: pos!.entry, exit, pnlPct: pnl * 100, reason, t });
+    return pnl;
+  };
 
   for (let i = STRATEGY.emaSlow + 5; i < candles.length; i++) {
     const c = candles[i]!;
@@ -576,47 +688,38 @@ export function backtest(candles: Candle[], o: { allowShort: boolean; feePct: nu
         reason = (pos.side === "long" ? pos.stop >= pos.entry : pos.stop <= pos.entry) ? "trailing_stop" : "stop_loss";
       } else {
         const r = pos.risk > 0 ? (pos.side === "long" ? c.c - pos.entry : pos.entry - c.c) / pos.risk : 0;
-        if ((c.t - pos.openedAt) / 3_600_000 >= STRATEGY.maxHoldHours && r < STRATEGY.minProgressR) { exit = c.c; reason = "time_stop"; }
+        if ((c.t - pos.openedAt) / 3_600_000 >= T.maxHoldHours && r < STRATEGY.minProgressR) { exit = c.c; reason = "time_stop"; }
       }
       if (exit !== null) {
-        const move = perpsChange(pos.side, pos.entry, exit);
-        const hours = (c.t - pos.openedAt) / 3_600_000;
-        const pnl = pos.size * (move - 2 * o.feePct - (o.hourlyCost ?? 0) * hours);
-        equity *= 1 + pnl;
-        log.push({ side: pos.side, entry: pos.entry, exit, pnlPct: pnl * 100, reason, t: c.t });
-        if (pnl < 0) cooldownUntil = c.t + RISK.cooldownAfterLossMs;
+        const pnl = close(exit, reason, c.t);
+        if (pnl < 0 && !o.noCooldown) cooldownUntil = c.t + T.cooldownMs;
         pos = null;
       } else {
+        // prise de bénéfices à +1,5 R pendant la bougie, comme le bot réel
+        const target = pos.side === "long" ? pos.entry + PARTIAL.atR * pos.risk : pos.entry - PARTIAL.atR * pos.risk;
+        if (o.partial && !pos.partial && (pos.side === "long" ? c.h >= target : c.l <= target)) {
+          pos.partial = true;
+          if (o.partial === "half") { close(target, "prise_partielle", c.t, PARTIAL.fraction); pos.size *= 1 - PARTIAL.fraction; }
+          pos.stop = pos.side === "long" ? Math.max(pos.stop, pos.entry) : Math.min(pos.stop, pos.entry);
+        }
         pos.best = pos.side === "long" ? Math.max(pos.best, c.c) : Math.min(pos.best, c.c);
         pos.stop = trailStop(pos.side, pos.stop, pos.best, atrs[i]!, P);
       }
     }
-    if (!pos && c.t >= cooldownUntil) {
-      const sig = trendSignal(candles.slice(Math.max(0, i - 400), i + 1), o.allowShort, P);
-      const mult = sig.side ? sideMult(o.bias ?? 0, sig.side) : 0;
+    if (!pos && c.t >= cooldownUntil && !o.blockedAt?.(c.t)) {
+      const win = candles.slice(Math.max(0, i - 400), i + 1);
+      const sig = trendSignal(win, o.allowShort, P);
+      const mult = sig.side ? sideMult(o.bias ?? 0, sig.side) * (o.noVolScale ? 1 : volScale(win)) : 0;
       if (sig.side && mult > 0) {
         const dist = Math.abs(sig.price - sig.stop) / sig.price;
         const size = Math.min(((o.risk ?? RISK.perTrade) * mult) / dist, o.leverageCap ?? RISK.maxSpotFraction); // fraction du capital exposée
-        pos = { side: sig.side, entry: sig.price, stop: sig.stop, best: sig.price, risk: Math.abs(sig.price - sig.stop), openedAt: c.t, size };
+        pos = { side: sig.side, entry: sig.price, stop: sig.stop, best: sig.price, risk: Math.abs(sig.price - sig.stop), openedAt: c.t, size, partial: false };
       }
     }
     peak = Math.max(peak, equity);
     maxDd = Math.max(maxDd, 1 - equity / peak);
   }
-  const wins = log.filter((x) => x.pnlPct > 0), losses = log.filter((x) => x.pnlPct <= 0);
-  const gw = wins.reduce((s, x) => s + x.pnlPct, 0), gl = -losses.reduce((s, x) => s + x.pnlPct, 0);
-  const first = candles[STRATEGY.emaSlow + 5], lastC = candles.at(-1);
-  return {
-    trades: log.length,
-    winRate: log.length ? (wins.length / log.length) * 100 : 0,
-    profitFactor: gl > 0 ? gw / gl : gw > 0 ? Infinity : 0,
-    returnPct: (equity - 1) * 100,
-    maxDrawdownPct: maxDd * 100,
-    avgWinPct: wins.length ? gw / wins.length : 0,
-    avgLossPct: losses.length ? -gl / losses.length : 0,
-    days: first && lastC ? (lastC.t - first.t) / 86_400_000 : 0,
-    log,
-  };
+  return summarize(log, { equity, maxDd }, candles[STRATEGY.emaSlow + 5], candles.at(-1));
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -657,7 +760,7 @@ export function sanitizeTrend(t: unknown): Params | null {
   const x = t as Partial<Params>;
   const b = Number(x.breakout), a = Number(x.trailAtr), m = Number(x.minTrend);
   if (![b, a, m].every(Number.isFinite)) return null;
-  return { breakout: Math.round(Math.min(168, Math.max(6, b))), trailAtr: Math.min(6, Math.max(1, a)), minTrend: Math.min(4, Math.max(0, m)), ...(x.entry === "repli" ? { entry: "repli" as const } : {}) };
+  return { breakout: Math.round(Math.min(168, Math.max(6, b))), trailAtr: Math.min(6, Math.max(1, a)), minTrend: Math.min(4, Math.max(0, m)), ...(x.entry === "repli" ? { entry: "repli" as const } : {}), ...(x.hours === "actives" ? { hours: "actives" as const } : {}) };
 }
 
 const clamp = (v: unknown, lo: number, hi: number, def: number) => {
@@ -742,8 +845,8 @@ export function sanitizeSpotPlans(raw: unknown): SpotPlan[] {
   for (const x of raw as Partial<SpotPlan>[]) {
     if (out.length >= 3) break; // 3 plans maximum, comptés après avoir écarté les tokens inconnus
     if (!x || !SYMBOLS.has(String(x.symbol))) continue;
-    const family = x.family === "rsi" ? "rsi" : "tendance";
-    const params = family === "rsi" ? sanitizeRsi(x.params as Partial<RsiParams>) : sanitizeTrend(x.params);
+    const family: SpotFamily = x.family === "rsi" ? "rsi" : isSetup(x.family) && !PERPS_ONLY.includes(x.family) ? x.family as SpotFamily : "tendance";
+    const params = family === "rsi" ? sanitizeRsi(x.params as Partial<RsiParams>) : family === "tendance" ? sanitizeTrend(x.params) : sanitizeSetup(family, x.params);
     if (!params) continue;
     out.push({ symbol: String(x.symbol), family, params, interval: asInterval(x.interval), source: String(x.source ?? "").slice(0, 120), score: Number(x.score) || 0, confidence: asConfidence(x.confidence) });
   }
@@ -820,44 +923,46 @@ export function rsiExitSignal(candles: Candle[], p: RsiParams): { exit: boolean;
   return { exit: Number.isFinite(now) && now > (p.naive ? NAIVE_EXIT : p.exit), rsi: now };
 }
 
-/** Backtest de la stratégie RSI, frais inclus (feePct par côté). */
-export function backtestRsi(candles: Candle[], p: RsiParams, feePct: number): BacktestResult {
+/** Backtest de la stratégie RSI, frais inclus (feePct par côté), avec prise partielle, pause après perte et filtre BTC comme en réel. */
+export function backtestRsi(candles: Candle[], p: RsiParams, feePct: number, o: Pick<SimOpts, "partial" | "blockedAt" | "noCooldown"> = {}): BacktestResult {
   const closes = candles.map((x) => x.c);
   const r = rsiSeries(closes, p.rsiPeriod), s = smaSeries(closes, p.smaPeriod);
   const exitLevel = p.naive ? NAIVE_EXIT : p.exit;
-  let equity = 1, peak = 1, maxDd = 0;
+  const T = tfOf(candles);
+  let equity = 1, peak = 1, maxDd = 0, cooldownUntil = 0;
   const log: BacktestResult["log"] = [];
-  let pos: { entry: number; stop: number; size: number } | null = null;
+  let pos: { entry: number; stop: number; size: number; risk: number; partial: boolean } | null = null;
   const start = Math.max(p.smaPeriod, p.rsiPeriod) + 2;
+  const close = (exit: number, reason: string, t: number, frac = 1) => {
+    const pnl = pos!.size * frac * ((exit - pos!.entry) / pos!.entry - 2 * feePct);
+    equity *= 1 + pnl;
+    log.push({ side: "long", entry: pos!.entry, exit, pnlPct: pnl * 100, reason, t });
+    return pnl;
+  };
   for (let i = start; i < candles.length; i++) {
     const c = candles[i]!;
     if (pos) {
       let exit: number | null = null, reason = "";
-      if (c.l <= pos.stop) { exit = Math.min(c.o, pos.stop); reason = "stop_loss"; }
+      if (c.l <= pos.stop) { exit = Math.min(c.o, pos.stop); reason = pos.stop >= pos.entry ? "trailing_stop" : "stop_loss"; }
       else if (r[i]! > exitLevel) { exit = c.c; reason = "rsi_exit"; }
       if (exit !== null) {
-        const pnl = pos.size * ((exit - pos.entry) / pos.entry - 2 * feePct);
-        equity *= 1 + pnl;
-        log.push({ side: "long", entry: pos.entry, exit, pnlPct: pnl * 100, reason, t: c.t });
+        const pnl = close(exit, reason, c.t);
+        if (pnl < 0 && !o.noCooldown) cooldownUntil = c.t + T.cooldownMs;
         pos = null;
+      } else if (o.partial && !pos.partial && c.h >= pos.entry + PARTIAL.atR * pos.risk) {
+        pos.partial = true;
+        if (o.partial === "half") { close(pos.entry + PARTIAL.atR * pos.risk, "prise_partielle", c.t, PARTIAL.fraction); pos.size *= 1 - PARTIAL.fraction; }
+        pos.stop = Math.max(pos.stop, pos.entry);
       }
-    } else {
+    } else if (c.t >= cooldownUntil && !o.blockedAt?.(c.t)) {
       const hit = rsiEntryAt(candles, r, s, i, p);
       if (hit) {
         const dist = (c.c - hit.stop) / c.c;
-        pos = { entry: c.c, stop: hit.stop, size: Math.min((p.riskPct / 100) / dist, RISK.maxSpotFraction) };
+        pos = { entry: c.c, stop: hit.stop, size: Math.min((p.riskPct / 100) / dist, RISK.maxSpotFraction), risk: c.c - hit.stop, partial: false };
       }
     }
     peak = Math.max(peak, equity);
     maxDd = Math.max(maxDd, 1 - equity / peak);
   }
-  const wins = log.filter((x) => x.pnlPct > 0), losses = log.filter((x) => x.pnlPct <= 0);
-  const gw = wins.reduce((a, x) => a + x.pnlPct, 0), gl = -losses.reduce((a, x) => a + x.pnlPct, 0);
-  const first = candles[start], lastC = candles.at(-1);
-  return {
-    trades: log.length, winRate: log.length ? (wins.length / log.length) * 100 : 0,
-    profitFactor: gl > 0 ? gw / gl : gw > 0 ? Infinity : 0, returnPct: (equity - 1) * 100, maxDrawdownPct: maxDd * 100,
-    avgWinPct: wins.length ? gw / wins.length : 0, avgLossPct: losses.length ? -gl / losses.length : 0,
-    days: first && lastC ? (lastC.t - first.t) / 86_400_000 : 0, log,
-  };
+  return summarize(log, { equity, maxDd }, candles[start], candles.at(-1));
 }

@@ -9,11 +9,13 @@ import { candles as getCandles, hourlyCandles } from "./engine/candles.ts";
 import { env } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, sanitizeRange, LEVERAGES, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
+import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, tempo, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, type BotKind, type BotState } from "./store.ts";
 import { cleanWallet, CLEANER } from "./engine/cleaner.ts";
 import { analyze, LUCK, luckProbability, propose } from "./engine/math.ts";
+import { FAMILY_NAMES, isSetup, PERPS_ONLY, sanitizeSetup, type Extra, type SetupParams } from "./engine/setups.ts";
+import { fundingHistory } from "./engine/funding.ts";
 
 const SUPABASE_URL = env("SUPABASE_URL") ?? "";
 
@@ -220,10 +222,11 @@ async function backtestMarket(i: number) {
 
 // ------------------------------------------------------------------ agent chercheur
 type LiveStats = { trades: number; wins: number; pnlUsd: number; profitFactor: number; confirmed: boolean; failed: boolean; lastAt: string };
-type ResearchRow = { id: number; created_at: string; market: string; product: string; symbol?: string | null; interval?: string | null; kind: "spot" | "perps"; family: "tendance" | "rsi" | "range"; params: Candidate["params"]; train: Record<string, number>; test: Record<string, number>; score: number; verdict: string; why: string; live?: LiveStats | null; origin?: string | null; rationale?: string | null };
+type ResearchRow = { id: number; created_at: string; market: string; product: string; symbol?: string | null; interval?: string | null; kind: "spot" | "perps"; family: Candidate["family"]; params: Candidate["params"]; train: Record<string, number>; test: Record<string, number>; score: number; verdict: string; why: string; live?: LiveStats | null; origin?: string | null; rationale?: string | null; validated_at?: string | null };
 
 // ------------------------------------------------------------------ apprentissage croisé : le chercheur apprend des vrais trades des bots
-const LIVE = { minTrades: 4, failPF: 0.8, confirmPF: 1.2, boost: 1.3, days: 45 };
+// 6 trades réels minimum avant de confirmer ou d'abandonner une stratégie (4, c'était trop peu : la chance pouvait trancher)
+const LIVE = { minTrades: 6, failPF: 0.8, confirmPF: 1.2, boost: 1.3, days: 45 };
 /** Score effectif : une stratégie confirmée en réel passe devant, une stratégie qui déçoit en réel est écartée par son verdict. */
 const effScore = (r: ResearchRow) => r.score * (r.live?.confirmed ? LIVE.boost : r.live?.failed ? 0 : 1);
 // le réel prime sur le backtest : confirmées d'abord, puis non testées, déçues en dernier
@@ -267,9 +270,18 @@ const RESEARCH_MARKETS: Market[] = INTERVALS.flatMap((interval) => [
   ...PERPS_ASSETS.map((a) => ({ name: `Perps ${a.asset}${interval === "15m" ? " · 15 min" : ""}`, product: a.candles, symbol: a.asset,
     kind: "perps" as const, interval, feePct: 0.0012, hourlyCost: 0.00008, cap: PERPS_RULES.maxLeverage })),
 ]);
-/** Historique utilisé : 90 jours en 1 h, 30 jours en 15 min (2/3 pour régler, 1/3 jamais vu pour valider). */
-const HISTORY: Record<Interval, number> = { "1h": 2160, "15m": 2880 };
-const RESEARCH_BUDGET_MS = 1000; // sous la limite de 2 s de calcul des fonctions Supabase
+/** Historique utilisé : 90 jours en 1 h, 60 jours en 15 min (2/3 pour régler, 1/3 jamais vu pour valider : 20 jours en 15 min). */
+const HISTORY: Record<Interval, number> = { "1h": 2160, "15m": 5760 };
+/** Re-validation : chaque stratégie retenue est rejouée sur les données récentes au moins une fois par semaine. */
+const REVALIDATE = { everyDays: 7, maxAgeDays: 10, perCycle: 3 };
+
+/** Filtre BTC du bot spot rejoué dans le passé : à l'instant t, le BTC chutait-il ? (pour un backtest identique au réel) */
+function btcFilterSeries(btc: Candle[]): (t: number) => boolean {
+  const blocked = new Set<number>();
+  for (let i = 30; i < btc.length; i++) if (marketFilter(btc.slice(Math.max(0, i - 229), i + 1)).blocked) blocked.add(btc[i]!.t);
+  return (t: number) => blocked.has(Math.floor(t / 3_600_000) * 3_600_000 - 3_600_000);
+}
+const RESEARCH_BUDGET_MS = 1100; // calcul total d'un cycle (mathématicien + re-validation + chercheur), sous la limite de 2 s de Supabase
 const RESEARCH_MAX = 40;
 
 async function runResearch() {
@@ -283,6 +295,10 @@ async function runResearch() {
   try { candles = await getCandles(m.product, m.interval, HISTORY[m.interval]); }
   catch (e) { return { market: m.name, tested: 0, note: `historique indisponible : ${(e as Error).message}` }; }
   if (candles.length < HISTORY[m.interval] * 0.6) return { market: m.name, tested: 0, note: "historique insuffisant" };
+  // contexte identique au réel : filtre BTC (spot) et taux de financement (perps)
+  const ctx: { blockedAt?: (t: number) => boolean; extra?: Extra } = {};
+  if (m.kind === "spot") { const btc = await getCandles("BTC-USD", "1h", Math.ceil(HISTORY[m.interval] * (m.interval === "15m" ? 0.25 : 1)) + 240).catch(() => null); if (btc?.length) ctx.blockedAt = btcFilterSeries(btc); }
+  else { const f = await fundingHistory(m.symbol, candles[0]!.t - 86_400_000).catch(() => null); if (f && f.length > 100) ctx.extra = { funding: f }; }
   const [{ data: known }, { data: best }] = await Promise.all([
     db.from("research").select("key").eq("product", m.product).eq("kind", m.kind).eq("interval", m.interval).limit(20000),
     db.from("research").select("*").eq("product", m.product).eq("kind", m.kind).eq("interval", m.interval).order("score", { ascending: false }).limit(6),
@@ -293,30 +309,36 @@ async function runResearch() {
   const rnd = seeded(cycle * 7919 + Date.now() % 1000);
   const rows = [];
   const t0 = performance.now();
+  const left = () => RESEARCH_BUDGET_MS - (performance.now() - t0);
   // 1. le mathématicien analyse la partie entraînement (jamais la période de validation) et propose ses stratégies en premier
   const train = candles.slice(0, Math.floor(candles.length * 2 / 3));
   const insight = analyze(train);
   const liveInsight = analyze(candles.slice(-300)); // régime EN DIRECT (300 dernières bougies) : oriente le pilote
   let proposed = 0;
   for (const pr of propose(train, m, insight, { aggressive: A.aggressive, fast })) {
+    if (left() < RESEARCH_BUDGET_MS * 0.5) break; // le mathématicien prend au plus la moitié du temps de calcul
     const key = candidateKey(pr.candidate);
     if (seen.has(key)) continue;
     seen.add(key); proposed++;
-    const e = evaluate(pr.candidate, candles, m);
+    const e = evaluate(pr.candidate, candles, m, ctx);
     rows.push({ key, market: pr.candidate.market, product: pr.candidate.product, symbol: pr.candidate.symbol, interval: pr.candidate.interval, kind: pr.candidate.kind, family: pr.candidate.family, params: pr.candidate.params, train: e.train, test: e.test, score: e.score, verdict: e.verdict, why: e.why, origin: "mathématicien", rationale: pr.rationale });
   }
   await db.from("math_insights").upsert({ key: `${m.product}|${m.kind}|${m.interval}`, updated_at: new Date().toISOString(), market: m.name, kind: m.kind, interval: m.interval, regime: insight.regime, hurst: insight.hurst, ac1: insight.ac1, half_life: insight.halfLife, significant: insight.significant, vr: insight.vr, note: insight.note, proposed,
     live_regime: liveInsight.regime, live_note: liveInsight.note }, { onConflict: "key" });
   // 2. le chercheur : moitié améliorations des meilleures (y compris celles du mathématicien), moitié idées nouvelles
   let tries = 0;
-  while (rows.length < RESEARCH_MAX && performance.now() - t0 < RESEARCH_BUDGET_MS && tries < RESEARCH_MAX * 5) {
+  // RE-VALIDATION (au lieu d'expirer au bout de 14 jours) : les stratégies retenues de ce marché sont rejouées chaque semaine sur
+  // l'historique le plus récent ; celles qui ne tiennent plus sont « périmées », les autres (dont les confirmées en réel) restent.
+  // Elle passe avant les idées nouvelles : garder les bonnes stratégies à jour compte plus.
+  const revalidated = await revalidate(m, candles, ctx, () => left() > RESEARCH_BUDGET_MS * 0.25).catch(() => [] as string[]);
+  while (rows.length < RESEARCH_MAX && left() > 0 && tries < RESEARCH_MAX * 5) {
     tries++;
     // moitié améliorations des meilleures, moitié idées nouvelles
-    const c = parents.length && rnd() < 0.5 ? mutate(rnd, parents[Math.floor(rnd() * parents.length)]!, fast) : randomCandidate(rnd, m, fast);
+    const c = parents.length && rnd() < 0.5 ? mutate(rnd, parents[Math.floor(rnd() * parents.length)]!, fast) : randomCandidate(rnd, m, fast, !!ctx.extra?.funding);
     const key = candidateKey(c);
     if (seen.has(key)) continue;
     seen.add(key);
-    const e = evaluate(c, candles, m);
+    const e = evaluate(c, candles, m, ctx);
     rows.push({ key, market: c.market, product: c.product, symbol: c.symbol, interval: c.interval, kind: c.kind, family: c.family, params: c.params, train: e.train, test: e.test, score: e.score, verdict: e.verdict, why: e.why, origin: "chercheur", rationale: null });
   }
   // chance ou talent : probabilité que le résultat sur la période jamais vue soit dû au hasard
@@ -330,19 +352,39 @@ async function runResearch() {
   const learned = await learnFromBots().catch(() => [] as string[]);
   const pilot = await autopilot().catch((e) => `pilote : ${(e as Error).message}`);
   const math = rows.filter((r) => r.origin === "mathématicien");
-  return { market: m.name, tested: rows.length, promising: rows.filter((r) => r.verdict === "prometteuse").length, math: { regime: insight.regime, proposed: math.length, promising: math.filter((r) => r.verdict === "prometteuse").length }, learned, pilot };
+  return { market: m.name, tested: rows.length, revalidated, promising: rows.filter((r) => r.verdict === "prometteuse").length, math: { regime: insight.regime, proposed: math.length, promising: math.filter((r) => r.verdict === "prometteuse").length }, learned, pilot };
+}
+
+async function revalidate(m: Market, candles: Candle[], ctx: { blockedAt?: (t: number) => boolean; extra?: Extra }, more: () => boolean): Promise<string[]> {
+  const before = new Date(Date.now() - REVALIDATE.everyDays * 86_400_000).toISOString();
+  const { data } = await db.from("research").select("*").eq("product", m.product).eq("kind", m.kind).eq("interval", m.interval)
+    .neq("verdict", "rejetée").or(`validated_at.is.null,validated_at.lt.${before}`).order("score", { ascending: false }).limit(40);
+  const rows = ((data ?? []) as ResearchRow[]).filter((r) => r.verdict === "prometteuse" || r.verdict === "à surveiller").filter((r) => (r.validated_at ?? r.created_at) < before).slice(0, REVALIDATE.perCycle);
+  const out: string[] = [];
+  for (const r of rows) {
+    if (!more()) break;
+    const c: Candidate = { market: r.market, product: r.product, symbol: m.symbol, kind: r.kind, interval: m.interval, family: r.family, params: r.params };
+    const e = evaluate(c, candles, m, ctx);
+    const keep = e.verdict !== "rejetée" || (r.live?.confirmed && e.test.profitFactor >= 1);
+    const patch: Record<string, unknown> = { validated_at: new Date().toISOString(), train: e.train, test: { ...e.test, ...(r.test.luck != null ? { luck: r.test.luck } : {}) }, score: e.score };
+    if (keep) patch.verdict = e.verdict === "rejetée" ? r.verdict : e.verdict;
+    else { patch.verdict = "périmée"; patch.why = `ne tient plus sur les données récentes (${e.why})`; out.push(`#${r.id} ${r.market} périmée`); }
+    await db.from("research").update(patch).eq("id", r.id);
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------ pilote automatique
 /** Critères stricts : seule une stratégie solide sur la période jamais vue peut piloter un bot. */
-const QUALIFY = { minTestTrades: 5, minTestPF: 1.3, maxTestDD: 10, maxAgeDays: 14 };
+const QUALIFY = { minTestTrades: 5, minTestPF: 1.3, maxTestDD: 10, maxAgeDays: REVALIDATE.maxAgeDays };
 /** Mode agressif des agents : critères assouplis (« à surveiller » accepté), plus de stratégies retenues mais moins sûres. */
-const QUALIFY_AGGR = { minTestTrades: 4, minTestPF: 1.15, maxTestDD: 20, minTrainPF: 1.0, maxAgeDays: 14 };
+const QUALIFY_AGGR = { minTestTrades: 4, minTestPF: 1.15, maxTestDD: 20, minTrainPF: 1.0, maxAgeDays: REVALIDATE.maxAgeDays };
 interface AgentSettings { aggressive: boolean; nerve: number }
 const agentSettings = (spotConfig: unknown): AgentSettings => { const c = loadConfig(spotConfig); return { aggressive: c.researchAggressive, nerve: c.nerve }; };
 function qualifies(r: ResearchRow, a: AgentSettings = { aggressive: false, nerve: 1 }): boolean {
-  const young = Date.now() - Date.parse(r.created_at) < QUALIFY.maxAgeDays * 86_400_000;
-  if (!young || r.verdict === "déçue en réel" || r.live?.failed) return false;
+  // « fraîche » = créée ou re-validée sur des données récentes depuis moins de 10 jours (re-validation chaque semaine)
+  const young = Date.now() - Date.parse(r.validated_at ?? r.created_at) < QUALIFY.maxAgeDays * 86_400_000;
+  if (!young || r.verdict === "déçue en réel" || r.verdict === "périmée" || r.live?.failed) return false;
   const luck = r.test.luck;
   if (luck != null && luck > (a.aggressive ? LUCK.rejectAggressive : LUCK.reject)) return false; // probablement de la chance
   const t = tempo(r);
@@ -360,7 +402,8 @@ const REGIME_FIT = { match: 1.4, mismatch: 0.6 };
 function regimeFit(r: ResearchRow, regimes: Map<string, string>) {
   const reg = regimes.get(`${r.product}|${r.kind}|${r.interval}`);
   if (!reg || reg === "hasard") return 1;
-  const meanRev = r.family === "range" || r.family === "rsi";
+  const meanRev = r.family === "range" || r.family === "rsi" || r.family === "vwap";
+  if (r.family === "orb" || r.family === "squeeze" || r.family === "volume" || r.family === "funding") return reg === "tendance" ? 1.2 : 1; // cassures : utiles partout
   return (reg === "tendance") === !meanRev ? REGIME_FIT.match : REGIME_FIT.mismatch;
 }
 async function liveRegimes(): Promise<Map<string, string>> {
@@ -373,9 +416,11 @@ const pilotRank = (a: AgentSettings, regimes = new Map<string, string>()) => (x:
 };
 const symbolOfRow = (r: ResearchRow) => r.symbol ?? r.market.replace(/^(Spot|Perps) /, "").split(" ")[0]!;
 const confidenceOf = (r: ResearchRow) => (r.live?.confirmed ? "confirmée" as const : "nouvelle" as const);
-const toSpotPlan = (r: ResearchRow): SpotPlan => ({ symbol: symbolOfRow(r), family: r.family === "rsi" ? "rsi" : "tendance", params: r.family === "rsi" ? sanitizeRsi({ ...(r.params as RsiParams), riskPct: 1, naive: false }) : sanitizeTrend(r.params)!,
+const spotFamily = (f: ResearchRow["family"]): SpotPlan["family"] => (f === "rsi" ? "rsi" : isSetup(f) && !PERPS_ONLY.includes(f) ? f as SpotPlan["family"] : "tendance");
+const toSpotPlan = (r: ResearchRow): SpotPlan => ({ symbol: symbolOfRow(r), family: spotFamily(r.family),
+  params: r.family === "rsi" ? sanitizeRsi({ ...(r.params as RsiParams), riskPct: 1, naive: false }) : isSetup(r.family) ? sanitizeSetup(r.family, r.params)! : sanitizeTrend(r.params)!,
   interval: r.interval === "15m" ? "15m" : "1h", source: `chercheur #${r.id} · ${r.market}`, score: effScore(r), confidence: confidenceOf(r) });
-const toPerpsPlan = (r: ResearchRow): PerpsPlan => ({ asset: symbolOfRow(r), ...(r.family === "range" ? { family: "range" as const, params: sanitizeRange(r.params)! } : { params: sanitizeTrend(r.params) as Params }), interval: r.interval === "15m" ? "15m" : "1h", source: `chercheur #${r.id} · ${r.market}`, score: effScore(r), confidence: confidenceOf(r) });
+const toPerpsPlan = (r: ResearchRow): PerpsPlan => ({ asset: symbolOfRow(r), ...(isSetup(r.family) ? { family: r.family, params: sanitizeSetup(r.family, r.params as SetupParams)! } : { params: sanitizeTrend(r.params) as Params }), interval: r.interval === "15m" ? "15m" : "1h", source: `chercheur #${r.id} · ${r.market}`, score: effScore(r), confidence: confidenceOf(r) });
 
 /** Choisit tout seul les tokens et stratégies des bots dont le pilote est activé. Renvoie un résumé des changements. */
 async function autopilot(fresh = false): Promise<string> { // fresh : refaire le choix de zéro (après un changement de réglages)
@@ -396,7 +441,7 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
     const before = sig(spotCfg.plans), after = sig(plans);
     if (before !== after) {
       await setBot("spot", { config: { ...spotCfg, plans } });
-      changes.push(plans.length ? `spot → ${plans.map((p) => `${p.symbol} (${p.family === "rsi" ? "RSI" : "tendance"}, ${p.interval === "15m" ? "15 min" : "1 h"})`).join(", ")}` : "spot → aucune stratégie validée, en attente");
+      changes.push(plans.length ? `spot → ${plans.map((p) => `${p.symbol} (${FAMILY_NAMES[p.family] ?? p.family}, ${p.interval === "15m" ? "15 min" : "1 h"})`).join(", ")}` : "spot → aucune stratégie validée, en attente");
     }
   }
   if (perpsCfg.autopilot) {
@@ -407,7 +452,7 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
     const sig = (l: PerpsPlan[]) => l.map((p) => `${p.source}:${p.confidence}`).join("|");
     if (sig(plans) !== sig(perpsCfg.plans)) {
       await setBot("perps", { config: { ...perpsCfg, plans, plan: plans[0] ?? null } });
-      changes.push(plans.length ? `perps → ${plans.map((p) => `${p.asset} (${p.interval === "15m" ? "15 min" : "1 h"})`).join(", ")}, agressivité ${AGGR_LEVELS[effectiveAggr(perpsCfg)]!.name.toLowerCase()}` : "perps → aucune stratégie validée, en attente");
+      changes.push(plans.length ? `perps → ${plans.map((p) => `${p.asset} (${FAMILY_NAMES[p.family ?? "tendance"]}, ${p.interval === "15m" ? "15 min" : "1 h"})`).join(", ")}, agressivité ${AGGR_LEVELS[effectiveAggr(perpsCfg)]!.name.toLowerCase()}` : "perps → aucune stratégie validée, en attente");
     }
   }
   if (changes.length) await notify(`Pilote automatique : ${changes.join(" ; ")}`);

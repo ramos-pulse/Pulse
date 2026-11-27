@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, type Market } from "../supabase/functions/pulse/engine/research.ts";
+import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, type Market, FAMILIES } from "../supabase/functions/pulse/engine/research.ts";
 import type { Candle } from "../supabase/functions/pulse/engine/strategy.ts";
 
 const spot: Market = { name: "Spot SOL", product: "SOL-USD", symbol: "SOL", kind: "spot", interval: "1h", feePct: 0.003, hourlyCost: 0, cap: 0.95 };
@@ -11,16 +11,17 @@ function market(seed: number, drift: number): Candle[] {
     c.push({ t: i * 3_600_000, o: p, h: Math.max(p, n) * 1.003, l: Math.min(p, n) * 0.997, c: n }); p = n; }
   return c;
 }
-test("candidats valides : RSI seulement en spot, range seulement en perps", () => {
+test("candidats valides : RSI seulement en spot, range et funding seulement en perps", () => {
   const rnd = seeded(1);
-  const fam = new Set<string>();
-  for (let i = 0; i < 200; i++) {
-    const c = randomCandidate(rnd, perps); assert.ok(c.family === "tendance" || c.family === "range"); fam.add(c.family);
-    const s = randomCandidate(rnd, spot);
-    assert.ok(s.family === "tendance" || s.family === "rsi");
+  const fam = new Set<string>(), sfam = new Set<string>();
+  for (let i = 0; i < 400; i++) {
+    const c = randomCandidate(rnd, perps, false, true); assert.ok(FAMILIES.perps.includes(c.family)); fam.add(c.family);
+    const s = randomCandidate(rnd, spot); sfam.add(s.family);
+    assert.ok(FAMILIES.spot.includes(s.family) && s.family !== "range" && s.family !== "funding");
     if (s.family === "rsi") { const p = s.params as { entry: number; exit: number }; assert.ok(p.exit > p.entry); }
   }
-  assert.ok(fam.has("range") && fam.has("tendance"), "le perps explore les deux familles");
+  assert.ok(FAMILIES.perps.every((f) => fam.has(f)), `le perps explore toutes ses familles : ${[...fam]}`);
+  assert.ok(FAMILIES.spot.every((f) => sfam.has(f)), `le spot explore toutes ses familles : ${[...sfam]}`);
 });
 test("mutation : un seul réglage change, signature différente", () => {
   const rnd = seeded(5);
