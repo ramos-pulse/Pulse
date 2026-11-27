@@ -372,6 +372,7 @@ function missionCard(kind, title) {
   </div>
   <div class="card" style="padding:10px 16px"><details data-d="wallet-${kind}" style="margin:0"><summary>▸ ${kind === "spot" ? "PORTEFEUILLE DU ROBOT" : "PORTEFEUILLE PERPS"}</summary>
     ${wallet ? `<div class="addr">${esc(wallet)}</div><button class="btn sm" data-copy="${esc(wallet)}">Copier l'adresse</button>
+      <a class="btn sm" style="margin-top:8px;display:block;text-align:center;text-decoration:none" href="https://solscan.io/account/${encodeURIComponent(wallet)}#portfolio" target="_blank" rel="noopener">Voir ses jetons sur Solscan</a>
       <button class="btn sm" style="margin-top:8px" data-rebase="${kind}">Remettre le gain à zéro</button>
       <p class="sub" style="margin:12px 0 0">Dépose des USDC (Solana) + environ 0,03 SOL pour les frais. ${kind === "perps" ? "Minimum 10 $ d'USDC pour ouvrir une position." : ""}</p>`
       : `<p class="sub" style="margin:8px 0 0">Secret ${kind === "spot" ? "BOT_WALLET_PRIVATE_KEY" : "PERPS_WALLET_PRIVATE_KEY"} absent dans Supabase (Edge Functions → Secrets).</p>`}
