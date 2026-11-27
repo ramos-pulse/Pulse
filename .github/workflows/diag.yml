@@ -30,6 +30,7 @@ jobs:
           q "select family, interval, count(*) n, count(*) filter (where verdict in ('prometteuse','à surveiller')) ok, count(*) filter (where (test->>'profitFactor')::numeric>=1 and (train->>'profitFactor')::numeric>=1 and (test->>'trades')::int>=3) both_pos, round(avg((test->>'trades')::numeric),1) t_tr, round(max(score)::numeric,2) best from research where kind='perps' and created_at > now() - interval '10 days' group by 1,2 order by 1,2"
           q "select id, market, family, interval, verdict, round(score::numeric,2) sc, test->>'trades' tt, round((test->>'profitFactor')::numeric,2) tpf, round((test->>'returnPct')::numeric,1) tret, train->>'trades' trt, round((train->>'profitFactor')::numeric,2) trpf, left(params::text,120) from research where kind='perps' and created_at > now() - interval '10 days' and (test->>'profitFactor')::numeric>=1 and (train->>'profitFactor')::numeric>=1 and (test->>'trades')::int>=3 order by (test->>'trades')::int desc limit 25"
           q "select id, market, verdict, round(score::numeric,2) sc, test->>'trades' tt, round((test->>'profitFactor')::numeric,2) tpf, round((test->>'returnPct')::numeric,1) tret, train->>'trades' trt, round((train->>'profitFactor')::numeric,2) trpf, created_at from research where id in (1670,1301,1696,3184,1298,5201)"
+          q "select value::text, updated_at from app_kv where key='hl_markets'"
           q "select now()"
           q "select max(created_at) as derniere, count(*) filter (where created_at > now() - interval '3 hours') as en_3h, count(*) as total from research"
           q "select created, status_code, timed_out, left(error_msg,150), left(regexp_replace(content::text, '\s+', ' ', 'g'), 1500) from net._http_response where content::text like '%research%' or content::text like '%watchdog%' or status_code <> 200 or timed_out order by created desc limit 8"
@@ -54,8 +55,6 @@ jobs:
           echo "=== HL spot ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"spotClearinghouseState\",\"user\":\"$A\"}" | head -c 400; echo
           echo "=== HL agents ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"extraAgents\",\"user\":\"$A\"}" | head -c 600; echo
           echo "=== HL role ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"userRole\",\"user\":\"$A\"}" | head -c 300; echo
-          echo "=== VENUE ==="
-          supabase secrets set PERPS_VENUE=hyperliquid --project-ref "$PROJECT_REF" >/dev/null 2>&1 && echo "PERPS_VENUE réglé sur hyperliquid"
           echo "=== HLCHECK ==="
           supabase functions deploy hlcheck --project-ref "$PROJECT_REF" --no-verify-jwt >/dev/null 2>&1 && sleep 5
           curl -s "https://$PROJECT_REF.supabase.co/functions/v1/hlcheck"; echo
