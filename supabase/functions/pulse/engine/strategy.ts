@@ -1000,4 +1000,4 @@ export function researchSide(cycle: number, perpsPct: number): "spot" | "perps" 
 }
 
 /** Mode « extra souple » : chaque trade ne prend que la moitié du risque normal (les stratégies sont moins prouvées). */
-export const EXTRA_SOFT = { riskMult: 0.5, minTestTrades: 3, minTestPF: 1.0, maxTestDD: 25 };
+export const EXTRA_SOFT = { riskMult: 0.5, minTestTrades: 3, minTestPF: 1.0, maxTestDD: 25, minTrainPF: 1.0 }; // minTrainPF : une stratégie qui perd sur l'entraînement n'a gagné sur la période jamais vue que par chance
