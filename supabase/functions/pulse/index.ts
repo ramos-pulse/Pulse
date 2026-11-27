@@ -182,7 +182,8 @@ async function state() {
     out[k] = {
       ...b, price_history: undefined, lock_until: undefined, config: k === "spot" ? loadConfig(b.config) : loadPerpsConfig(b.config),
       positions: Object.values(migratePositions(mem, b)).map((p) => ({ key: p.key, symbol: p.symbol, side: p.side, entry: p.entry, stop: p.stop, best: p.best, live: p.live, openedAt: p.openedAt, strategy: p.strategy,
-        source: p.source, partialDone: !!p.partialDone, interval: p.posInterval, target: p.target, why: p.why })),
+        source: p.source, partialDone: !!p.partialDone, interval: p.posInterval, target: p.target, why: p.why,
+        costUsd: (p as { costUsd?: number }).costUsd, collateralUsd: (p as { collateralUsd?: number }).collateralUsd, sizeUsd: (p as { sizeUsd?: number }).sizeUsd, lastValueUsd: (p as { lastValueUsd?: number }).lastValueUsd })),
       vault: Math.round((mem.vault ?? 0) * 100) / 100,
       curve: downsample(mem.curve ?? [], 120),
       memory: { strategy: mem.strategy, stop: mem.stop, best: mem.best, signal: mem.signal, mindset: mem.mindset, live: mem.live, asset: mem.asset, side: mem.side, openedAt: mem.openedAt, costUsd: mem.costUsd, pending: mem.pending ? { kind: mem.pending.kind, at: mem.pending.at } : null, errStreak: mem.errStreak ?? 0, cooldownUntil: mem.cooldownUntil ?? null },
