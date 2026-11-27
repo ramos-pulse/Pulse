@@ -142,9 +142,19 @@ export interface Fresh { program?: "2022"; mint: string; symbol: string; decimal
 
 /** Seuils assouplis du mode « extra souple » (les contrôles anti-arnaque restent les mêmes). */
 export const FRESH_SOFT = { minLiquidity: 25_000, minVolume1h: 10_000, minSells1h: 10, maxTopHolders: 40, minChange1h: 0, maxChange1h: 100 };
+/** Noms de marques et de grands tokens : un « nouveau » token qui les porte est presque toujours une imitation. */
+const FAMOUS = new Set(["metamask", "phantom", "solflare", "binance", "bnb", "coinbase", "kraken", "okx", "bybit", "jupiter", "jup", "raydium", "orca", "solana", "sol", "wsol",
+  "bitcoin", "btc", "wbtc", "ethereum", "eth", "weth", "usdc", "usdt", "tether", "pyusd", "usd", "xrp", "ripple", "doge", "dogecoin", "bonk", "wif", "pump", "pumpfun",
+  "trump", "melania", "elon", "tesla", "spacex", "x", "openai", "chatgpt", "anthropic", "claude", "google", "apple", "nvidia", "microsoft", "amazon", "blackrock", "paypal", "visa"]);
+export function impersonates(symbol: string, name = ""): boolean {
+  const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return FAMOUS.has(norm(symbol)) || FAMOUS.has(norm(name)) || /^(official|real|the)?(metamask|phantom|binance|coinbase|jupiter|solana|bitcoin|ethereum|tether|usdc|trump)/.test(norm(name));
+}
+
 export function freshRefusal(f: Fresh, j: JupToken | undefined, soft = false): string | null {
   const F = soft ? { ...FRESH, ...FRESH_SOFT } : FRESH;
   if (!j) return "inconnu de Jupiter";
+  if (impersonates(j.symbol ?? f.symbol, j.name ?? "")) return "imite le nom d'une marque ou d'un grand token";
   if (j.tokenProgram && j.tokenProgram !== TOKEN_PROGRAM && j.tokenProgram !== TOKEN_2022) return "programme de token inconnu";
   if (j.audit?.mintAuthorityDisabled !== true) return "émission de nouveaux jetons possible";
   if (j.audit?.freezeAuthorityDisabled !== true) return "gel des comptes possible (piège classique)";

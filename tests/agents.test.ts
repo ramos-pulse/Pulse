@@ -52,3 +52,12 @@ test("mode extra souple : nouveaux tokens moins exigeants, mais les contrôles a
   assert.match(freshRefusal(f, safe({ audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: false, topHoldersPercentage: 5 } }), true)!, /gel/);
   assert.match(freshRefusal({ ...f, sells1h: 4 }, safe(), true)!, /vente/);
 });
+
+test("nouveaux tokens : les imitations de marques sont refusées", async () => {
+  const { impersonates } = await import("../supabase/functions/pulse/engine/agents.ts");
+  assert.equal(impersonates("MetaMask"), true);
+  assert.equal(impersonates("USDC"), true);
+  assert.equal(impersonates("XYZ", "Official Trump Coin"), true);
+  assert.equal(impersonates("ZOTH", "Zoth"), false);
+  assert.equal(impersonates("NINE"), false);
+});

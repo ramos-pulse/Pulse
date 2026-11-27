@@ -12,7 +12,7 @@ import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spo
 import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, type TokenInfo, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, simulate, tempo, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, pushHook, type BotKind, type BotState } from "./store.ts";
-import { arbScan, bestPools, FRESH, freshCandidates, freshRefusal, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
+import { arbScan, bestPools, FRESH, freshCandidates, freshRefusal, impersonates, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
 import { newVapid, sendPush, type Subscription, type Vapid } from "./engine/webpush.ts";
 import { cleanWallet, CLEANER } from "./engine/cleaner.ts";
 import { analyze, LUCK, luckProbability, propose } from "./engine/math.ts";
@@ -702,11 +702,14 @@ async function runSelector(force = false): Promise<string> {
 
 /** NOUVEAUX TOKENS : repère les lancements récents qui passent les garde-fous (achat seulement si l'agent est activé). */
 async function runFreshScout(): Promise<string> {
-  const { data: cur } = await db.from("token_universe").select("mint, kind, active, added_at").limit(1000);
+  const { data: cur } = await db.from("token_universe").select("mint, kind, active, added_at, symbol").limit(1000);
   const known = new Set<string>([...TOKENS.map((t) => t.mint), ...((cur ?? []) as UniverseRow[]).map((r) => r.mint)]);
   // les « nouveaux » de plus de 24 h ne sont plus des nouveaux
   const old = new Date(Date.now() - FRESH.maxAgeH * 3_600_000).toISOString();
   await db.from("token_universe").update({ active: false, removed_at: new Date().toISOString(), why: "plus de 24 h" }).eq("kind", "nouveau").eq("active", true).lt("added_at", old);
+  // un token déjà retenu qui imite une marque est retiré (filtre ajouté après coup)
+  for (const r of ((cur ?? []) as (UniverseRow & { symbol?: string })[]).filter((x) => x.kind === "nouveau" && x.active && impersonates(x.symbol ?? "")))
+    await db.from("token_universe").update({ active: false, removed_at: new Date().toISOString(), why: "imite le nom d'une marque ou d'un grand token" }).eq("mint", r.mint);
   const soft = loadConfig((await readBots()).spot.config).extraSoft;
   const { list, info } = await freshCandidates(known, soft);
   const ok = [], refusals: Record<string, number> = {};
