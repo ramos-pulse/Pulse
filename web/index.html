@@ -672,7 +672,7 @@ function renderAg() {
   const keepDraft = $("#chatIn")?.value || "";
   const sc = S?.bots.spot.config || {}, pc = S?.bots.perps.config || {};
   const planLine = p => `<div class="row"><div data-tip="${esc(explain({...p, kind: p.asset ? "perps" : "spot", family: p.family || "tendance"}))}"><div class="l1">${esc(p.symbol || p.asset)} <span class="mut" style="font-weight:400">${FAM[p.family || "tendance"] || ""} · ${p.interval === "15m" ? "15 min" : "1 h"}</span></div><div class="l2">${esc(p.source)}</div></div>
-    <div class="r" data-tip="${TIPS.conf}"><span class="pill ${p.confidence === "confirmée" ? "ok" : "mid"}">${p.confidence === "confirmée" ? "confirmée · 100 %" : "nouvelle · 75 %"}</span></div></div>`;
+    <div class="r" data-tip="${TIPS.conf}"><span class="pill ${p.confidence === "confirmée" ? "ok" : "mid"}">${(() => { const soft = S.bots.spot.config?.extraSoft, base = p.confidence === "confirmée" ? 100 : 75; return `${p.confidence === "confirmée" ? "confirmée" : "nouvelle"} · ${soft ? nf(base / 2, base % 2 ? 1 : 0) : base} %`; })()}</span></div></div>`;
   const manual = (!sc.autopilot && sc.plans?.length) || (!pc.autopilot && pc.plans?.length) || sc.source || pc.source;
   const A = {...(AG?.settings || {aggressive: false, nerve: 1, levels: ["Calme", "Normal", "Nerveux", "Très nerveux"]}), ...(window.__agDraft || {})}; // brouillon non enregistré conservé
   const nerveTxt = n => ["Calme : seulement des stratégies lentes et posées (bougies 1 h, cassures longues). Moins de trades.",
