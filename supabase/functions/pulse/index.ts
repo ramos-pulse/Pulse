@@ -400,7 +400,7 @@ function qualifies(r: ResearchRow, a: AgentSettings = { aggressive: false, nerve
   if (a.soft) { // mode extra souple : presque tout ce qui est positif sur la période jamais vue (risque divisé par 2 dans les bots)
     const t0 = tempo(r); if (a.nerve === 0 && t0 > 1) return false; if (a.nerve === 3 && t0 < 2) return false;
     return (r.test.trades ?? 0) >= EXTRA_SOFT.minTestTrades && (r.test.profitFactor ?? 0) >= EXTRA_SOFT.minTestPF && (r.test.maxDrawdownPct ?? 99) <= EXTRA_SOFT.maxTestDD
-      && (r.train.profitFactor ?? 0) >= EXTRA_SOFT.minTrainPF; // jamais une stratégie qui perd déjà sur l'entraînement (ex. ORCA #4841 le 27/11)
+      && (r.kind === "spot" || (r.train.profitFactor ?? 0) >= EXTRA_SOFT.minTrainPF); // perps : jamais une stratégie qui perd sur l'entraînement ; spot : contrôle retiré à la demande de Ramos (27/11)
   }
   if (luck != null && luck > (a.aggressive ? LUCK.rejectAggressive : LUCK.reject)) return false; // probablement de la chance
   const t = tempo(r);
@@ -460,7 +460,7 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
   if (A.soft) { // extra souple : si un bot n'a rien, il prend quand même la meilleure stratégie positive sur la période jamais vue
     for (const kind of ["spot", "perps"] as const) {
       if (!AK[kind].soft || good.some((r) => r.kind === kind)) continue;
-      const fallback = rows.filter((r) => r.kind === kind && r.verdict !== "déçue en réel" && r.verdict !== "périmée" && !r.live?.failed && (r.test.returnPct ?? 0) > 0 && (r.test.trades ?? 0) >= 2 && (r.train.profitFactor ?? 0) >= EXTRA_SOFT.minTrainPF).slice(0, 3);
+      const fallback = rows.filter((r) => r.kind === kind && r.verdict !== "déçue en réel" && r.verdict !== "périmée" && !r.live?.failed && (r.test.returnPct ?? 0) > 0 && (r.test.trades ?? 0) >= 2 && (kind === "spot" || (r.train.profitFactor ?? 0) >= EXTRA_SOFT.minTrainPF)).slice(0, 3);
       good = [...good, ...fallback];
     }
   }
