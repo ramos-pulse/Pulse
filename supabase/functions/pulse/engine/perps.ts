@@ -239,11 +239,11 @@ export async function runPerpsTick(admin: Admin): Promise<string> {
         if (hist && hist.length > 500) optimize(brain, A.asset, hist, { allowShort: true, feePct: PERPS_COST, hourlyCost: BORROW_PER_HOUR, leverageCap: cfg.maxLev }, today);
         else brain.optimized = { ...brain.optimized, [A.asset]: today };
       }
-      mem.lastCandleBy[A.asset] = closed;
       // À partir de « Agressif », il trade même sans réglage validé sur 60 jours (mais respecte la mise sur le banc)
       const benched = aggressive || cfg.trend || plan ? (brain.benched[A.asset] ?? 0) > now : isBenched(brain, A.asset, now);
-      if (benched) { notes.push((!aggressive && !plan && brain.disabled[A.asset]) || `${A.asset} sur le banc après une série difficile`); continue; }
+      if (benched) { mem.lastCandleBy[A.asset] = closed; notes.push((!aggressive && !plan && brain.disabled[A.asset]) || `${A.asset} sur le banc après une série difficile`); continue; }
       const c = await getCandles(A.candles, iv, 400, now);
+      mem.lastCandleBy[A.asset] = closed; // bougie marquée « analysée » seulement une fois l'historique obtenu : une panne de données est réessayée la minute suivante
       const extra: Extra = setup === "funding" ? { funding: await fundingHistory(A.asset, now - 2 * 86_400_000, now).catch(() => []) } : {};
       const sig = setup ? setupSignal(setup, c, sideMult(cfg.bias, "short") > 0, plan!.params as SetupParams, extra) : trendSignal(c, sideMult(cfg.bias, "short") > 0, params);
       mem.signal = `${A.asset} : ${sig.reason}`;

@@ -1071,6 +1071,7 @@ Deno.serve(async (req) => {
         const b = (await readBots())[kind], v = Number(b.last_value_usd);
         if (!(v > 0)) return json({ error: "valeur inconnue" }, 409);
         const mem = loadMemory(b.price_history); mem.dayStartValue = v;
+        if (mem.brain) mem.brain.equityHigh = v; // le « plus haut » du cerveau repart aussi de la valeur actuelle
         await setBot(kind, { start_value_usd: v, price_history: mem as never });
         return json({ ok: true, start: v });
       }
