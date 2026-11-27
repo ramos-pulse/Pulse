@@ -692,7 +692,7 @@ async function runSelector(force = false): Promise<string> {
     await db.from("token_universe").update({ active: false, why, removed_at: now, updated_at: now }).eq("mint", r.mint);
   }
   const reasons: Record<string, number> = {};
-  for (const c of refused) { const k = (c.why ?? "?").split(" (")[0]!.replace(/\d[\d\s]*\s?(k\$|M\$|jours?)/g, "").trim(); reasons[k] = (reasons[k] ?? 0) + 1; }
+  for (const c of refused) { const k = (c.why ?? "?").split(" (")[0]!.replace(/\s+\d[^]*$/, "").replace(/ 24 h$/, "").trim(); reasons[k] = (reasons[k] ?? 0) + 1; }
   const why = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, n]) => `${k} (${n})`).join(", ");
   const text = `Sélection du jour : ${selected.length} token(s) retenus sur ${candidates.length} candidats${why ? ` · refus : ${why}` : ""}${added.length ? ` · ajoutés : ${added.join(", ")}` : ""}${removed.length ? ` · retirés : ${removed.join(", ")}` : ""}.`;
   await db.from("agent_log").insert({ agent: "selecteur", wallet: day, action: "selection", detail: text, usd: selected.length });

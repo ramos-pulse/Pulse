@@ -161,9 +161,15 @@ export function freshRefusal(f: Fresh, j: JupToken | undefined, soft = false): s
 }
 
 export async function freshCandidates(exclude: Set<string>, soft = false): Promise<{ list: Fresh[]; info: Map<string, JupToken> }> {
-  const pools = await gtPools("new_pools", 2);
-  const list: Fresh[] = [];
-  for (const p of pools) {
+  // « new_pools » ne contient que les toutes dernières minutes (toujours trop jeunes) : on y ajoute les pools
+  // en vogue de l'heure, où se trouvent les lancements de 30 min à 24 h qui ont déjà fait leurs preuves.
+  const trending = await gtPools("trending_pools?duration=1h", 2).catch(() => [] as GtPool[]);
+  const fresh = await gtPools("new_pools", 1).catch(() => [] as GtPool[]);
+  if (!trending.length && !fresh.length) throw new Error("GeckoTerminal indisponible");
+  const seen = new Set<string>(), list: Fresh[] = [];
+  for (const p of [...trending, ...fresh]) {
+    if (seen.has(p.attributes.address)) continue;
+    seen.add(p.attributes.address);
     const mint = mintOf(p.relationships.base_token.data.id), quote = mintOf(p.relationships.quote_token.data.id);
     if (exclude.has(mint) || STABLES.has(mint) || WRAPPED_SOL.has(mint) || !(quote === SOL_MINT || STABLES.has(quote))) continue;
     const t = p.attributes.transactions?.h1;
@@ -172,7 +178,7 @@ export async function freshCandidates(exclude: Set<string>, soft = false): Promi
       ageMin: (Date.now() - Date.parse(p.attributes.pool_created_at)) / 60_000 });
   }
   const F = soft ? FRESH_SOFT : FRESH;
-  const pre = list.filter((f) => f.liquidity >= F.minLiquidity && f.sells1h >= F.minSells1h).slice(0, 40);
+  const pre = list.filter((f) => f.ageMin >= FRESH.minAgeMin && f.ageMin <= FRESH.maxAgeH * 60 && f.liquidity >= F.minLiquidity && f.sells1h >= F.minSells1h).slice(0, 40);
   const info = pre.length ? await jupTokens(pre.map((f) => f.mint)) : new Map<string, JupToken>();
   for (const f of pre) { const j = info.get(f.mint); if (j) { f.symbol = j.symbol; f.decimals = j.decimals; f.topHolders = j.audit?.topHoldersPercentage; if (j.tokenProgram === TOKEN_2022) f.program = "2022"; } }
   return { list: pre, info };
