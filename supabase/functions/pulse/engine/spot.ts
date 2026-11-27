@@ -49,9 +49,25 @@ export function portfolio(b: Balances, prices: Record<string, number>, totalSol:
   return { value, complete };
 }
 
+/**
+ * Tokens trop récents : Jupiter ne publie pas encore leur prix « marché ». Sans ça ils compteraient pour 0 $
+ * (fausse perte, fausse « perte du jour »). On les estime au prix réellement obtenable en les revendant.
+ */
+export async function fillMissingPrices(b: Balances, prices: Record<string, number>): Promise<Record<string, number>> {
+  for (const t of allTokens()) {
+    const raw = b.raw[t.mint] ?? 0n, ui = b.ui[t.mint] ?? 0;
+    if (t.mint === SOL_MINT || prices[t.mint] || raw <= 0n || ui <= 0) continue;
+    const q = await getQuote(t.mint, USDC_MINT, raw, RULES.exitSlippageBps).catch(() => null);
+    const px = q ? Number(q.outAmount) / 1e6 / ui : 0;
+    if (px > 0) prices[t.mint] = px;
+  }
+  return prices;
+}
+
 export async function currentValue() {
   const { address } = await loadKeyPairFrom(WALLET_ENV);
   const [prices, b] = await Promise.all([getPrices(allMints()), getBalances(address)]);
+  await fillMissingPrices(b, prices);
   return { address, valueUsd: portfolio(b, prices, b.sol).value };
 }
 
@@ -105,6 +121,7 @@ export async function runTick(admin: Admin): Promise<string> {
   try {
     ({ address, keyPair } = await loadKeyPairFrom(WALLET_ENV));
     [b, prices] = await Promise.all([getBalances(address), getPrices(allMints()).catch(() => ({} as Record<string, number>))]);
+    await fillMissingPrices(b, prices);
   } catch (e) {
     errStreak(admin, mem, "Bot spot", (e as Error).message);
     await save(admin, mem, { last_message: `Données indisponibles (${(e as Error).message.slice(0, 80)}). Je réessaie dans une minute.` });
