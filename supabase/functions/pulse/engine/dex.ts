@@ -30,3 +30,14 @@ export async function tokenLiquidity(mints: string[]): Promise<Record<string, nu
   }
   return liq;
 }
+
+/** Prix de secours (USD) : celui de la paire la plus liquide de chaque token. Sert quand Jupiter ne donne rien. */
+export async function dexPrices(mints: string[]): Promise<Record<string, number>> {
+  if (!mints.length) return {};
+  const best: Record<string, { p: number; l: number }> = {};
+  for (const x of await dexPairs(mints)) {
+    const m = x.baseToken?.address, p = Number(x.priceUsd), l = x.liquidity?.usd ?? 0;
+    if (m && mints.includes(m) && p > 0 && l > (best[m]?.l ?? -1)) best[m] = { p, l };
+  }
+  return Object.fromEntries(Object.entries(best).map(([k, v]) => [k, v.p]));
+}

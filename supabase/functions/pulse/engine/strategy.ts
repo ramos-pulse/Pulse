@@ -484,7 +484,7 @@ export interface Pending { kind: "buy" | "sell" | "partial" | "open" | "close"; 
 /** Une position (spot : clé = mint du token ; perps : clé = marché SOL/ETH/BTC). */
 export interface Position {
   key: string; symbol: string; side: Side;
-  entry?: number; stop?: number; best?: number; initialRisk?: number; stopCandle?: number; openedAt?: number;
+  entry?: number; stop?: number; best?: number; initialRisk?: number; stopCandle?: number; openedAt?: number; quoteErr?: string;
   strategy?: SpotStrategy | SetupFamily | "nouveau"; posParams?: Params | RsiParams | SetupParams; posInterval?: Interval; source?: string;
   target?: number;           // objectif de prix (familles « à objectif » : ORB, VWAP, funding)
   liqAtEntry?: number;       // liquidité du token à l'entrée (spot) : sortie d'urgence si elle s'effondre
