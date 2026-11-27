@@ -864,9 +864,29 @@ function posBar(p) {
 }
 
 /** Graphique de prix d'une position : bougies, entrée, stop, objectif et trades passés. */
+/** Bougies lues depuis le téléphone sur GeckoTerminal (tokens du sélectionneur et nouveaux tokens). */
+async function phoneCandles(symbol, interval) {
+  if (!AGS?.selector) AGS = await api("/api/agents");
+  const row = [...(AGS.selector?.tokens || []), ...(AGS.fresh?.tokens || [])].find(r => r.symbol === symbol && r.pool);
+  if (!row) return null;
+  const path = interval === "15m" ? "minute?aggregate=15" : "hour?aggregate=1";
+  for (let i = 0; i < 3; i++) {
+    const r = await fetch(`https://api.geckoterminal.com/api/v2/networks/solana/pools/${row.pool}/ohlcv/${path}&limit=120&currency=usd`, { headers: { accept: "application/json" } });
+    if (r.status === 429) { await new Promise(res => setTimeout(res, 1500 * (i + 1))); continue; }
+    if (!r.ok) return null;
+    const list = (await r.json())?.data?.attributes?.ohlcv_list || [];
+    const candles = list.map(([t, o, h, l, c]) => [t * 1000, +o, +h, +l, +c]).sort((a, b) => a[0] - b[0]);
+    return candles.length ? { candles, trades: [] } : null;
+  }
+  return null;
+}
 async function openChart(kind, symbol, interval) {
   sheet(`<h3>${esc(symbol)} · ${interval === "15m" ? "15 min" : "1 h"}</h3><div class="skel" style="height:220px"></div>`);
-  let d; try { d = await api(`/api/chart?kind=${kind}&symbol=${encodeURIComponent(symbol)}&interval=${interval}&count=120`); } catch (e) { $("#sheetBody").innerHTML = `<h3>${esc(symbol)}</h3><p>Graphique indisponible : ${esc(e.message)}</p><button class="btn" id="sheetCancel">Fermer</button>`; return; }
+  let d; try { d = await api(`/api/chart?kind=${kind}&symbol=${encodeURIComponent(symbol)}&interval=${interval}&count=120`); } catch (e) {
+    // serveur bloqué par GeckoTerminal (adresse partagée) : le téléphone lit l'historique lui-même
+    d = await phoneCandles(symbol, interval).catch(() => null);
+    if (!d) { $("#sheetBody").innerHTML = `<h3>${esc(symbol)}</h3><p>Graphique indisponible : ${esc(e.message)}</p><button class="btn" id="sheetCancel">Fermer</button>`; return; }
+  }
   const p = (S.bots[kind].positions || []).find(x => x.symbol === symbol);
   const c = d.candles; if (!c.length) return;
   const W = 360, H = 220, lvls = [p?.stop, p?.target, p?.entry].filter(Boolean);
