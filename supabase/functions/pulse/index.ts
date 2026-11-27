@@ -441,14 +441,17 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
   const bots = await readBots();
   const spotCfg = loadConfig(bots.spot.config), perpsCfg = loadPerpsConfig(bots.perps.config);
   if (!spotCfg.autopilot && !perpsCfg.autopilot) return "désactivé";
-  const A = agentSettings(bots.spot.config);
+  // extra souple réglé bot par bot : chaque bot qualifie les stratégies avec SON réglage
+  const A0 = agentSettings(bots.spot.config);
+  const AK = { spot: { ...A0, soft: spotCfg.extraSoft }, perps: { ...A0, soft: perpsCfg.extraSoft } };
+  const A = { ...A0, soft: spotCfg.extraSoft || perpsCfg.extraSoft };
   const { data } = A.soft ? await db.from("research").select("*").order("score", { ascending: false }).limit(600)
     : await db.from("research").select("*").neq("verdict", "rejetée").order("score", { ascending: false }).limit(300);
   const rows = (data ?? []) as ResearchRow[];
-  let good = rows.filter((r) => qualifies(r, A)).sort(pilotRank(A, await liveRegimes()));
+  let good = rows.filter((r) => qualifies(r, AK[r.kind])).sort(pilotRank(A0, await liveRegimes()));
   if (A.soft) { // extra souple : si un bot n'a rien, il prend quand même la meilleure stratégie positive sur la période jamais vue
     for (const kind of ["spot", "perps"] as const) {
-      if (good.some((r) => r.kind === kind)) continue;
+      if (!AK[kind].soft || good.some((r) => r.kind === kind)) continue;
       const fallback = rows.filter((r) => r.kind === kind && r.verdict !== "déçue en réel" && r.verdict !== "périmée" && !r.live?.failed && (r.test.returnPct ?? 0) > 0 && (r.test.trades ?? 0) >= 2).slice(0, 3);
       good = [...good, ...fallback];
     }
@@ -976,11 +979,12 @@ Deno.serve(async (req) => {
     if (req.method === "POST" && route === "/api/push/test") return json({ sent: await pushAll("Test : les notifications de Pulse fonctionnent ✅") });
     if (req.method === "POST" && route === "/api/agents/selector/run") return json({ result: await runSelector(true) });
     if (req.method === "POST" && route === "/api/extra-soft") {
-      const b = (await req.json().catch(() => ({}))) as { on?: boolean };
-      const bots = await readBots(), on = b.on === true;
-      await setBot("spot", { config: { ...loadConfig(bots.spot.config), extraSoft: on } });
-      await setBot("perps", { config: { ...loadPerpsConfig(bots.perps.config), extraSoft: on } });
-      await notify(on ? "Mode EXTRA SOUPLE activé : critères très assouplis, risque divisé par 2 sur chaque trade" : "Mode extra souple coupé : retour aux critères normaux");
+      const b = (await req.json().catch(() => ({}))) as { on?: boolean; kind?: string };
+      const bots = await readBots(), on = b.on === true, kinds = b.kind === "spot" || b.kind === "perps" ? [b.kind] : ["spot", "perps"];
+      if (kinds.includes("spot")) await setBot("spot", { config: { ...loadConfig(bots.spot.config), extraSoft: on } });
+      if (kinds.includes("perps")) await setBot("perps", { config: { ...loadPerpsConfig(bots.perps.config), extraSoft: on } });
+      const who = kinds.length === 2 ? "les deux bots" : kinds[0] === "spot" ? "le bot spot" : "le bot perps";
+      await notify(on ? `Mode EXTRA SOUPLE activé pour ${who} : critères très assouplis, risque divisé par 2 sur chaque trade` : `Mode extra souple coupé pour ${who} : retour aux critères normaux`);
       return json({ ok: true, on, pilot: await autopilot(true).catch((e) => `pilote : ${(e as Error).message}`) });
     }
     if (req.method === "POST" && route === "/api/daily-stop") {
