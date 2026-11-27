@@ -354,7 +354,7 @@ function missionCard(kind, title) {
       <div><div class="k">Gain</div><div class="v ${cl(gain)}">${gain == null ? "—" : `${sg(gain)} $<br>${sg(gain / start * 100)} %`}</div></div>
       <div><div class="k">Échéance</div><div class="v amber">${left(b.end_at)}</div></div>
       <div><div class="k">Contrôle</div><div class="v">${hhmm(b.last_tick_at)}</div></div>
-      <div><div class="k">Risque</div><div class="v">${br ? nf(br.risk * 100, 1) + " %" : "—"}${br && br.streak ? ` <span class="${br.streak > 0 ? "up" : "down"}">${br.streak > 0 ? "▲" + br.streak : "▼" + -br.streak}</span>` : ""}</div></div>
+      <div data-tip="Risque réellement pris par trade (avant la réduction des stratégies « nouvelles » et des marchés agités) : base du cerveau${kind === "perps" ? " × agressivité" : ""}${b.config?.extraSoft ? ", ÷ 2 en extra souple" : ""}."><div class="k">Risque</div><div class="v">${br ? nf(effRisk(kind, br) * 100, 2) + " %" : "—"}${br && br.streak ? ` <span class="${br.streak > 0 ? "up" : "down"}">${br.streak > 0 ? "▲" + br.streak : "▼" + -br.streak}</span>` : ""}</div></div>
     </div>
     ${alerts(kind, b)}
     ${b.vault ? `<div class="l2" style="margin-top:8px" data-tip="Coffre à gains : une part de chaque gain est mise de côté et n'est plus jamais retradée. Elle reste dans le wallet du bot, tu peux la retirer quand tu veux.">🔐 Coffre : <b>${nf(b.vault)} $</b> mis de côté, jamais retradés</div>` : ""}
@@ -852,6 +852,13 @@ function rolls() {
   });
 }
 
+/** Risque par trade réellement appliqué par le moteur (même calcul que perps.ts / spot.ts). */
+function effRisk(kind, br) {
+  const c = S.bots[kind].config || {};
+  let r = br.risk;
+  if (kind === "perps") { const i = c.autopilot && !c.pilotAggressive ? Math.min(c.aggr ?? 1, 1) : (c.aggr ?? 1), L = S.rules.aggrLevels?.[i]; if (L) r = Math.min(L.maxRisk, r * L.riskMult); }
+  return r * (c.extraSoft ? 0.5 : 1);
+}
 /** Réglages rapides sur la carte d'un bot (levier, agressivité, nervosité, modes des agents). */
 function quickSettings(kind) {
   const sc = S.bots.spot.config || {}, pc = S.bots.perps.config || {};
