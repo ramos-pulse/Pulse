@@ -1018,6 +1018,12 @@ export function researchSide(cycle: number, perpsPct: number): "spot" | "perps" 
  * une stratégie fragile une mise plus petite. ×0,5 à ×1,5, toujours sous le plafond de risque du niveau choisi.
  * score 0,5 → ×0,78 · 1 → ×0,9 · 2 → ×1,08 · 3 → ×1,2 · 5 → ×1,38 · 7 et plus → ×1,5 ; sans score (réglage manuel) → ×1.
  */
+/** Retire du dernier message d'analyse les marchés qui ne sont plus dans les plans (stratégie retirée par le pilote). */
+export function pruneSignal(signal: string | undefined, names: string[]): string | undefined {
+  if (!signal) return signal;
+  const keep = signal.split(" · ").filter((seg) => !/^[A-Za-z0-9$]+ (\d+ (h|min) )?:/.test(seg) || names.some((n) => seg.startsWith(`${n} `)));
+  return keep.length ? keep.join(" · ") : undefined;
+}
 export const CONVICTION = { min: 0.5, max: 1.5 };
 export function conviction(score: number | undefined | null): number {
   if (score == null || !Number.isFinite(score)) return 1;

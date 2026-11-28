@@ -11,7 +11,7 @@ import { dexPrices, tokenLiquidity } from "./dex.ts";
 import { FRESH, freshStake } from "./agents.ts";
 import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type SetupParams } from "./setups.ts";
 import {
-  addToVault, applyTransfer, conviction, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate,
+  addToVault, applyTransfer, conviction, pruneSignal, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate,
   EXTRA_SOFT, cooldownMs, exitSlippageBps, floorOf, solReserveAlert, volScale, groupOf, LIQUIDITY, type SpotFamily,
   rsiExitSignal, rsiSignal, RULES, sampleCurve, SOL_MINT, TOKENS, allTokens, type TokenInfo, TOTAL_RISK, tradable, trailStop, trendSignal, USDC_MINT,
   type Interval, type Memory, type Params, type Position, type RsiParams, type Signal, type SpotConfig, type SpotStrategy,
@@ -303,6 +303,7 @@ export async function runTick(admin: Admin): Promise<string> {
 
     // 6. Entrées. PLANS du chercheur (pilote automatique ou stratégies appliquées), sinon réglages de l'app.
     const usePlans = cfg.autopilot || cfg.plans.length > 0;
+    if (usePlans) mem.signal = pruneSignal(mem.signal, cfg.plans.map((x) => x.symbol)); // une stratégie retirée disparaît tout de suite du message
     const today = dayKey(now);
     const todo = !usePlans && cfg.strategy === "tendance" ? TOKENS.find((t) => brain.optimized?.[t.symbol] !== today) : undefined;
     if (todo) {

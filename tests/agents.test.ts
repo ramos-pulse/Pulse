@@ -70,3 +70,20 @@ test("nouveaux tokens : cas NINE (suspect, créateur à 96 %) refusé", async ()
   assert.match(freshRefusal(f, safe({ audit: { ...a, devBalancePercentage: 95.85 } }), true)!, /créateur/); // extra souple aussi
   assert.match(freshRefusal(f, safe({ audit: a }))!, /créateur inconnue/);
 });
+
+test("RugCheck : le vrai rapport de NINE (27/11) aurait bloqué l'achat", async () => {
+  const { parseRugcheck, freshRefusal } = await import("../supabase/functions/pulse/engine/agents.ts");
+  const rc = parseRugcheck({ creator: "Gfe4", creatorBalance: 958505243376195, token: { supply: 999999855295605, decimals: 6 }, rugged: false, score_normalised: 62,
+    risks: [{ name: "Top 10 holders high ownership", level: "danger", value: "" }, { name: "Single holder ownership", level: "danger", value: "95.85%" }, { name: "Mutable metadata", level: "warn" }] })!;
+  assert.equal(rc.devPct, 95.85);
+  assert.equal(rc.dangers.length, 2);
+  const f = { mint: "M", symbol: "NINE", decimals: 6, pool: "P", liquidity: 80_000, volume1h: 50_000, change1h: 20, buys1h: 300, sells1h: 200, ageMin: 120 };
+  const j = { id: "M", symbol: "NINE", decimals: 6, isVerified: false, tags: [], audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: true, topHoldersPercentage: 6.6 }, rug: rc } as never;
+  assert.match(freshRefusal(f, j)!, /RugCheck : Top 10/);
+  // sans alerte « danger » mais créateur à 95 % (part trouvée par RugCheck) : refusé aussi
+  const j2 = { id: "M", symbol: "NINE", decimals: 6, isVerified: false, tags: [], audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: true, topHoldersPercentage: 6.6, devBalancePercentage: rc.devPct! } } as never;
+  assert.match(freshRefusal(f, j2)!, /créateur détient 96/);
+  // token sain : RugCheck ne bloque pas
+  const ok = parseRugcheck({ creatorBalance: 0, token: { supply: 1e15 }, risks: [{ name: "Mutable metadata", level: "warn" }] })!;
+  assert.deepEqual([ok.devPct, ok.dangers.length, ok.rugged], [0, 0, false]);
+});

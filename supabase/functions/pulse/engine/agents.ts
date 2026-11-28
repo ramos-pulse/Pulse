@@ -16,6 +16,7 @@ const WRAPPED_SOL = new Set([SOL_MINT, "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm
 export interface JupToken {
   id: string; symbol: string; name?: string; decimals: number; tokenProgram?: string; isVerified?: boolean; tags?: string[]; organicScore?: number;
   audit?: { mintAuthorityDisabled?: boolean; freezeAuthorityDisabled?: boolean; topHoldersPercentage?: number; isSus?: boolean; devBalancePercentage?: number; devMints?: number };
+  rug?: RugReport;           // second avis RugCheck (gratuit), ajouté par l'agent nouveaux tokens
   firstPool?: { id?: string; createdAt?: string }; liquidity?: number; stats24h?: { buyVolume?: number; sellVolume?: number };
 }
 export async function jupTokens(mints: string[]): Promise<Map<string, JupToken>> {
@@ -152,6 +153,29 @@ export function impersonates(symbol: string, name = ""): boolean {
   return FAMOUS.has(norm(symbol)) || FAMOUS.has(norm(name)) || /^(official|real|the)?(metamask|phantom|binance|coinbase|jupiter|solana|bitcoin|ethereum|tether|usdc|trump)/.test(norm(name));
 }
 
+// ---------------------------------------------------------------------------------------------------
+// RugCheck (api.rugcheck.xyz, gratuit, sans clé) : créateur, sa part, alertes de risque
+// ---------------------------------------------------------------------------------------------------
+export interface RugReport { devPct: number | null; rugged: boolean; dangers: string[]; score: number | null }
+export const RUGCHECK = { perCycle: 6 };
+export async function rugcheck(mint: string): Promise<RugReport | null> {
+  const r = await fetchRetry(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { signal: AbortSignal.timeout(8_000) });
+  if (!r.ok) return null;
+  return parseRugcheck(await r.json());
+}
+/** Lecture d'un rapport RugCheck (testée sur le vrai rapport de NINE du 27/11). */
+export function parseRugcheck(x: unknown): RugReport | null {
+  const o = x as { creatorBalance?: number; token?: { supply?: number }; rugged?: boolean; score_normalised?: number; risks?: { name?: string; level?: string; value?: string }[] } | null;
+  if (!o || typeof o !== "object") return null;
+  const supply = Number(o.token?.supply), bal = Number(o.creatorBalance);
+  return {
+    devPct: supply > 0 && Number.isFinite(bal) ? Math.round((bal / supply) * 10000) / 100 : null,
+    rugged: o.rugged === true,
+    dangers: (o.risks ?? []).filter((r) => r.level === "danger" && r.name).map((r) => `${r.name}${r.value ? ` (${r.value})` : ""}`),
+    score: Number.isFinite(Number(o.score_normalised)) ? Number(o.score_normalised) : null,
+  };
+}
+
 export function freshRefusal(f: Fresh, j: JupToken | undefined, soft = false): string | null {
   const F = soft ? { ...FRESH, ...FRESH_SOFT } : FRESH;
   if (!j) return "inconnu de Jupiter";
@@ -163,6 +187,8 @@ export function freshRefusal(f: Fresh, j: JupToken | undefined, soft = false): s
   if (top == null || top > F.maxTopHolders) return `concentration : les gros portefeuilles détiennent ${top == null ? "?" : Math.round(top)} %`;
   // alertes de Jupiter : NINE (27/11) les avait toutes les deux et a été vidé juste après l'achat
   if (j.audit?.isSus) return "signalé suspect par Jupiter";
+  if (j.rug?.rugged) return "déjà signalé comme arnaque (RugCheck)";
+  if (j.rug?.dangers.length) return `RugCheck : ${j.rug.dangers[0]}`;
   if (j.audit?.devBalancePercentage == null) return "part du créateur inconnue";
   if (j.audit.devBalancePercentage > FRESH.maxDevPct) return `le créateur détient ${Math.round(j.audit.devBalancePercentage)} % des jetons`;
   if (f.ageMin < FRESH.minAgeMin) return "trop jeune (moins de 30 min)";
@@ -196,6 +222,18 @@ export async function freshCandidates(exclude: Set<string>, soft = false): Promi
   const pre = list.filter((f) => f.ageMin >= FRESH.minAgeMin && f.ageMin <= FRESH.maxAgeH * 60 && f.liquidity >= F.minLiquidity && f.sells1h >= F.minSells1h).slice(0, 40);
   const info = pre.length ? await jupTokens(pre.map((f) => f.mint)) : new Map<string, JupToken>();
   for (const f of pre) { const j = info.get(f.mint); if (j) { f.symbol = j.symbol; f.decimals = j.decimals; f.topHolders = j.audit?.topHoldersPercentage; if (j.tokenProgram === TOKEN_2022) f.program = "2022"; } }
+  // Second avis RugCheck (gratuit, sans clé) pour les candidats qui passent tout le reste : part réelle du créateur et alertes « danger ».
+  let asked = 0;
+  for (const f of pre) {
+    const j = info.get(f.mint), why = j ? freshRefusal(f, j, soft) : "x";
+    if (!j || (why && why !== "part du créateur inconnue") || asked >= RUGCHECK.perCycle) continue;
+    asked++;
+    const rc = await rugcheck(f.mint).catch(() => null);
+    if (!rc) continue;
+    j.rug = rc;
+    if (j.audit && j.audit.devBalancePercentage == null && rc.devPct != null) j.audit.devBalancePercentage = rc.devPct;
+    await new Promise((r) => setTimeout(r, 300));
+  }
   return { list: pre, info };
 }
 

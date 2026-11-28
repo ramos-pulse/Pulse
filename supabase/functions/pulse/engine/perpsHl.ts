@@ -16,7 +16,7 @@ import {
 import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type Extra, type SetupParams } from "./setups.ts";
 import {
   addToVault, applyTransfer, AGGR_AGGRESSIVE, AGGR_LEVELS, atr, conviction, cooldownMs, DEFAULT_PARAMS, effectiveAggr, exitCheck, EXTRA_SOFT, floorOf, LIQ, loadMemory, loadPerpsConfig,
-  migratePositions, missionEnd, PARTIAL, perpsChange, perpsMarkets, PRESETS, riskFactor, riskGate, RULES, sampleCurve, sideMult, TOTAL_RISK, tradable, trailStop, trendSignal, volScale,
+  migratePositions, missionEnd, PARTIAL, pruneSignal, perpsChange, perpsMarkets, PRESETS, riskFactor, riskGate, RULES, sampleCurve, sideMult, TOTAL_RISK, tradable, trailStop, trendSignal, volScale,
   type Interval, type Memory, type Params, type PerpsConfig, type PerpsPlan, type Position,
 } from "./strategy.ts";
 
@@ -244,6 +244,7 @@ export async function runHlTick(admin: Admin): Promise<string> {
     if (paused) return await hold("En pause : aucune nouvelle entrée.");
 
     // 6. Entrées : une par marché, sur les stratégies validées par le chercheur.
+    mem.signal = pruneSignal(mem.signal, cfg.plans.map((x) => x.asset));
     if (!cfg.plans.length) return await hold(cfg.autopilot ? "Pilote automatique : j'attends que le chercheur valide une stratégie perps." : "Aucune stratégie perps choisie.");
     if (held.length >= cfg.maxPositions) return await hold(`${held.length} position(s) ouverte(s), maximum atteint`);
     const blocked = riskGate(mem, value, now, cfg.dailyStop ? L.dailyLoss : Infinity);
