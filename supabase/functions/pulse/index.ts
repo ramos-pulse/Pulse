@@ -447,7 +447,11 @@ async function revalidate(m: Market, candles: Candle[], ctx: { blockedAt?: (t: n
   const before = new Date(Date.now() - REVALIDATE.everyDays * 86_400_000).toISOString();
   const { data } = await db.from("research").select("*").eq("product", m.product).eq("kind", m.kind).eq("interval", m.interval)
     .neq("verdict", "rejetée").or(`validated_at.is.null,validated_at.lt.${before}`).order("score", { ascending: false }).limit(40);
-  const rows = ((data ?? []) as ResearchRow[]).filter((r) => r.verdict === "prometteuse" || r.verdict === "à surveiller").filter((r) => (r.validated_at ?? r.created_at) < before).slice(0, REVALIDATE.perCycle);
+  const paperBefore = new Date(Date.now() - PAPER.days * 86_400_000).toISOString(); // une stratégie au papier est revérifiée dès 3 jours
+  const { data: paper } = await db.from("research").select("*").eq("product", m.product).eq("kind", m.kind).eq("interval", m.interval)
+    .in("family", PAPER.families).in("verdict", ["prometteuse", "à surveiller"]).is("validated_at", null).lt("created_at", paperBefore).order("score", { ascending: false }).limit(REVALIDATE.perCycle);
+  const rows = [...((paper ?? []) as ResearchRow[]), ...((data ?? []) as ResearchRow[]).filter((r) => !((paper ?? []) as ResearchRow[]).some((x) => x.id === r.id))].filter((r) => r.verdict === "prometteuse" || r.verdict === "à surveiller")
+    .filter((r) => (r.validated_at ?? r.created_at) < (PAPER.families.includes(r.family) && !r.validated_at ? paperBefore : before)).slice(0, REVALIDATE.perCycle);
   const out: string[] = [];
   for (const r of rows) {
     if (!more()) break;
@@ -462,6 +466,13 @@ async function revalidate(m: Market, candles: Candle[], ctx: { blockedAt?: (t: n
   return out;
 }
 
+/**
+ * TEST SUR PAPIER (28/11) : une stratégie « rebond » (nouvelle famille, scalping lent du bot 1) ne pilote le bot qu'après
+ * avoir été revérifiée au moins 3 jours après sa découverte, sur un historique qui contient ces jours nouveaux, et tenu.
+ */
+const PAPER = { families: ["rebond"], days: 3 };
+const paperPassed = (r: ResearchRow) => !PAPER.families.includes(r.family) || (!!r.validated_at && Date.parse(r.validated_at) - Date.parse(r.created_at) >= PAPER.days * 86_400_000);
+
 // ------------------------------------------------------------------ pilote automatique
 /** Critères stricts : seule une stratégie solide sur la période jamais vue peut piloter un bot. */
 const QUALIFY = { minTestTrades: 5, minTestPF: 1.3, maxTestDD: 10, maxAgeDays: REVALIDATE.maxAgeDays };
@@ -473,6 +484,7 @@ function qualifies(r: ResearchRow, a: AgentSettings = { aggressive: false, nerve
   // « fraîche » = créée ou re-validée sur des données récentes depuis moins de 10 jours (re-validation chaque semaine)
   const young = Date.now() - Date.parse(r.validated_at ?? r.created_at) < QUALIFY.maxAgeDays * 86_400_000;
   if (!young || r.verdict === "déçue en réel" || r.verdict === "périmée" || r.live?.failed) return false;
+  if (!paperPassed(r)) return false; // 28/11 : rebond — d'abord revérifié sur des données nouvelles avant l'argent réel
   if ((r.params as { hours?: string } | null)?.hours === "actives") return false;
   if (r.family === "orb" && (r.params as { session?: string } | null)?.session !== "utc") return false; // ORB Europe / Wall Street : muette le week-end // 24 h/24 demandé : pas de stratégie qui s'arrête la nuit et le week-end
   const luck = r.test.luck;
@@ -497,7 +509,7 @@ const REGIME_FIT = { match: 1.4, mismatch: 0.6 };
 function regimeFit(r: ResearchRow, regimes: Map<string, string>) {
   const reg = regimes.get(`${r.product}|${r.kind}|${r.interval}`);
   if (!reg || reg === "hasard") return 1;
-  const meanRev = r.family === "range" || r.family === "rsi" || r.family === "vwap";
+  const meanRev = r.family === "range" || r.family === "rsi" || r.family === "vwap" || r.family === "rebond";
   if (r.family === "orb" || r.family === "squeeze" || r.family === "volume" || r.family === "funding") return reg === "tendance" ? 1.2 : 1; // cassures : utiles partout
   return (reg === "tendance") === !meanRev ? REGIME_FIT.match : REGIME_FIT.mismatch;
 }

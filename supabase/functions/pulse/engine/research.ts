@@ -5,8 +5,8 @@
 //  - puis sur le dernier tiers, qu'aucun réglage n'a « vu » (« validation »).
 // Une stratégie qui ne gagne que sur l'entraînement a appris le passé par cœur : elle est rejetée.
 // Les meilleures servent de parents : le chercheur les fait muter légèrement pour trouver mieux.
-import { backtest, backtestRsi, type BacktestResult, type Candle, type Interval, type Params, type RsiParams, type SimOpts, SPOT_COOLDOWN_MS } from "./strategy.ts";
-import { backtestSetup, describeSetup, isSetup, type Extra, type SetupFamily, type SetupParams } from "./setups.ts";
+import { backtest, backtestRsi, type BacktestResult, type Candle, type Interval, type Params, type RsiParams, type SimOpts, SPOT_COOLDOWN_MS, REBOND_COOLDOWN_MS } from "./strategy.ts";
+import { backtestSetup, describeSetup, EDGE, isSetup, type Extra, type SetupFamily, type SetupParams } from "./setups.ts";
 
 export type Family = "tendance" | "rsi" | SetupFamily;
 export type BotKind = "spot" | "perps";
@@ -38,10 +38,11 @@ export const SPACE = {
   squeeze: { bbPeriod: [20], bbK: [2], lookback: [50, 100, 200], pct: [0.05, 0.1, 0.2], trailAtr: [1.5, 2, 2.5, 3] },
   volume: { volMult: [2, 2.5, 3, 4], body: [0.6, 0.8, 1.2], trailAtr: [1.5, 2, 2.5, 3] },
   funding: { level: [0.00002, 0.00004, 0.00008], stopAtr: [1.5, 2, 3], hold: [8, 16, 32, 48] },
+  rebond: { drop: [2, 2.5, 3, 4, 5], target: [0.3, 0.5, 0.7, 1], stopAtr: [1, 1.5, 2, 3], hold: [2, 4, 8, 12] },
 } as const;
 /** Familles proposées selon le bot : le spot n'achète que (pas de range ni de funding). */
 export const FAMILIES: Record<BotKind, Family[]> = {
-  spot: ["tendance", "rsi", "orb", "vwap", "squeeze", "volume"],
+  spot: ["tendance", "rsi", "orb", "vwap", "squeeze", "volume", "rebond"],
   perps: ["tendance", "range", "orb", "vwap", "squeeze", "volume", "funding"],
 };
 /** Part des stratégies testées avec le filtre « heures actives » (pas d'entrée la nuit ni le week-end). */
@@ -81,7 +82,8 @@ export function tempo(c: { interval?: string | null; family: Family; params: unk
   else if (c.family === "orb" || c.family === "volume") t += 1;            // plusieurs occasions par jour
   else if (c.family === "vwap") t += Number(p.dev) <= 1.5 ? 1 : 0;
   else if (c.family === "squeeze") t += Number(p.pct) >= 0.2 ? 1 : 0;
-  else if (c.family === "funding") t -= 1;                                  // rare
+  else if (c.family === "funding") t -= 1;
+  else if (c.family === "rebond") t += Number(p.drop) <= 2.5 ? 1 : 0;                                  // rare
   else if (c.family === "tendance") t += (b <= 12 ? 1 : b >= 48 ? -1 : 0) + (p.entry === "repli" ? 1 : 0);
   else t += r <= 7 ? 1 : r >= 21 ? -1 : 0;
   return Math.max(0, Math.min(3, t));
@@ -238,7 +240,9 @@ export function simulate(c: Candidate, candles: Candle[], m: Market, ctx: EvalCo
     partial: m.kind === "spot" ? "half" : "breakeven", ...(m.kind === "spot" && ctx.blockedAt ? { blockedAt: ctx.blockedAt } : {}),
     ...(m.kind === "spot" ? { cooldownMs: SPOT_COOLDOWN_MS } : {}) }; // même pause qu'en réel
   if (c.family === "rsi") return backtestRsi(candles, c.params as RsiParams, m.feePct, o);
-  if (isSetup(c.family)) return backtestSetup(c.family, candles, c.params as SetupParams, { ...o, extra: ctx.extra });
+  // 28/11 : bot 1 — entrée refusée si le mouvement visé fait moins de 4 fois l'aller-retour ; pause 5 min (au lieu de 15) pour le rebond
+  if (isSetup(c.family)) return backtestSetup(c.family, candles, c.params as SetupParams, { ...o, extra: ctx.extra,
+    ...(m.kind === "spot" ? { minEdge: EDGE.mult * 2 * m.feePct, ...(c.family === "rebond" ? { cooldownMs: REBOND_COOLDOWN_MS } : {}) } : {}) });
   return backtest(candles, { ...o, params: c.params as Params });
 }
 /** Exigences de validation (28/11) : 8 trades sur la période jamais vue pour « prometteuse », et 2 tiers gagnés sur 3. */

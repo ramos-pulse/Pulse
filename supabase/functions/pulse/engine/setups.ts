@@ -12,8 +12,8 @@
 //  - « suiveuses » (squeeze, volume) : gérées comme la tendance (stop suiveur chandelier, prise partielle, sortie si ça stagne).
 import { activeHour, atr, barMsOf, bollinger, ema, PARTIAL, perpsChange, rangeExit, rangeSignal, RISK, sanitizeRange, STRATEGY, summarize, tfOf, trailStop, volScale, type BacktestResult, type Candle, type Params, type RangeParams, type Side, type Signal, type SimOpts, lossPause, stopProtects } from "./strategy.ts";
 
-export type SetupFamily = "range" | "orb" | "vwap" | "squeeze" | "volume" | "funding";
-export const SETUP_FAMILIES: readonly SetupFamily[] = ["range", "orb", "vwap", "squeeze", "volume", "funding"];
+export type SetupFamily = "range" | "orb" | "vwap" | "squeeze" | "volume" | "funding" | "rebond";
+export const SETUP_FAMILIES: readonly SetupFamily[] = ["range", "orb", "vwap", "squeeze", "volume", "funding", "rebond"];
 export const isSetup = (f: unknown): f is SetupFamily => SETUP_FAMILIES.includes(f as SetupFamily);
 /** Familles gérées avec un stop suiveur (comme la tendance). */
 export const TRAILING: readonly SetupFamily[] = ["squeeze", "volume"];
@@ -26,7 +26,9 @@ export interface VwapParams { dev: number; stopAtr: number; maxTrend: number; ho
 export interface SqueezeParams { bbPeriod: number; bbK: number; lookback: number; pct: number; trailAtr: number; hours?: "actives" }
 export interface VolumeParams { volMult: number; body: number; trailAtr: number; hours?: "actives" }
 export interface FundingParams { level: number; stopAtr: number; hold: number }
-export type SetupParams = RangeParams | OrbParams | VwapParams | SqueezeParams | VolumeParams | FundingParams;
+/** REBOND APRÈS EXCÈS (28/11, « scalping lent ») : après une bougie anormalement violente, le prix revient souvent en partie. */
+export interface RebondParams { drop: number; target: number; stopAtr: number; hold: number; hours?: "actives" }
+export type SetupParams = RangeParams | OrbParams | VwapParams | SqueezeParams | VolumeParams | FundingParams | RebondParams;
 
 /** Données externes : taux de financement horaires (Hyperliquid, indicateur du positionnement de la foule). */
 export interface Extra { funding?: { t: number; r: number }[] }
@@ -96,6 +98,10 @@ export function sanitizeSetup(family: SetupFamily, raw: unknown): SetupParams | 
     case "funding": {
       const l = num(x.level, 0.000001, 0.001), s = num(x.stopAtr, 0.5, 5), h = num(x.hold, 2, 200);
       return l && s && h ? { level: l, stopAtr: s, hold: Math.round(h) } : null;
+    }
+    case "rebond": {
+      const d = num(x.drop, 1.5, 8), t = num(x.target, 0.2, 1.5), s = num(x.stopAtr, 0.5, 4), h = num(x.hold, 1, 24);
+      return d && t && s && h ? { drop: d, target: t, stopAtr: s, hold: Math.round(h), ...hrs(x) } : null;
     }
   }
 }
@@ -216,13 +222,30 @@ function fundingSignal(c: Candle[], allowShort: boolean, P: FundingParams, extra
   return noSig(c, `funding normal (${yearly} %/an)`);
 }
 
+/**
+ * Rebond après excès : la dernière bougie clôturée a bougé de plus de `drop` fois l'ATR HABITUEL (mesuré avant elle).
+ * On parie sur un retour partiel (`target` × la taille de la bougie), stop `stopAtr` ATR, sortie après `hold` bougies.
+ * Base : à 15 min, les prix crypto ont tendance à revenir en arrière (effet faible, utile seulement sur les gros excès).
+ */
+function rebondSignal(c: Candle[], allowShort: boolean, P: RebondParams): SetupSignal {
+  const last = c.at(-1)!, a0 = atr(c.slice(0, -1), STRATEGY.atrPeriod).at(-1)!;
+  if (!(a0 > 0)) return noSig(c, "rebond : volatilité habituelle inconnue");
+  const move = last.c - last.o, size = Math.abs(move) / a0;
+  if (size < P.drop) return noSig(c, `rebond : bougie normale (${size.toFixed(1)} ATR, excès à partir de ${P.drop})`);
+  if (move < 0) return { side: "long", reason: `rebond : chute anormale (${size.toFixed(1)} fois la bougie habituelle), retour partiel attendu`, price: last.c, atr: a0,
+    stop: last.c - P.stopAtr * a0, target: last.c - move * P.target, candleTime: last.t, score: size / P.drop };
+  if (allowShort) return { side: "short", reason: `rebond : envolée anormale (${size.toFixed(1)} fois la bougie habituelle), retour partiel attendu`, price: last.c, atr: a0,
+    stop: last.c + P.stopAtr * a0, target: last.c - move * P.target, candleTime: last.t, score: size / P.drop };
+  return noSig(c, `rebond : envolée anormale (${size.toFixed(1)} ATR), le spot n'achète que les chutes`);
+}
+
 /** Signal d'une famille, avec les filtres communs (volatilité extrême, heures creuses). */
 export function setupSignal(family: SetupFamily, c: Candle[], allowShort: boolean, P: SetupParams, extra?: Extra): SetupSignal {
   const last = c.at(-1);
   if (!last || c.length < STRATEGY.emaSlow + 5) return noSig(c, `historique insuffisant (${c.length} bougies)`);
   if (family === "range") return rangeSignal(c, allowShort, P as RangeParams);
   const a = atr(c, STRATEGY.atrPeriod).at(-1)!, T = tfOf(c);
-  if (a / last.c > T.maxAtrPct) return noSig(c, `marché trop agité (ATR ${((a / last.c) * 100).toFixed(2)} %)`);
+  if (a / last.c > T.maxAtrPct && family !== "rebond") return noSig(c, `marché trop agité (ATR ${((a / last.c) * 100).toFixed(2)} %)`);
   if (a / last.c < T.minAtrPct / 4) return noSig(c, `marché quasi immobile (ATR ${((a / last.c) * 100).toFixed(2)} %)`);
   if ((P as { hours?: string }).hours === "actives" && !activeHour(closeTime(c))) return noSig(c, "heures creuses (nuit ou week-end) : pas d'entrée");
   switch (family) {
@@ -231,6 +254,7 @@ export function setupSignal(family: SetupFamily, c: Candle[], allowShort: boolea
     case "squeeze": return squeezeSignal(c, allowShort, P as SqueezeParams);
     case "volume": return volumeSignal(c, allowShort, P as VolumeParams);
     case "funding": return fundingSignal(c, allowShort, P as FundingParams, extra);
+    case "rebond": return rebondSignal(c, allowShort, P as RebondParams);
   }
 }
 
@@ -250,6 +274,7 @@ export function setupExit(family: SetupFamily, c: Candle[], side: Side, P: Setup
       return null;
     }
     case "funding": return heldBars >= (P as FundingParams).hold ? "funding_temps" : null;
+    case "rebond": return heldBars >= (P as RebondParams).hold ? "rebond_temps" : null;
     default: return null; // familles suiveuses : gérées comme la tendance
   }
 }
@@ -272,7 +297,14 @@ export const trailParams = (P: SetupParams): Params => ({ breakout: 0, trailAtr:
 // Backtest générique : mêmes signaux et mêmes sorties que les bots réels, frais, portage, prise partielle,
 // pause après perte, filtre de marché et taille selon la volatilité compris.
 // ---------------------------------------------------------------------------------------------------
-export function backtestSetup(family: SetupFamily, candles: Candle[], P: SetupParams, o: SimOpts & { extra?: Extra }): BacktestResult {
+/**
+ * « ÇA VAUT LES FRAIS » (28/11) : mouvement visé par un signal à objectif (ORB, VWAP, rebond), en fraction du prix.
+ * Le bot 1 refuse une entrée dont l'objectif est à moins de EDGE.mult fois le coût aller-retour du token.
+ * Les stratégies à stop suiveur n'ont pas d'objectif (leurs gains courent) : pas concernées.
+ */
+export const EDGE = { mult: 4 };
+export const expectedMove = (sig: { price: number; target?: number }) => sig.target == null ? Infinity : sig.price > 0 ? Math.abs(sig.target - sig.price) / sig.price : 0;
+export function backtestSetup(family: SetupFamily, candles: Candle[], P: SetupParams, o: SimOpts & { extra?: Extra; minEdge?: number }): BacktestResult {
   const T = tfOf(candles), trailing = TRAILING.includes(family);
   let equity = 1, peak = 1, maxDd = 0, cooldownUntil = 0;
   const log: BacktestResult["log"] = [];
@@ -322,7 +354,7 @@ export function backtestSetup(family: SetupFamily, candles: Candle[], P: SetupPa
     if (!pos && c.t >= cooldownUntil && !o.blockedAt?.(c.t)) {
       const win = candles.slice(Math.max(0, i - 400), i + 1);
       const sig = setupSignal(family, win, o.allowShort, P, o.extra);
-      if (sig.side) {
+      if (sig.side && !(o.minEdge && expectedMove(sig) < o.minEdge)) {
         const dist = Math.abs(sig.price - sig.stop) / sig.price;
         if (dist > 0) {
           const risk = (o.risk ?? (family === "range" ? 0.01 : RISK.perTrade)) * (o.noVolScale ? 1 : volScale(win));
@@ -346,8 +378,9 @@ export function describeSetup(family: SetupFamily, P: SetupParams, kind: "spot" 
     case "vwap": { const p = P as VwapParams; return `retour au VWAP : écart ≥ ${p.dev} ATR du prix moyen du jour, objectif le VWAP, stop ${p.stopAtr} ATR, seulement si force < ${p.maxTrend} ATR${both}${h}`; }
     case "squeeze": { const p = P as SqueezeParams; return `cassure de compression : bandes (${p.bbPeriod}, ${p.bbK}) parmi les ${Math.round(p.pct * 100)} % les plus serrées des ${p.lookback} dernières bougies, stop suiveur ${p.trailAtr} ATR${both}${h}`; }
     case "volume": { const p = P as VolumeParams; return `momentum de volume : volume ≥ ×${p.volMult} la moyenne et bougie ≥ ${p.body} ATR, stop suiveur ${p.trailAtr} ATR${both}${h}`; }
+    case "rebond": { const p = P as RebondParams; return `rebond après excès : bougie ≥ ${p.drop} fois la bougie habituelle (ATR), objectif ${Math.round(p.target * 100)} % de retour, stop ${p.stopAtr} ATR, ${p.hold} bougies maximum${both}${h}`; }
     case "funding": { const p = P as FundingParams; return `funding extrême ≥ ${(p.level * 24 * 365 * 100).toFixed(0)} %/an : pari contre la foule si le prix confirme, stop ${p.stopAtr} ATR, objectif 2 × le risque, ${p.hold} bougies maximum`; }
   }
 }
 
-export const FAMILY_NAMES: Record<string, string> = { tendance: "tendance", rsi: "RSI", range: "range", orb: "ORB", vwap: "VWAP", squeeze: "compression", volume: "volume", funding: "funding" };
+export const FAMILY_NAMES: Record<string, string> = { tendance: "tendance", rsi: "RSI", range: "range", orb: "ORB", vwap: "VWAP", squeeze: "compression", volume: "volume", funding: "funding", rebond: "rebond" };

@@ -160,7 +160,9 @@ export const tfOf = (c: Candle[]) => TF[ivOfMs(barMsOf(c))];
 /** Pause après une perte, selon l'unité de temps de la position. */
 /** Pause après une vraie perte. Bot 1 (spot) : 15 min quelle que soit l'unité de temps (28/11, pour trader plus). */
 export const SPOT_COOLDOWN_MS = 15 * 60_000;
-export const cooldownMs = (iv: Interval | undefined, kind: "spot" | "perps" = "perps") => kind === "spot" ? SPOT_COOLDOWN_MS : TF[iv ?? "1h"].cooldownMs;
+/** 28/11 : rebond après excès (bot 1) : pause courte après une perte, les occasions sont brèves. */
+export const REBOND_COOLDOWN_MS = 5 * 60_000;
+export const cooldownMs = (iv: Interval | undefined, kind: "spot" | "perps" = "perps", family?: string) => kind === "spot" ? (family === "rebond" ? REBOND_COOLDOWN_MS : SPOT_COOLDOWN_MS) : TF[iv ?? "1h"].cooldownMs;
 
 /**
  * HEURES ACTIVES (filtre « heures creuses », testé par le chercheur) : du lundi au vendredi, 7 h – 21 h UTC.

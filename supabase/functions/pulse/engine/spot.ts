@@ -10,7 +10,8 @@ import { getBalances, loadKeyPairFrom, txStatus, waitForTx, type Balances } from
 import { dexPrices, tokenLiquidity } from "./dex.ts";
 import { liveRegimeOf, regimeFitLabel } from "./math.ts";
 import { FRESH, freshAffordable, freshStake } from "./agents.ts";
-import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type SetupParams, extendOnTime } from "./setups.ts";
+import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type SetupParams, extendOnTime, EDGE, expectedMove, FAMILY_NAMES } from "./setups.ts";
+import { COSTS, spotFee } from "./costs.ts";
 import { addToVault, applyTransfer, conviction, pruneSignal, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate, EXTRA_SOFT, cooldownMs, exitSlippageBps, floorOf, solReserveAlert, volScale, groupOf, LIQUIDITY, type SpotFamily, rsiExitSignal, rsiSignal, RULES, sampleCurve, SOL_MINT, TOKENS, allTokens, type TokenInfo, TOTAL_RISK, tradable, trailStop, trendSignal, USDC_MINT, type Interval, type Memory, type Params, type Position, type RsiParams, type Signal, type SpotConfig, type SpotStrategy, lossPause, stopProtects, spotOrderSize } from "./strategy.ts";
 
 type Admin = Store;
@@ -355,6 +356,9 @@ export async function runTick(admin: Admin): Promise<string> {
         const sig = rsi ? rsiSignal(c, rp) : setup ? setupSignal(setup, c, false, plan.params as SetupParams) : trendSignal(c, false, plan.params as Params);
         // stratégie non confirmée en réel : 75 % ; marché agité : taille réduite
         const risk = (rsi ? rp.riskPct / 100 : riskPerTrade(brain)) * riskFactor(plan.confidence) * volScale(c) * (cfg.extraSoft ? EXTRA_SOFT.riskMult : 1) * conviction(plan.score); // mise selon la confiance
+        // 28/11 « ça vaut les frais » : même règle que le chercheur — le mouvement visé doit valoir 4 fois l'aller-retour du token
+        const edgeMin = EDGE.mult * 2 * spotFee(token!.symbol, token!.extra === "selection" ? COSTS.defaultSelected : 0.003); // même coût que le chercheur
+        if (sig.side === "long" && setup && expectedMove(sig) < edgeMin) { notes.push(`${token!.symbol} : signal ${FAMILY_NAMES[setup] ?? setup} ignoré, objectif à ${(expectedMove(sig) * 100).toFixed(2)} % < ${(edgeMin * 100).toFixed(2)} % (4 × les frais aller-retour)`); done(); continue; }
         if (sig.side === "long") choices.push({ token: token!, sig, strategy: plan.family, params: plan.params, interval: plan.interval, rank: plan.score, risk, source: plan.source, seenKey: key, closed: closedP, regime: liveRegimeOf(c) });
         else { notes.push(`${token!.symbol} ${plan.interval === "15m" ? "15 min" : "1 h"} : ${sig.reason}`); done(); }
       } catch { notes.push(`${token!.symbol} : historique indisponible`); }
@@ -549,7 +553,7 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, a
   const wholePnl = pnl + (pos?.partialPnl ?? 0), wholeCost = cost + (pos?.partialCost ?? 0);
   const wholePct = wholeCost > 0 ? (wholePnl / wholeCost) * 100 : pnlPct;
   learn(brain, sym, wholePct, valueBefore + pnl, Date.now(), stopProtects(pos) && /stop/.test(String(p.reason ?? "")));
-  if (lossPause(wholePnl, stopProtects(pos) && /stop/.test(String(p.reason ?? "")))) mem.cooldownUntil = Date.now() + cooldownMs(pos?.posInterval, "spot"); // sortie à l'équilibre par le stop : pas de pause
+  if (lossPause(wholePnl, stopProtects(pos) && /stop/.test(String(p.reason ?? "")))) mem.cooldownUntil = Date.now() + cooldownMs(pos?.posInterval, "spot", pos?.strategy); // sortie à l'équilibre par le stop : pas de pause
   delete positions[mint];
   if (mem.signal?.startsWith(`${sym} `)) mem.signal = undefined; // analyse liée à la position vendue : périmée
   return `Vente ${sym} confirmée (${label(p.reason)}) : ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ (${pnlPct.toFixed(1)} %), frais inclus.${pnl > 0 && cfg.vaultPct ? ` ${cfg.vaultPct} % du gain mis au coffre.` : ""}`;

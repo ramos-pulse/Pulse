@@ -220,7 +220,7 @@ const ANY_REGIME = new Set(["compression", "orb"]);
 export function regimeFitLabel(family: string, regime: string | undefined): "favorable" | "neutre" | "défavorable" {
   if (!regime || regime === "hasard") return "neutre";
   if (family === "orb" || family === "squeeze" || family === "volume" || family === "funding") return regime === "tendance" ? "favorable" : "neutre";
-  const meanRev = family === "range" || family === "rsi" || family === "vwap";
+  const meanRev = family === "range" || family === "rsi" || family === "vwap" || family === "rebond";
   return (regime === "tendance") === !meanRev ? "favorable" : "défavorable";
 }
 /** Régime en direct, calculé par le bot au moment d'entrer (300 dernières bougies, comme le mathématicien). */
