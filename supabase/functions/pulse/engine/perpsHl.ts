@@ -66,13 +66,19 @@ export function resumeStopDist(o: { entryPx: number; liqPx: number | null; lever
 }
 
 /** Perte si le stop de chaque position est touché, en part du capital. */
-function openRisk(positions: Position[], valueUsd: number) {
+/**
+ * Perte si le stop de chaque position est touché, en part du capital, MESURÉE DEPUIS LE PRIX D'ENTRÉE (28/11) :
+ * avant, elle partait du prix actuel, si bien qu'une position gagnante (stop resté loin) semblait de plus en plus risquée
+ * et bloquait toute nouvelle entrée. Un gain rendu n'est pas une perte du capital engagé. Frais et glissement compris.
+ */
+export function openRisk(positions: Position[], valueUsd: number) {
   if (!(valueUsd > 0)) return 0;
   return positions.reduce((s, p) => {
-    const price = p.live?.price ?? p.entry ?? 0, stop = p.stop ?? price;
-    if (!(price > 0)) return s;
-    const adverse = p.side === "long" ? price - stop : stop - price;
-    return s + Math.max(0, adverse / price + 2 * HL_RULES.takerFee + HL_RULES.expectedSlip) * (p.sizeUsd ?? 0); // frais et glissement compris, comme à l'entrée
+    const entry = p.entry ?? p.live?.price ?? 0, stop = p.stop ?? entry;
+    if (!(entry > 0)) return s;
+    const notional = p.coinSize ? p.coinSize * entry : (p.sizeUsd ?? 0);
+    const adverse = p.side === "long" ? entry - stop : stop - entry;
+    return s + Math.max(0, adverse / entry + 2 * HL_RULES.takerFee + HL_RULES.expectedSlip) * notional;
   }, 0) / valueUsd;
 }
 

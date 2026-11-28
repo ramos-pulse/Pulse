@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { addressOf, l1Digest, recoverAddress } from "../supabase/functions/pulse/engine/evm.ts";
 import { floatToWire, roundPrice, roundSize } from "../supabase/functions/pulse/engine/hyperliquid.ts";
-import { hlSafeLeverage, hlSizing, resumeStopDist, runHlTick } from "../supabase/functions/pulse/engine/perpsHl.ts";
+import { hlSafeLeverage, hlSizing, openRisk, resumeStopDist, runHlTick } from "../supabase/functions/pulse/engine/perpsHl.ts";
 import { conviction, setPerpsMarkets, type Candle } from "../supabase/functions/pulse/engine/strategy.ts";
 
 test("Hyperliquid : arrondis des prix et des tailles", () => {
@@ -60,6 +60,16 @@ test("Hyperliquid : position reprise sans mémoire → stop de secours toujours 
   const d = resumeStopDist({ entryPx: 1657, liqPx: 1690, leverage: 25 });                  // x25 : liquidation à +2 %
   assert.ok(d < 0.0067 && d > 0.006, `stop à ${(d * 100).toFixed(2)} %`);
   assert.ok(resumeStopDist({ entryPx: 100, liqPx: null, leverage: 40 }) < 0.01);            // liquidation inconnue : déduite du levier
+});
+
+test("Hyperliquid : une position gagnante ne bloque plus les nouvelles entrées (risque mesuré depuis l'entrée)", () => {
+  // la situation du 28/11 : XMR long à +3,65 %, stop resté sous l'entrée ; ETH short, stop suiveur
+  const xmr = { key: "XMR", symbol: "XMR", side: "long", entry: 418.06, stop: 405.06, coinSize: 0.067, sizeUsd: 29.0, live: { price: 433.3 } };
+  const eth = { key: "ETH", symbol: "ETH", side: "short", entry: 1657.2, stop: 1661.6, coinSize: 0.0512, sizeUsd: 84.9, live: { price: 1659 } };
+  const r = openRisk([xmr, eth] as never, 40.1);
+  assert.ok(r < 0.035 && r > 0.025, `risque ${(r * 100).toFixed(2)} %`); // ≈ 3,1 % (l'ancien calcul donnait 5,4 % : au-dessus du plafond de 4,5 %)
+  // stop remonté au-dessus de l'entrée (gain verrouillé au-delà des frais) : plus aucun risque compté
+  assert.equal(openRisk([{ ...xmr, stop: 425 }] as never, 40.1), 0);
 });
 
 test("Hyperliquid : stop minuscule → taille plafonnée à 10 × le capital", () => {

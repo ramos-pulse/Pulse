@@ -43,7 +43,7 @@ export async function currentPerpsValue() {
 function openRisk(positions: Position[], valueUsd: number) {
   if (!(valueUsd > 0)) return 0;
   return positions.reduce((s, p) => {
-    const price = p.live?.price ?? p.entry ?? 0, stop = p.stop ?? price;
+    const price = p.entry ?? p.live?.price ?? 0, stop = p.stop ?? price; // depuis l'entrée (28/11), comme sur Hyperliquid
     if (!(price > 0)) return s;
     const adverse = p.side === "long" ? price - stop : stop - price;
     return s + Math.max(0, adverse / price) * (p.sizeUsd ?? 0);

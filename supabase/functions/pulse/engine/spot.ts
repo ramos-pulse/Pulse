@@ -99,8 +99,8 @@ const FILL_ALERT = 0.006;
 function openRisk(positions: Position[], b: Balances, valueUsd: number) {
   if (!(valueUsd > 0)) return 0;
   return positions.reduce((s, p) => {
-    const price = p.live?.price ?? p.entry ?? 0, qty = b.ui[p.key] ?? 0;
-    return s + Math.max(0, (price - (p.stop ?? price)) * qty);
+    const entry = p.entry ?? p.live?.price ?? 0, qty = b.ui[p.key] ?? 0; // depuis l'entrée (28/11) : un gain rendu ne bloque plus les entrées
+    return s + Math.max(0, (entry - (p.stop ?? entry)) * qty);
   }, 0) / valueUsd;
 }
 
