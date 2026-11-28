@@ -254,6 +254,17 @@ export function setupExit(family: SetupFamily, c: Candle[], side: Side, P: Setup
   }
 }
 
+/**
+ * PROLONGER AU LIEU DE SORTIR-RENTRER (28/11) : quand la durée maximale d'une stratégie est atteinte mais que son signal
+ * d'entrée est toujours valable dans le même sens, on garde la position (nouveau stop / objectif du signal, compteur remis
+ * à zéro) au lieu de payer une sortie puis une entrée identique. Même règle en réel et en backtest.
+ */
+export function extendOnTime(reason: string | null, family: SetupFamily, c: Candle[], side: Side, allowShort: boolean, P: SetupParams, extra?: Extra): SetupSignal | null {
+  if (!reason || !reason.endsWith("_temps")) return null;
+  const sig = setupSignal(family, c, allowShort, P, extra);
+  return sig.side === side ? sig : null;
+}
+
 /** Réglages de stop suiveur (pour trailStop) d'une famille suiveuse. */
 export const trailParams = (P: SetupParams): Params => ({ breakout: 0, trailAtr: (P as SqueezeParams).trailAtr ?? 3, minTrend: 0 });
 
@@ -265,7 +276,7 @@ export function backtestSetup(family: SetupFamily, candles: Candle[], P: SetupPa
   const T = tfOf(candles), trailing = TRAILING.includes(family);
   let equity = 1, peak = 1, maxDd = 0, cooldownUntil = 0;
   const log: BacktestResult["log"] = [];
-  type Pos = { side: Side; entry: number; stop: number; target?: number; best: number; risk: number; size: number; i: number; t: number; partial: boolean };
+  type Pos = { side: Side; entry: number; stop: number; target?: number; best: number; risk: number; size: number; i: number; t: number; partial: boolean; holdT?: number };
   let pos: Pos | null = null;
   const atrs = atr(candles, STRATEGY.atrPeriod);
   const start = STRATEGY.emaSlow + 5;
@@ -284,8 +295,11 @@ export function backtestSetup(family: SetupFamily, candles: Candle[], P: SetupPa
       if (long ? c.l <= pos.stop : c.h >= pos.stop) { exit = long ? Math.min(c.o, pos.stop) : Math.max(c.o, pos.stop); reason = (long ? pos.stop >= pos.entry : pos.stop <= pos.entry) ? "trailing_stop" : "stop_loss"; }
       else if (pos.target != null && (long ? c.h >= pos.target : c.l <= pos.target)) { exit = long ? Math.max(c.o, pos.target) : Math.min(c.o, pos.target); reason = "objectif"; }
       else if (!trailing) {
-        const r = setupExit(family, candles.slice(Math.max(0, i - 400), i + 1), pos.side, P, i - pos.i, pos.t);
-        if (r) { exit = c.c; reason = r; }
+        const win = candles.slice(Math.max(0, i - 400), i + 1);
+        const r = setupExit(family, win, pos.side, P, i - pos.i, pos.holdT ?? pos.t);
+        const ext = extendOnTime(r, family, win, pos.side, o.allowShort, P, o.extra);
+        if (ext) { pos.i = i; pos.holdT = c.t; pos.stop = ext.stop; pos.target = ext.target; } // prolongée : pas de frais de sortie / re-entrée
+        else if (r) { exit = c.c; reason = r; }
       } else {
         const r = pos.risk > 0 ? (long ? c.c - pos.entry : pos.entry - c.c) / pos.risk : 0;
         if ((c.t - pos.t) / 3_600_000 >= T.maxHoldHours && r < STRATEGY.minProgressR) { exit = c.c; reason = "time_stop"; }

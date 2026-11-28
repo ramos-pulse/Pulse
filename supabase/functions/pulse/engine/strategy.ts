@@ -509,6 +509,7 @@ export interface Position {
   strategy?: SpotStrategy | SetupFamily | "nouveau"; posParams?: Params | RsiParams | SetupParams; posInterval?: Interval; source?: string;
   target?: number;           // objectif de prix (familles « à objectif » : ORB, VWAP, funding)
   liqAtEntry?: number;       // liquidité du token à l'entrée (spot) : sortie d'urgence si elle s'effondre
+  holdSince?: number;        // 28/11 : position prolongée (durée maximale atteinte, signal toujours valable) : compteur de durée remis à zéro ici
   regime?: string;           // 28/11 : régime du marché à l'entrée (calcul du mathématicien) et accord avec la famille de la stratégie
   regimeFit?: "favorable" | "neutre" | "défavorable";
   liqCheckedAt?: number;

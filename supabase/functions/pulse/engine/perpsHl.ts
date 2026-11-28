@@ -6,6 +6,7 @@
 //  - minimum 10 $ de TAILLE (et non 10 $ de collatéral) : plusieurs petites positions possibles avec peu de capital.
 // Marge ISOLÉE : chaque position a sa propre marge ; levier plafonné pour que la liquidation reste 3 fois plus loin que le stop.
 import { liveRegimeOf, regimeFitLabel } from "./math.ts";
+import { hlMakerEntry } from "./hyperliquid.ts";
 import type { BotState, Store } from "../store.ts";
 import { isBenched, learn, mindset, newBrain, riskPerTrade } from "./brain.ts";
 import { candles as getCandles, lastClosedCandle } from "./candles.ts";
@@ -14,7 +15,7 @@ import {
   hlAccount, hlAsset, hlCancel, hlCredentials, hlFills, hlMarketOrder, hlMids, hlOpenOrders, hlPlaceStop, hlSetLeverage, hlTransfers, HL_RULES,
   type HlAccount, type HlAsset, type HlPosition,
 } from "./hyperliquid.ts";
-import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type Extra, type SetupParams } from "./setups.ts";
+import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type Extra, type SetupParams, extendOnTime } from "./setups.ts";
 import { addToVault, applyTransfer, AGGR_AGGRESSIVE, AGGR_LEVELS, atr, conviction, cooldownMs, DEFAULT_PARAMS, effectiveAggr, exitCheck, EXTRA_SOFT, floorOf, LIQ, loadMemory, loadPerpsConfig, migratePositions, missionEnd, PARTIAL, pruneSignal, perpsChange, perpsMarkets, PRESETS, riskFactor, riskGate, RULES, sampleCurve, sideMult, TOTAL_RISK, tradable, trailStop, trendSignal, volScale, type Interval, type Memory, type Params, type PerpsConfig, type PerpsPlan, type Position, lossPause, stopProtects } from "./strategy.ts";
 
 type Admin = Store;
@@ -213,7 +214,21 @@ export async function runHlTick(admin: Admin): Promise<string> {
       let rangeOut: string | null = null;
       if (isRangePos && p.stopCandle !== closed) {
         const c = await getCandles(candles, iv, 260, now).catch(() => []);
-        if (c.length > 40) { rangeOut = setupExit(fam!, c, p.side, p.posParams as SetupParams, Math.round((now - (p.openedAt ?? now)) / (iv === "15m" ? 900_000 : 3_600_000)), p.openedAt ?? now); p.stopCandle = closed; }
+        if (c.length > 40) {
+          const since = p.holdSince ?? p.openedAt ?? now;
+          rangeOut = setupExit(fam!, c, p.side, p.posParams as SetupParams, Math.round((now - since) / (iv === "15m" ? 900_000 : 3_600_000)), since);
+          p.stopCandle = closed;
+          // durée maximale atteinte mais signal toujours valable dans le même sens : on prolonge (28/11)
+          if (rangeOut?.endsWith("_temps")) {
+            const extra = fam === "funding" ? { funding: await fundingHistory(p.key, c[0]!.t - 86_400_000).catch(() => []) } : undefined;
+            const ext = extendOnTime(rangeOut, fam!, c, p.side, sideMult(cfg.bias, "short") > 0, p.posParams as SetupParams, extra);
+            if (ext) {
+              p.holdSince = now; p.stop = ext.stop; if (ext.target != null) p.target = ext.target + (price - ext.price);
+              message = `${p.key} : durée maximale atteinte mais le signal est toujours valable : position prolongée (pas de frais de sortie et de re-entrée).`;
+              rangeOut = null;
+            }
+          }
+        }
       } else if (!isRangePos && p.stopCandle !== closed) {
         const c = await getCandles(candles, iv, 40, now).catch(() => []);
         if (c.length > 20) {
@@ -302,7 +317,8 @@ export async function runHlTick(admin: Admin): Promise<string> {
       if (!size) { notes.push(`${plan.asset} : signal ${sig.side} refusé — la position minimale de Hyperliquid (10 $) dépasserait ton plafond de risque, ou pas assez d'USDC disponibles`); continue; }
       // levier (marge isolée), ordre au marché, puis stop chez Hyperliquid ; si le stop ne peut pas être posé, on referme aussitôt
       const lev = await hlSetLeverage(creds.key, asset, size.leverage);
-      const fill = await hlMarketOrder(creds.key, asset, sig.side === "long", size.coins, price);
+      // 28/11 : entrée « faiseur » d'abord (frais ~3 fois plus bas), complétée au marché si besoin
+      const fill = await hlMakerEntry(creds.key, creds.account, asset, sig.side === "long", size.coins, price);
       const fillStop = sig.side === "long" ? fill.avgPx - dist : fill.avgPx + dist;
       const source = plan.source || "réglages de l'app";
       const pos: Position = {
@@ -323,7 +339,7 @@ export async function runHlTick(admin: Admin): Promise<string> {
       }
       mine[plan.asset] = pos;
       admin.addTrade("perps", { action: "open", asset: plan.asset, side: sig.side, collateral_usd: pos.collateralUsd, price: fill.avgPx, reason: sig.reason, source,
-        detail: { pourquoi: pos.why, stop: fillStop, strategie: source, levier: lev, plateforme: "Hyperliquid" } });
+        detail: { pourquoi: pos.why, stop: fillStop, strategie: source, levier: lev, plateforme: "Hyperliquid", entree_faiseur_pct: Math.round((fill.makerSize / fill.size) * 100) } });
       mem.signal = `${plan.asset} : ${sig.reason}`;
       await save(admin, mem, { ...patch, ...mirror(mine), last_value_usd: value,
         last_message: `${sig.side === "long" ? "Long" : "Short"} ${plan.asset} ouvert à ${fmt(fill.avgPx)} $ (${L.name.toLowerCase()}) : ${pos.sizeUsd!.toFixed(2)} $ x${lev}, risque ${(size.risk * 100).toFixed(1)} %, stop ${fmt(fillStop)} $ posé chez Hyperliquid.` });

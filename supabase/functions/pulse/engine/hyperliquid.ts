@@ -14,7 +14,9 @@ export const HL_RULES = {
   stopSlippage: 0.03,     // stop « au marché » déclenché : prix limite 3 % au-delà du déclencheur
   expectedSlip: 0.0005,   // glissement moyen attendu à la sortie (0,05 %) : compté dans le risque d'un trade
   maxExposure: 10,
-  fundingBuffer: 0.005,   // réserve de 0,5 % : en marge isolée, le funding payé ronge la marge et rapproche la liquidation        // taille d'une position plafonnée à 10 × le capital, même avec un stop très serré
+  fundingBuffer: 0.005,
+  makerWaitMs: 15_000,    // 28/11 : entrée « faiseur » (3 fois moins de frais) : 15 s pour être exécutée, sinon au marché
+  makerPollMs: 3_000,   // réserve de 0,5 % : en marge isolée, le funding payé ronge la marge et rapproche la liquidation        // taille d'une position plafonnée à 10 × le capital, même avec un stop très serré
 };
 
 // ---------------------------------------------------------------------------------------------------
@@ -205,6 +207,53 @@ export async function hlMarketOrder(key: string, asset: HlAsset, isBuy: boolean,
   const f = statuses.map((x) => (typeof x === "string" ? undefined : x.filled)).find(Boolean);
   if (!f) throw new Error(`ordre ${asset.name} non exécuté (pas de contrepartie à moins de 1 %)`);
   return { size: Number(f.totalSz), avgPx: Number(f.avgPx), oid: f.oid };
+}
+
+/** Meilleurs prix du carnet (achat, vente). */
+export async function hlBook(coin: string): Promise<{ bid: number; ask: number } | null> {
+  const r = await info<{ levels?: { px: string }[][] }>({ type: "l2Book", coin });
+  const bid = Number(r.levels?.[0]?.[0]?.px), ask = Number(r.levels?.[1]?.[0]?.px);
+  return bid > 0 && ask > 0 ? { bid, ask } : null;
+}
+/**
+ * ENTRÉE « FAISEUR » (28/11) : ordre posé au meilleur prix de son côté du carnet (« ajout de liquidité seulement » :
+ * jamais exécuté comme preneur), frais ~3 fois plus bas. Après HL_RULES.makerWaitMs, ce qui reste est annulé puis complété
+ * au marché. Si l'annulation échoue, on n'envoie RIEN de plus (pas de risque de position doublée) : la reprise des positions
+ * trouvées sur Hyperliquid prend le relais avec un stop de secours.
+ */
+export async function hlMakerEntry(key: string, account: string, asset: HlAsset, isBuy: boolean, size: number, refPx: number,
+  wait = HL_RULES.makerWaitMs, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))): Promise<HlFillResult & { makerSize: number }> {
+  const sz = roundSize(size, asset.szDecimals);
+  if (!(sz > 0)) throw new Error(`taille trop petite pour ${asset.name}`);
+  const t0 = Date.now() - 2_000;
+  const book = await hlBook(asset.name).catch(() => null);
+  let oid: number | null = null;
+  if (book) {
+    const px = roundPrice(isBuy ? book.bid : book.ask, asset.szDecimals);
+    const { statuses } = await exchange(key, { type: "order", orders: [{ a: asset.index, b: isBuy, p: floatToWire(px), s: floatToWire(sz), r: false, t: { limit: { tif: "Alo" } } }], grouping: "na" }).catch(() => ({ statuses: [] as Status[] }));
+    const st = statuses[0];
+    if (typeof st === "object" && st.filled) return { size: Number(st.filled.totalSz), avgPx: Number(st.filled.avgPx), oid: st.filled.oid, makerSize: Number(st.filled.totalSz) };
+    oid = typeof st === "object" ? st.resting?.oid ?? null : null; // refusé (le prix a bougé) : directement au marché
+  }
+  const mine = async () => (await hlFills(account, t0).catch(() => [] as HlFill[])).filter((f) => oid != null && f.oid === oid);
+  if (oid != null) {
+    for (let waited = 0; waited < wait; waited += HL_RULES.makerPollMs) {
+      await sleep(HL_RULES.makerPollMs);
+      const done = (await mine()).reduce((a, f) => a + f.sz, 0);
+      if (done >= sz * 0.999) break;
+    }
+    await hlCancel(key, asset, oid); // erreur → exception : rien de plus n'est envoyé
+  }
+  const fills = await mine();
+  const makerSize = fills.reduce((a, f) => a + f.sz, 0), makerCost = fills.reduce((a, f) => a + f.sz * f.px, 0);
+  const rest = roundSize(sz - makerSize, asset.szDecimals);
+  if (rest <= 0 || rest * refPx < HL_RULES.minNotionalUsd) {
+    if (makerSize > 0) return { size: makerSize, avgPx: makerCost / makerSize, oid: oid!, makerSize };
+    if (rest <= 0) throw new Error(`entrée ${asset.name} : rien d'exécuté`);
+  }
+  const m = rest * refPx >= HL_RULES.minNotionalUsd || makerSize === 0 ? await hlMarketOrder(key, asset, isBuy, rest, refPx) : null;
+  const size2 = makerSize + (m?.size ?? 0);
+  return { size: size2, avgPx: (makerCost + (m ? m.size * m.avgPx : 0)) / size2, oid: m?.oid ?? oid!, makerSize };
 }
 
 /** Stop posé CHEZ Hyperliquid (déclencheur « au marché », réduction seulement) : il protège même si le serveur tombe. */

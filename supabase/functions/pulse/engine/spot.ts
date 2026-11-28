@@ -10,7 +10,7 @@ import { getBalances, loadKeyPairFrom, txStatus, waitForTx, type Balances } from
 import { dexPrices, tokenLiquidity } from "./dex.ts";
 import { liveRegimeOf, regimeFitLabel } from "./math.ts";
 import { FRESH, freshAffordable, freshStake } from "./agents.ts";
-import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type SetupParams } from "./setups.ts";
+import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type SetupParams, extendOnTime } from "./setups.ts";
 import { addToVault, applyTransfer, conviction, pruneSignal, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate, EXTRA_SOFT, cooldownMs, exitSlippageBps, floorOf, solReserveAlert, volScale, groupOf, LIQUIDITY, type SpotFamily, rsiExitSignal, rsiSignal, RULES, sampleCurve, SOL_MINT, TOKENS, allTokens, type TokenInfo, TOTAL_RISK, tradable, trailStop, trendSignal, USDC_MINT, type Interval, type Memory, type Params, type Position, type RsiParams, type Signal, type SpotConfig, type SpotStrategy, lossPause, stopProtects, spotOrderSize } from "./strategy.ts";
 
 type Admin = Store;
@@ -230,7 +230,13 @@ export async function runTick(admin: Admin): Promise<string> {
       if (token && !isFresh && p.stopCandle !== closed) {
         if (fixed) {
           const c = await getCandles(token.candles, iv, 260, now).catch(() => []);
-          if (c.length > 40) { setupOut = setupExit(fam!, c, "long", p.posParams as SetupParams, Math.round((now - (p.openedAt ?? now)) / (iv === "15m" ? 900_000 : 3_600_000)), p.openedAt ?? now); p.stopCandle = closed; }
+          if (c.length > 40) {
+            const since = p.holdSince ?? p.openedAt ?? now;
+            setupOut = setupExit(fam!, c, "long", p.posParams as SetupParams, Math.round((now - since) / (iv === "15m" ? 900_000 : 3_600_000)), since);
+            p.stopCandle = closed;
+            const ext = extendOnTime(setupOut, fam!, c, "long", false, p.posParams as SetupParams); // durée atteinte, signal toujours là : on prolonge (28/11)
+            if (ext) { p.holdSince = now; p.stop = ext.stop; if (ext.target != null) p.target = ext.target; setupOut = null; }
+          }
         } else if (isRsi) { // décision à la clôture de chaque bougie : RSI repassé au-dessus du seuil de sortie ?
           const rp = (p.posParams as RsiParams | undefined) ?? cfg.rsi;
           const c = await getCandles(token.candles, iv, rp.rsiPeriod * 6 + 10, now).catch(() => []);
