@@ -26,8 +26,9 @@ test("Hyperliquid : levier sûr (liquidation 3 fois plus loin que le stop)", () 
 });
 
 test("Hyperliquid : taille d'une position (minimum 10 $ de TAILLE, marge dans les USDC disponibles)", () => {
-  const s = hlSizing(44, 44, 70, 68.6, 0.0225, 5, 0.03)!; // stop 2 %, risque 2,25 %
-  assert.ok(Math.abs(s.notional - 49.5) < 0.01);
+  const s = hlSizing(44, 44, 70, 68.6, 0.0225, 5, 0.03)!; // stop 2 %, risque 2,25 % (frais + glissement compris : 2,14 %)
+  assert.ok(Math.abs(s.notional - 44 * 0.0225 / 0.0214) < 0.01);
+  assert.ok(Math.abs(s.risk - 0.0225) < 1e-9);
   assert.ok(s.margin <= 44 * 0.95 && s.leverage <= 5);
   // petite position voulue (4 $) : montée à 10 $ si le risque reste sous le plafond
   const m = hlSizing(44, 44, 70, 69.3, 0.001, 5, 0.03)!;
@@ -37,6 +38,27 @@ test("Hyperliquid : taille d'une position (minimum 10 $ de TAILLE, marge dans le
   // marge plafonnée par les USDC disponibles
   const c = hlSizing(1000, 10, 70, 68.6, 0.03, 3, 0.03)!;
   assert.ok(c.margin <= 10 * 0.95 + 1e-9);
+});
+
+test("Hyperliquid : levier adapté au stop (même perte au stop, beaucoup moins de marge bloquée)", () => {
+  // le trade ETH du 28/11 : compte de 39 $, stop à 0,44 %, risque 0,95 %, marché à x25 maximum
+  const price = 1657.2, stop = 1664.47;
+  const s = hlSizing(39, 39, price, stop, 0.0095, 25, 0.03)!;
+  const old = hlSizing(39, 39, price, stop, 0.0095, 3, 0.03)!; // l'ancien plafond x3
+  assert.ok(Math.abs(s.risk - old.risk) < 1e-9, "la perte au stop ne dépend pas du levier");
+  assert.ok(s.leverage >= 20 && s.leverage <= 25, `levier x${s.leverage}`);
+  assert.ok(s.margin < 4 && old.margin > 20, `marge ${s.margin} au lieu de ${old.margin}`);
+  // la liquidation reste au moins 3 fois plus loin que le stop
+  const dist = Math.abs(stop - price) / price, liq = 1 / s.leverage - 1 / (2 * 25);
+  assert.ok(liq >= 3 * dist, `liquidation à ${(liq * 100).toFixed(2)} %, stop à ${(dist * 100).toFixed(2)} %`);
+  // stop large (5 %) : levier bas, même sur un marché à x40
+  assert.ok(hlSizing(39, 39, 100, 95, 0.01, 40, 0.03)!.leverage <= 6);
+});
+
+test("Hyperliquid : stop minuscule → taille plafonnée à 10 × le capital", () => {
+  const s = hlSizing(39, 39, 100, 99.95, 0.03, 40, 0.03)!; // stop à 0,05 %, risque 3 % : il faudrait 16 × le capital
+  assert.ok(Math.abs(s.notional - 390) < 1e-6, `taille ${s.notional}`);
+  assert.ok(s.risk < 0.03);
 });
 
 test("mise selon la confiance : de ×0,5 à ×1,5 selon le score de la stratégie", () => {
@@ -149,7 +171,8 @@ test("simulation : ouverture, stop chez Hyperliquid, stop suiveur, stop déclenc
   assert.equal(hl.orders.length, 1, "un stop posé chez Hyperliquid");
   const firstStop = hl.orders[0]!.trig;
   assert.ok(firstStop < hl.mids.SOL!, "stop sous le prix pour un long");
-  assert.ok(hl.pos.SOL.lev >= 1 && hl.pos.SOL.lev <= 5, "levier dans la limite choisie");
+  assert.ok(hl.pos.SOL.lev >= 1 && hl.pos.SOL.lev <= 20, "levier adapté au stop, dans la limite du marché (SOL x20)");
+  { const p = hl.pos.SOL, liq = 1 / p.lev - 1 / 40, dist = Math.abs(p.entryPx - firstStop) / p.entryPx; assert.ok(liq >= 3 * dist - 1e-9, "liquidation 3 fois plus loin que le stop"); }
   assert.deepEqual([...hl.signers], [addressOf(AGENT_KEY)], "toutes les actions signées par l'agent");
   assert.equal(trades.filter((x) => x.action === "open").length, 1);
   assert.match(String((trades[0]!.detail as { pourquoi: string }).pourquoi), /confiance ×1\.\d+/);

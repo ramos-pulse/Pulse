@@ -34,22 +34,26 @@ export function hlSafeLeverage(dist: number, maxLeverage: number): number {
 }
 
 /**
- * Taille d'une position : risque voulu → taille (USD) = capital × risque / distance du stop.
+ * Taille d'une position : risque voulu → taille (USD) = capital × risque / (distance du stop + frais + glissement).
+ * Levier ADAPTÉ AU STOP (28/11) : le plus haut levier du marché qui garde la liquidation 3 fois plus loin que le stop.
+ * Le levier ne change pas la perte au stop (fixée par la taille) : il réduit seulement la marge bloquée, pour laisser
+ * de la place aux autres positions. Garde-fous : frais et glissement comptés dans le risque, taille ≤ 10 × le capital.
  * Hyperliquid exige 10 $ de taille : on monte à 10 $ seulement si le risque reste sous le plafond.
  * La marge (taille / levier) doit tenir dans les USDC disponibles.
  */
 export function hlSizing(equity: number, available: number, price: number, stop: number, risk: number, maxLev: number, maxRisk: number) {
   const dist = Math.abs(price - stop) / price;
   if (!(dist > 0) || !(equity > 0) || !(price > 0)) return null;
+  const loss = dist + 2 * HL_RULES.takerFee + HL_RULES.expectedSlip; // perte réelle au stop, pour 1 $ de taille
   const lev = Math.max(1, Math.min(maxLev, Math.floor(hlSafeLeverage(dist, maxLev))));
-  let notional = (equity * risk) / dist;
+  let notional = Math.min((equity * risk) / loss, equity * HL_RULES.maxExposure);
   if (notional < HL_RULES.minNotionalUsd) {
-    if ((HL_RULES.minNotionalUsd * dist) / equity > maxRisk + 1e-9) return null;
+    if ((HL_RULES.minNotionalUsd * loss) / equity > maxRisk + 1e-9 || equity * HL_RULES.maxExposure < HL_RULES.minNotionalUsd * 1.02) return null;
     notional = HL_RULES.minNotionalUsd * 1.02; // petite marge : l'arrondi de la taille ne doit pas repasser sous 10 $
   }
   const margin = notional / lev;
   if (margin > available * 0.95) { notional = available * 0.95 * lev; if (notional < HL_RULES.minNotionalUsd * 1.02) return null; }
-  return { notional, margin: notional / lev, leverage: lev, coins: notional / price, risk: (notional * dist) / equity };
+  return { notional, margin: notional / lev, leverage: lev, coins: notional / price, risk: (notional * loss) / equity };
 }
 
 /** Perte si le stop de chaque position est touché, en part du capital. */
@@ -280,7 +284,7 @@ export async function runHlTick(admin: Admin): Promise<string> {
       const risk = Math.min(wanted, room);
       if (risk < 0.002) { notes.push(`${plan.asset} : risque total des positions déjà au plafond`); continue; }
       const T = tradable(value, acct.withdrawable, mem.vault);
-      const size = hlSizing(T.equity, T.usdc, price, stop, risk, Math.min(cfg.maxLev, asset.maxLeverage), Math.min(L.maxRisk, room));
+      const size = hlSizing(T.equity, T.usdc, price, stop, risk, asset.maxLeverage, Math.min(L.maxRisk, room)); // levier adapté au stop, jusqu'au maximum du marché
       if (!size) { notes.push(`${plan.asset} : signal ${sig.side} refusé — la position minimale de Hyperliquid (10 $) dépasserait ton plafond de risque, ou pas assez d'USDC disponibles`); continue; }
       // levier (marge isolée), ordre au marché, puis stop chez Hyperliquid ; si le stop ne peut pas être posé, on referme aussitôt
       const lev = await hlSetLeverage(creds.key, asset, size.leverage);

@@ -418,7 +418,7 @@ function perpsLabel() {
   const c = S.bots.perps.config || {aggr: 1, maxLev: 3, bias: 0};
   const lvl = c.autopilot && !c.pilotAggressive ? Math.min(c.aggr ?? 1, 1) : (c.aggr ?? 1);
   const plan = c.plans?.length ? ` · ${c.plans.map(p => p.asset + (p.interval === "15m" ? " 15m" : "")).join(", ")}` : "";
-  return `${c.autopilot ? "Pilote auto" + (plan || " · en attente") : plan.replace(/^ · /, "")}${c.autopilot || plan ? " · " : ""}${S.rules.aggrLevels?.[lvl]?.name || ""} · x${c.maxLev ?? 3} max${c.bias ? " · " + biasText(c.bias) : ""}`;
+  return `${c.autopilot ? "Pilote auto" + (plan || " · en attente") : plan.replace(/^ · /, "")}${c.autopilot || plan ? " · " : ""}${S.rules.aggrLevels?.[lvl]?.name || ""} · ${S.perpsVenue === "hyperliquid" ? "levier selon le stop" : `x${c.maxLev ?? 3} max`}${c.bias ? " · " + biasText(c.bias) : ""}`;
 }
 function perpsCard() {
   const c = S.bots.perps.config || {aggr: 1, maxLev: 3, bias: 0}, levs = S.rules.leverages || [3, 5, 10, 100, 250];
@@ -430,8 +430,8 @@ function perpsCard() {
     <p class="sub" id="pmodeTxt" style="margin:6px 0 4px">${modeText(c.aggr ?? 1)}</p>
     <div class="sep"></div>
     <div class="k">Levier maximum</div>
-    <div class="chips" style="margin:8px 0 0">${levs.map(l => `<button class="chip ${c.maxLev === l ? "on" : ""}" data-lev="${l}">x${l}</button>`).join("")}</div>
-    <p class="sub" id="levTxt" style="margin:6px 0 4px">${levText(c.maxLev)}</p>
+    ${S.perpsVenue === "hyperliquid" ? `<p class="sub" style="margin:6px 0 4px">${HL_LEV_TXT}</p>` : `<div class="chips" style="margin:8px 0 0">${levs.map(l => `<button class="chip ${c.maxLev === l ? "on" : ""}" data-lev="${l}">x${l}</button>`).join("")}</div>
+    <p class="sub" id="levTxt" style="margin:6px 0 4px">${levText(c.maxLev)}</p>`}
     <div class="sep"></div>
     <div class="k">Longs / shorts</div>
     <input type="range" id="pbias" min="-100" max="100" step="25" value="${c.bias}">
@@ -447,6 +447,7 @@ function modeText(i) {
   const capped = c.autopilot && !c.pilotAggressive && i > 1;
   return `${i >= 3 ? "⚠ " : ""}Risque ×${String(L.riskMult).replace(".", ",")} (jusqu'à ${nf(L.maxRisk * 100, 1)} % du capital perdu si le stop est touché), perte max ${nf(L.dailyLoss * 100, 1)} % par jour.${i >= 3 ? " Il trade même quand aucun réglage n'a fait ses preuves sur 60 jours." : ""}${capped ? " Pilote automatique actif : plafonné à « Normal » tant que le mode agressif du chercheur est coupé (Agents)." : ""}`;
 }
+const HL_LEV_TXT = "Automatique, adapté au stop : le bot prend le plus haut levier du marché (BTC jusqu'à x40, ETH x25…) qui garde la liquidation au moins 3 fois plus loin que le stop. Le levier ne change pas la perte au stop, fixée par l'agressivité : il réduit seulement la marge bloquée, pour laisser de la place aux autres positions. Garde-fous : frais et glissement comptés dans le risque, taille d'une position plafonnée à 10 × le capital.";
 function levText(l) {
   return `Levier jusqu'à x${l}. La perte au stop dépend de l'agressivité, pas du levier : plus de levier = moins de collatéral bloqué. Le bot réduit toujours le levier pour que son stop soit touché bien avant la liquidation${l >= 100 ? " ; à x" + l + ", une variation d'environ " + nf(100 / l, 1) + " % contre toi suffirait à liquider, donc il ne l'atteindra qu'avec un stop très serré" : ""}.`;
 }
@@ -877,7 +878,7 @@ function quickSettings(kind) {
   const seg = (attr, n, cur, label, hotFrom) => `<div class="seg" data-tip="${label}">${label.split(" ")[0].toUpperCase()}<span class="bars">${Array.from({length: n}, (_, i) => `<i class="${i <= cur ? "on" : ""}${i <= cur && cur >= hotFrom ? (cur >= n - 1 && hotFrom < n ? " red" : " hot") : ""}" data-${attr}="${i}"></i>`).join("")}</span></div>`;
   if (kind === "perps") {
     const levs = S.rules.leverages || [3, 5, 10, 100, 250];
-    return `<div class="qs"><button class="tg ${sc.dailyStop ? "on" : ""}" data-qday="1" data-tip="Stop du jour : plus d'entrée après une perte du jour trop forte (5 % spot). Coupé = les bots continuent ; le plancher à 30 % du départ reste toujours actif.">Stop du jour</button><button class="tg ${pc.extraSoft ? "on" : ""}" data-qsoft="perps">Extra souple</button><div class="lev">${levs.map(l => `<button class="${pc.maxLev === l ? "on" : ""} ${l >= 100 ? "hot" : ""}" data-qlev="${l}">x${l}</button>`).join("")}</div>
+    return `<div class="qs"><button class="tg ${sc.dailyStop ? "on" : ""}" data-qday="1" data-tip="Stop du jour : plus d'entrée après une perte du jour trop forte (5 % spot). Coupé = les bots continuent ; le plancher à 30 % du départ reste toujours actif.">Stop du jour</button><button class="tg ${pc.extraSoft ? "on" : ""}" data-qsoft="perps">Extra souple</button>${S.perpsVenue === "hyperliquid" ? `<div class="lev"><button class="on" data-tip="${esc(HL_LEV_TXT)}">Levier auto</button></div>` : `<div class="lev">${levs.map(l => `<button class="${pc.maxLev === l ? "on" : ""} ${l >= 100 ? "hot" : ""}" data-qlev="${l}">x${l}</button>`).join("")}</div>`}
       ${seg("qaggr", (S.rules.aggrLevels || []).length || 5, pc.aggr ?? 1, `Agressivité du bot perps : ${S.rules.aggrLevels?.[pc.aggr ?? 1]?.name || ""}. Touche une case pour changer.`, 3)}</div>`;
   }
   return `<div class="qs">${seg("qnerve", 4, sc.nerve ?? 1, `Nervosité des stratégies : ${["Calme", "Normal", "Nerveux", "Très nerveux"][sc.nerve ?? 1]}. Touche une case pour changer.`, 3)}

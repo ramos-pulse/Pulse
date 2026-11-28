@@ -12,6 +12,8 @@ export const HL_RULES = {
   takerFee: 0.00045,      // 0,045 % par côté (niveau de départ)
   slippage: 0.01,         // ordre « au marché » = ordre limite IOC 1 % au-delà du prix moyen
   stopSlippage: 0.03,     // stop « au marché » déclenché : prix limite 3 % au-delà du déclencheur
+  expectedSlip: 0.0005,   // glissement moyen attendu à la sortie (0,05 %) : compté dans le risque d'un trade
+  maxExposure: 10,        // taille d'une position plafonnée à 10 × le capital, même avec un stop très serré
 };
 
 // ---------------------------------------------------------------------------------------------------
