@@ -23,7 +23,8 @@ export interface Candidate {
   params: Params | RsiParams | SetupParams;
 }
 
-export interface SegmentStats { trades: number; winRate: number; profitFactor: number; returnPct: number; maxDrawdownPct: number; meanPct?: number; sdPct?: number; luck?: number }
+export interface SegmentStats { trades: number; winRate: number; profitFactor: number; returnPct: number; maxDrawdownPct: number; meanPct?: number; sdPct?: number; luck?: number;
+  periodsWon?: number } // 28/11 : nombre de tiers de l'historique gagnés (sur 3, le dernier = période jamais vue)
 export interface Evaluation { train: SegmentStats; test: SegmentStats; score: number; verdict: "prometteuse" | "à surveiller" | "rejetée"; why: string }
 
 const pick = <T>(rnd: () => number, list: readonly T[]): T => list[Math.floor(rnd() * list.length)]!;
@@ -86,11 +87,73 @@ export function tempo(c: { interval?: string | null; family: Family; params: unk
   return Math.max(0, Math.min(3, t));
 }
 
+// ---------------------------------------------------------------------------------------------------
+// RÉPARTITION INTELLIGENTE DU TEMPS (28/11) : le chercheur apprend de ses propres résultats.
+// ---------------------------------------------------------------------------------------------------
+/** Compteurs avec oubli progressif : n = stratégies testées, ok = non rejetées, last = dernier passage (marchés). */
+export interface Tally { n: number; ok: number; last?: number }
+export interface ResearchStats { family: Record<string, Tally>; market: Record<string, Tally>; math: Record<string, Tally> }
+export const ALLOC = { decay: 0.995, floor: 0.05, prior: { n: 20, ok: 2 }, minMath: 0.15, maxMath: 0.5 };
+export const emptyStats = (): ResearchStats => ({ family: {}, market: {}, math: {} });
+export const familyKey = (kind: BotKind, interval: Interval, f: Family) => `${kind}|${interval}|${f}`;
+export const marketKey = (m: Pick<Market, "product" | "kind" | "interval">) => `${m.product}|${m.kind}|${m.interval}`;
+/** Taux de réussite lissé (un a priori de 2 réussites sur 20 évite de juger sur 3 essais). */
+export const yieldOf = (t?: Tally) => ((t?.ok ?? 0) + ALLOC.prior.ok) / ((t?.n ?? 0) + ALLOC.prior.n);
+function bump(rec: Record<string, Tally>, key: string, n: number, ok: number, now?: number) {
+  const t = rec[key] ?? { n: 0, ok: 0 };
+  rec[key] = { n: t.n * ALLOC.decay + n, ok: t.ok * ALLOC.decay + ok, ...(now != null ? { last: now } : t.last != null ? { last: t.last } : {}) };
+}
+/** Ajoute les résultats d'un cycle aux statistiques. */
+export function recordCycle(st: ResearchStats, m: Market, rows: { family: Family; verdict: string; origin: string }[], now: number): ResearchStats {
+  const okOf = (r: { verdict: string }) => r.verdict !== "rejetée" ? 1 : 0;
+  bump(st.market, marketKey(m), rows.length, rows.reduce((s, r) => s + okOf(r), 0), now);
+  const byFam = new Map<Family, { n: number; ok: number }>();
+  for (const r of rows.filter((x) => x.origin !== "mathématicien")) { const t = byFam.get(r.family) ?? { n: 0, ok: 0 }; t.n++; t.ok += okOf(r); byFam.set(r.family, t); }
+  for (const [f, t] of byFam) bump(st.family, familyKey(m.kind, m.interval, f), t.n, t.ok);
+  const math = rows.filter((x) => x.origin === "mathématicien");
+  if (math.length) bump(st.math, `${m.kind}|${m.interval}`, math.length, math.reduce((s, r) => s + okOf(r), 0));
+  return st;
+}
+/** Poids des familles pour un marché : proportionnels au taux de réussite, jamais sous 5 % chacune. */
+export function familyWeights(st: ResearchStats, kind: BotKind, interval: Interval, families: Family[]): Partial<Record<Family, number>> {
+  const raw = families.map((f) => yieldOf(st.family[familyKey(kind, interval, f)]));
+  const sum = raw.reduce((a, b) => a + b, 0) || 1;
+  const free = Math.max(0, 1 - families.length * ALLOC.floor); // chaque famille a son plancher, le reste est partagé selon la réussite
+  return Object.fromEntries(families.map((f, i) => [f, ALLOC.floor + free * (raw[i]! / sum)]));
+}
+/** Part du temps de calcul laissée au mathématicien : selon sa réussite comparée à celle du chercheur (15 à 50 %). */
+export function mathShare(st: ResearchStats, kind: BotKind, interval: Interval): number {
+  const fam = Object.entries(st.family).filter(([k]) => k.startsWith(`${kind}|${interval}|`)).reduce((a, [, t]) => ({ n: a.n + t.n, ok: a.ok + t.ok }), { n: 0, ok: 0 });
+  const ratio = yieldOf(st.math[`${kind}|${interval}`]) / Math.max(1e-6, yieldOf(fam));
+  return Math.min(ALLOC.maxMath, Math.max(ALLOC.minMath, ALLOC.maxMath * ratio));
+}
+/**
+ * Marché du cycle : priorité = heures depuis le dernier passage × (0,5 + 5 × taux de réussite).
+ * Le marché le plus « en retard » passe d'abord ; ceux qui trouvent reviennent plus souvent ; aucun n'est oublié.
+ */
+export function pickMarket<M extends Pick<Market, "product" | "kind" | "interval">>(pool: M[], st: ResearchStats, now: number, rnd: () => number): M {
+  let best = pool[0]!, bestP = -1;
+  for (const m of pool) {
+    const t = st.market[marketKey(m)];
+    const hours = t?.last != null ? (now - t.last) / 3_600_000 : 48; // jamais étudié : prioritaire
+    const p = (hours + 0.01) * (0.5 + 5 * yieldOf(t)) * (1 + rnd() * 0.05); // petit aléa : départage les égalités
+    if (p > bestP) { bestP = p; best = m; }
+  }
+  return best;
+}
+function weightedPick<T extends string>(rnd: () => number, items: T[], w: Partial<Record<T, number>>): T {
+  const tot = items.reduce((s, x) => s + (w[x] ?? ALLOC.floor), 0);
+  let r = rnd() * tot;
+  for (const x of items) { r -= w[x] ?? ALLOC.floor; if (r <= 0) return x; }
+  return items[items.length - 1]!;
+}
+
 /** Une stratégie au hasard dans l'espace de recherche. Le RSI n'existe qu'en spot (achat uniquement). */
-export function randomCandidate(rnd: () => number, m: Market, fast = false, withFunding = false): Candidate {
+export function randomCandidate(rnd: () => number, m: Market, fast = false, withFunding = false, weights?: Partial<Record<Family, number>>): Candidate {
   // tendance la moitié du temps (la famille la plus éprouvée), sinon une des autres familles permises pour ce bot
   const others = FAMILIES[m.kind].filter((f) => f !== "tendance" && (f !== "funding" || withFunding));
-  const family: Family = rnd() < 0.35 ? "tendance" : pick(rnd, others);
+  // 28/11 : avec des statistiques, chaque famille reçoit sa part selon son taux de réussite récent (plancher 5 %)
+  const family: Family = weights ? weightedPick(rnd, ["tendance", ...others], weights) : rnd() < 0.35 ? "tendance" : pick(rnd, others);
   return { market: m.name, product: m.product, symbol: m.symbol, kind: m.kind, interval: m.interval, family, params: randomParams(rnd, family, space(fast), m.interval) };
 }
 
@@ -166,11 +229,19 @@ export function simulate(c: Candidate, candles: Candle[], m: Market, ctx: EvalCo
   if (isSetup(c.family)) return backtestSetup(c.family, candles, c.params as SetupParams, { ...o, extra: ctx.extra });
   return backtest(candles, { ...o, params: c.params as Params });
 }
+/** Exigences de validation (28/11) : 8 trades sur la période jamais vue pour « prometteuse », et 2 tiers gagnés sur 3. */
+export const VALID = { minTestTrades: 8, periodMinTrades: 3, periodMinPF: 1.1 };
 export function evaluate(c: Candidate, candles: Candle[], m: Market, ctx: EvalContext = {}): Evaluation {
   const r = simulate(c, candles, m, ctx);
   const split = candles[Math.floor(candles.length * 2 / 3)]?.t ?? Infinity;
   const train = segment(r.log.filter((t) => t.t < split));
   const test = segment(r.log.filter((t) => t.t >= split));
+  // 28/11 : validation sur 3 périodes. Un tiers « gagné » = au moins 3 trades et PF ≥ 1,1 : une stratégie doit gagner
+  // la période jamais vue ET au moins un des deux tiers de l'entraînement (sinon son passé repose sur un seul coup)
+  const third = candles[Math.floor(candles.length / 3)]?.t ?? -Infinity;
+  const won = (g: SegmentStats) => g.trades >= VALID.periodMinTrades && g.profitFactor >= VALID.periodMinPF;
+  const periodsWon = [segment(r.log.filter((t) => t.t < third)), segment(r.log.filter((t) => t.t >= third && t.t < split)), test].filter(won).length;
+  test.periodsWon = periodsWon;
   let verdict: Evaluation["verdict"] = "rejetée", why: string, score: number;
   if (train.trades < 3 || test.trades < 2) { why = "trop peu de trades pour juger"; score = -100; }
   else if (train.profitFactor < 1.05) { why = "perd déjà sur l'entraînement"; score = -50 + train.profitFactor; }
@@ -179,8 +250,9 @@ export function evaluate(c: Candidate, candles: Candle[], m: Market, ctx: EvalCo
     // récompense le gain sur la période jamais vue, pénalise les grosses baisses et les résultats fondés sur 2-3 trades
     const confidence = Math.min(1, test.trades / 8);
     score = (test.returnPct / Math.max(test.maxDrawdownPct, 2)) * confidence + Math.min(train.profitFactor, 3) * 0.2;
-    if (test.profitFactor >= 1.3 && train.profitFactor >= 1.15 && test.trades >= 4) { verdict = "prometteuse"; why = "gagne sur le passé ET sur la période jamais vue"; }
-    else { verdict = "à surveiller"; why = "positive mais encore fragile (peu de trades ou marge faible)"; }
+    if (test.profitFactor >= 1.3 && train.profitFactor >= 1.15 && test.trades >= VALID.minTestTrades && won(test) && periodsWon >= 2) { verdict = "prometteuse"; why = `gagne sur le passé ET sur la période jamais vue (${periodsWon}/3 périodes gagnées)`; }
+    else { verdict = "à surveiller"; why = test.trades < VALID.minTestTrades ? `positive mais encore fragile (${test.trades} trades sur la période jamais vue, ${VALID.minTestTrades} exigés)`
+      : periodsWon < 2 ? "positive mais fragile : ne gagne que sur une seule des 3 périodes" : "positive mais encore fragile (marge faible)"; }
   }
   return { train, test, score: Math.round(score * 1000) / 1000, verdict, why };
 }

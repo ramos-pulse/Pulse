@@ -12,7 +12,7 @@ import { currentHlValue, getHlAddress, liquidateHl, runHlTick } from "./engine/p
 import { hlAccount, hlCredentials, hlMarkets, hlMids, hlOpenOrders, hlSpotBalances } from "./engine/hyperliquid.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
 import { SOL_MINT, USDC_MINT, tradable, AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, perpsMarkets, setPerpsMarkets, PERPS_PLANS_MAX, type PerpsMarket, type TokenInfo, type Memory, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
-import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, simulate, tempo, type Candidate, type Market } from "./engine/research.ts";
+import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, simulate, tempo, type Candidate, type Market, pickMarket, recordCycle, familyWeights, mathShare, emptyStats, marketKey, type ResearchStats, FAMILIES, type Family } from "./engine/research.ts";
 import { DbStore, notify, pushHook, type BotKind, type BotState } from "./store.ts";
 import { freshAffordable, jupTokens, arbScan, bestPools, FRESH, freshCandidates, freshRefusal, impersonates, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
 import { newVapid, sendPush, type Subscription, type Vapid } from "./engine/webpush.ts";
@@ -328,6 +328,29 @@ async function keepPlans(q: any) {
   return ids.length ? await q.not("id", "in", `(${ids.join(",")})`) : await q;
 }
 
+/** Statistiques du chercheur (réussite par famille, marché, mathématicien) : app_kv « research_stats ». */
+async function loadResearchStats(): Promise<ResearchStats> {
+  const { data } = await db.from("app_kv").select("value").eq("key", "research_stats").limit(1);
+  const v = data?.[0]?.value as ResearchStats | undefined;
+  if (v?.family && v?.market && v?.math) return v;
+  // première fois : reconstruites depuis les 3 derniers jours de recherche
+  const st = emptyStats();
+  const { data: rows } = await db.from("research").select("product, kind, interval, family, verdict, origin, created_at").gt("created_at", new Date(Date.now() - 3 * 86_400_000).toISOString()).limit(20000);
+  const all = researchMarkets();
+  const by = new Map<string, { m: Market; rows: { family: Family; verdict: string; origin: string }[]; last: number }>();
+  for (const r of (rows ?? []) as { product: string; kind: BotKind; interval: Interval; family: Family; verdict: string; origin: string; created_at: string }[]) {
+    const m = all.find((x) => x.product === r.product && x.kind === r.kind && x.interval === r.interval);
+    if (!m) continue;
+    const k = marketKey(m), e = by.get(k) ?? { m, rows: [], last: 0 };
+    e.rows.push(r); e.last = Math.max(e.last, Date.parse(r.created_at)); by.set(k, e);
+  }
+  for (const e of by.values()) recordCycle(st, e.m, e.rows, e.last);
+  return st;
+}
+async function saveResearchStats(st: ResearchStats) {
+  await db.from("app_kv").upsert({ key: "research_stats", value: st, updated_at: new Date().toISOString() }, { onConflict: "key" });
+}
+
 async function runResearch() {
   const cycle = Math.floor(Date.now() / 300_000);
   const A = agentSettings((await readBots()).spot.config);
@@ -339,11 +362,14 @@ async function runResearch() {
   const bySide = all.filter((x) => x.kind === side);
   const base = bySide.length ? bySide : all;
   const pool = fast && cycle % 3 !== 0 ? base.filter((x) => x.interval === "15m") : base;
-  const m = pool[Math.floor((Math.abs(Math.sin(cycle * 78.233) * 43758.5453) % 1) * pool.length)]!; // tirage uniforme : chaque marché du bot passe régulièrement
+  // 28/11 : marché choisi selon le retard (le moins récemment étudié d'abord) et la réussite passée (voir pickMarket)
+  const stats = await loadResearchStats();
+  const m = pickMarket(pool, stats, Date.now(), seeded(cycle * 31 + 7));
+  const skip = async (note: string) => { recordCycle(stats, m, [], Date.now()); await saveResearchStats(stats); return { market: m.name, tested: 0, note }; }; // compté comme visité : pas de boucle sur un marché indisponible
   let candles;
   try { candles = await getCandles(m.product, m.interval, HISTORY[m.interval]); }
-  catch (e) { return { market: m.name, tested: 0, note: `historique indisponible : ${(e as Error).message}` }; }
-  if (candles.length < HISTORY[m.interval] * 0.6) return { market: m.name, tested: 0, note: "historique insuffisant" };
+  catch (e) { return await skip(`historique indisponible : ${(e as Error).message}`); }
+  if (candles.length < HISTORY[m.interval] * 0.6) return await skip("historique insuffisant");
   // contexte identique au réel : filtre BTC (spot) et taux de financement (perps)
   const ctx: { blockedAt?: (t: number) => boolean; extra?: Extra } = {};
   if (m.kind === "spot") { const btc = await getCandles("BTC-USD", "1h", Math.ceil(HISTORY[m.interval] * (m.interval === "15m" ? 0.25 : 1)) + 240).catch(() => null); if (btc?.length) ctx.blockedAt = btcFilterSeries(btc); }
@@ -365,7 +391,7 @@ async function runResearch() {
   const liveInsight = analyze(candles.slice(-300)); // régime EN DIRECT (300 dernières bougies) : oriente le pilote
   let proposed = 0;
   for (const pr of propose(train, m, insight, { aggressive: A.aggressive, fast })) {
-    if (left() < RESEARCH_BUDGET_MS * 0.5) break; // le mathématicien prend au plus la moitié du temps de calcul
+    if (left() < RESEARCH_BUDGET_MS * (1 - mathShare(stats, m.kind, m.interval))) break; // part du mathématicien : 15 à 50 % selon sa réussite
     const key = candidateKey(pr.candidate);
     if (seen.has(key)) continue;
     seen.add(key); proposed++;
@@ -376,6 +402,7 @@ async function runResearch() {
     live_regime: liveInsight.regime, live_note: liveInsight.note }, { onConflict: "key" });
   // 2. le chercheur : moitié améliorations des meilleures (y compris celles du mathématicien), moitié idées nouvelles
   let tries = 0;
+  const weights = familyWeights(stats, m.kind, m.interval, FAMILIES[m.kind].filter((f) => f !== "funding" || !!ctx.extra?.funding));
   // RE-VALIDATION (au lieu d'expirer au bout de 14 jours) : les stratégies retenues de ce marché sont rejouées chaque semaine sur
   // l'historique le plus récent ; celles qui ne tiennent plus sont « périmées », les autres (dont les confirmées en réel) restent.
   // Elle passe avant les idées nouvelles : garder les bonnes stratégies à jour compte plus.
@@ -383,7 +410,7 @@ async function runResearch() {
   while (rows.length < RESEARCH_MAX && left() > 0 && tries < RESEARCH_MAX * 5) {
     tries++;
     // moitié améliorations des meilleures, moitié idées nouvelles
-    const c = parents.length && rnd() < 0.5 ? mutate(rnd, parents[Math.floor(rnd() * parents.length)]!, fast) : randomCandidate(rnd, m, fast, !!ctx.extra?.funding);
+    const c = parents.length && rnd() < 0.5 ? mutate(rnd, parents[Math.floor(rnd() * parents.length)]!, fast) : randomCandidate(rnd, m, fast, !!ctx.extra?.funding, weights);
     const key = candidateKey(c);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -396,6 +423,8 @@ async function runResearch() {
     const { error } = await db.from("research").upsert(rows, { onConflict: "key", ignoreDuplicates: true });
     if (error) throw new Error(`recherche : ${error.message}`);
   }
+  recordCycle(stats, m, rows as { family: Family; verdict: string; origin: string }[], Date.now());
+  await saveResearchStats(stats).catch(() => null);
   // ménage : les stratégies rejetées depuis plus de 3 jours sont oubliées, SAUF celles qu'un bot trade encore (extra souple)
   await keepPlans(db.from("research").delete().eq("verdict", "rejetée").lt("created_at", new Date(Date.now() - 3 * 86_400_000).toISOString()));
   const learned = await learnFromBots().catch(() => [] as string[]);
