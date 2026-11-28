@@ -809,12 +809,29 @@ type UniverseRow = { mint: string; kind: "selection" | "nouveau"; symbol: string
 /** Source d'historique d'un token on-chain : Birdeye si la clé existe (GeckoTerminal en secours), sinon GeckoTerminal. */
 const candleSource = (r: Pick<UniverseRow, "mint" | "pool">) => (env("BIRDEYE_API_KEY") ? `be:${r.mint}|${r.pool ?? ""}` : `gt:${r.pool}`);
 /** Marchés Hyperliquid tradés : choisis une fois par jour (les plus échangés), gardés dans app_kv. */
-const HL_SELECT = { keep: 12, minDayVolume: 5_000_000, minMaxLeverage: 3, always: ["BTC", "ETH", "SOL"] };
+const HL_SELECT = { keep: 20, minDayVolume: 5_000_000, minMaxLeverage: 3, always: ["BTC", "ETH", "SOL"] }; // 28/11 : 20 marchés (12 avant) pour plus d'occasions
 async function loadHlMarkets() {
   if (!onHl()) { setPerpsMarkets(PERPS_ASSETS.map((a) => ({ ...a }))); return; }
   const { data } = await db.from("app_kv").select("value").eq("key", "hl_markets").limit(1);
   const list = ((data?.[0]?.value as { markets?: PerpsMarket[] } | undefined)?.markets ?? []);
   setPerpsMarkets(list.length ? list : HL_SELECT.always.map((c) => ({ asset: c, candles: `hl:${c}` })));
+}
+/**
+ * 28/11 : INTÉRÊT OUVERT enregistré chaque heure sur les marchés Hyperliquid échangés (au moins 1 M$ par jour),
+ * gardé 120 jours. Hyperliquid ne donne que la valeur du moment : sans cet enregistrement, rien à tester plus tard.
+ */
+async function recordHlOi(): Promise<string> {
+  if (!onHl()) return "plateforme Jupiter : rien à faire";
+  const hour = new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000).toISOString();
+  const { data } = await db.from("hl_oi").select("coin").eq("t", hour).limit(1);
+  if (data?.length) return "déjà fait cette heure";
+  const rows = (await hlMarkets()).filter((m) => !m.isDelisted && m.dayVolume >= 1_000_000 && m.openInterest > 0 && m.markPx > 0)
+    .map((m) => ({ coin: m.name, t: hour, oi_usd: m.openInterest, px: m.markPx, funding: m.funding }));
+  if (!rows.length) return "aucune donnée";
+  const { error } = await db.from("hl_oi").upsert(rows, { onConflict: "coin,t" });
+  if (error) throw new Error(error.message);
+  if (new Date().getUTCHours() === 3) await db.from("hl_oi").delete().lt("t", new Date(Date.now() - 120 * 86_400_000).toISOString());
+  return `${rows.length} marché(s) enregistré(s)`;
 }
 async function runHlSelector(force = false): Promise<string> {
   if (!onHl()) return "plateforme Jupiter : rien à faire";
@@ -1259,8 +1276,9 @@ Deno.serve(async (req) => {
       const fresh = await runFreshScout().catch(err);
       const arb = await runArbScout().catch(err);
       const hl = onHl() ? await runHlSelector().catch(err) : undefined;
+      const oi = onHl() ? await recordHlOi().catch(err) : undefined;
       const costs = await runCostScout().catch(err);
-      return json({ watchdog, research, swap, bilan, selector, fresh, arb, costs, ...(hl ? { hl } : {}) });
+      return json({ watchdog, research, swap, bilan, selector, fresh, arb, costs, ...(hl ? { hl } : {}), ...(oi ? { oi } : {}) });
     }
     if (route === "/tick" && req.method === "POST") {
       if (!TOKEN || !safeEqual(req.headers.get("x-cron-secret") ?? "", await cronSecret())) return json({ error: "interdit" }, 403);

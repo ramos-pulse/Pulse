@@ -135,7 +135,7 @@ let PERPS_MARKETS: PerpsMarket[] = PERPS_ASSETS.map((a) => ({ ...a }));
 export const perpsMarkets = (): readonly PerpsMarket[] => PERPS_MARKETS;
 export function setPerpsMarkets(list: PerpsMarket[]) { if (list.length) PERPS_MARKETS = list.filter((m, i, a) => a.findIndex((x) => x.asset === m.asset) === i); }
 /** Nombre maximum de marchés surveillés en même temps par le bot perps (les positions restent limitées par maxPositions). */
-export const PERPS_PLANS_MAX = 8;
+export const PERPS_PLANS_MAX = 12; // 28/11 : 12 stratégies surveillées (8 avant), le risque total reste plafonné
 export type PerpsSide = "long" | "short";
 export type Side = PerpsSide;
 

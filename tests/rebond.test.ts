@@ -65,3 +65,13 @@ test("bot 2 : rebond dans les deux sens (envolée anormale → short), filtre de
   assert.equal(simulate(cand("rebond", tiny), series(1200), m).trades, 0);
   assert.ok(simulate(cand("rebond", P), series(1200), m).trades > 5);
 });
+
+test("bot 2 : jusqu'à 12 stratégies surveillées (8 avant), une par marché", async () => {
+  const { loadPerpsConfig, PERPS_PLANS_MAX, perpsMarkets, setPerpsMarkets } = await import("../supabase/functions/pulse/engine/strategy.ts");
+  assert.equal(PERPS_PLANS_MAX, 12);
+  const before = [...perpsMarkets()];
+  setPerpsMarkets([...Array(20)].map((_, i) => ({ asset: `C${i}`, candles: `hl:C${i}` })));
+  const plans = [...Array(15)].map((_, i) => ({ asset: `C${i}`, params: { breakout: 24, trailAtr: 3, minTrend: 1 }, interval: "1h", source: "test", score: 1, confidence: "nouvelle" }));
+  assert.equal(loadPerpsConfig({ plans }).plans.length, 12);
+  setPerpsMarkets(before);
+});
