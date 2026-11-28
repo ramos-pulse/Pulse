@@ -40,6 +40,7 @@ jobs:
           q "select symbol, kind, active, seen_at, left(why,60) from token_universe where kind='nouveau' order by added_at desc limit 8"
           q "select kind, status, last_tick_at, left(last_message, 200), config->>'researchPerps' as perps, config->>'extraSoft' as soft, config->>'autopilot' as pilot, jsonb_array_length(coalesce(config->'plans','[]'::jsonb)) as plans from bot_state"
           q "select kind, config->>'maxPositions' mp, config->>'aggr' aggr, config->>'maxLev' lev, config->>'pilotAggressive' pa, config->>'extraSoft' soft, config->>'researchAggressive' ra from bot_state"
+          echo "=== XRP ==="; q "select id, verdict, round(score::numeric,2) sc, params::text, test::text, train::text, live::text, left(why,90) from research where id=6503"; q "select (price_history->'positions')::text from bot_state where kind='perps'"
           echo "=== B2 1 ==="; q "select created_at, action, asset, side, round(collateral_usd::numeric,2) col, round(pnl_usd::numeric,3) pnl, left(reason,50), detail->>'levier' lev from trades where bot='perps' and created_at > now() - interval '3 days' order by created_at"
           echo "=== B2 2 ==="; q "select jsonb_pretty(config - 'plans') from bot_state where kind='perps'"
           echo "=== B2 3 ==="; q "select price_history->'brain'->>'riskMult' rm, price_history->'brain'->>'streak' st, jsonb_array_length(coalesce(price_history->'brain'->'trades','[]'::jsonb)) bt, price_history->>'cooldownUntil' cd, price_history->>'dayStartValue' dsv from bot_state where kind='perps'"
