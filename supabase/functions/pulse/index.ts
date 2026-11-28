@@ -517,6 +517,8 @@ const pilotRank = (a: AgentSettings, regimes = new Map<string, string>()) => (x:
 const symbolOfRow = (r: ResearchRow) => r.symbol ?? r.market.replace(/^(Spot|Perps) /, "").split(" ")[0]!;
 const confidenceOf = (r: ResearchRow) => (r.live?.confirmed ? "confirmée" as const : "nouvelle" as const);
 const spotFamily = (f: ResearchRow["family"]): SpotPlan["family"] => (f === "rsi" ? "rsi" : isSetup(f) && !PERPS_ONLY.includes(f) ? f as SpotPlan["family"] : "tendance");
+/** Bot 1 : stratégies surveillées (plus que de positions possibles : plus d'occasions, même risque). */
+const SPOT_PLANS = { max: 6, maxGecko: 2 };
 const toSpotPlan = (r: ResearchRow): SpotPlan => ({ symbol: symbolOfRow(r), family: spotFamily(r.family),
   params: r.family === "rsi" ? sanitizeRsi({ ...(r.params as RsiParams), riskPct: 1, naive: false }) : isSetup(r.family) ? sanitizeSetup(r.family, r.params)! : sanitizeTrend(r.params)!,
   interval: r.interval === "15m" ? "15m" : "1h", source: `chercheur #${r.id} · ${r.market}`, score: effScore(r), confidence: confidenceOf(r) });
@@ -548,7 +550,12 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
     // garde les plans actuels encore qualifiés (évite de changer d'avis toutes les 5 minutes), complète avec les meilleurs, 3 tokens max
     const keep = fresh ? [] : spotRows.slice(0, 10).filter((r) => spotCfg.plans.some((p) => p.source === `chercheur #${r.id} · ${r.market}`) && !outclassed(r, spotRows)).map(toSpotPlan);
     const plans = [...keep];
-    for (const r of spotRows) { if (plans.length >= 3) break; const pl = toSpotPlan(r); if (!plans.some((x) => x.symbol === pl.symbol)) plans.push(pl); }
+    // 28/11 : jusqu'à 6 stratégies surveillées (2 positions au plus, une par token) ; au plus 2 sur les tokens de la sélection,
+    // dont l'historique vient de GeckoTerminal (limité à ~30 appels par minute)
+    const gecko = (sym: string) => !/-USD$/.test(allTokens().find((t) => t.symbol === sym)?.candles ?? "-USD");
+    const geckoOk = (list: SpotPlan[], sym: string) => !gecko(sym) || list.filter((x) => gecko(x.symbol)).length < SPOT_PLANS.maxGecko;
+    for (let k = plans.length - 1; k >= 0; k--) if (gecko(plans[k]!.symbol) && plans.slice(0, k).filter((x) => gecko(x.symbol)).length >= SPOT_PLANS.maxGecko) plans.splice(k, 1);
+    for (const r of spotRows) { if (plans.length >= SPOT_PLANS.max) break; const pl = toSpotPlan(r); if (!plans.some((x) => x.symbol === pl.symbol) && geckoOk(plans, pl.symbol)) plans.push(pl); }
     const sig = (l: SpotPlan[]) => l.map((p) => `${p.source}:${p.confidence}`).join("|");
     const before = sig(spotCfg.plans), after = sig(plans);
     if (before !== after) {
@@ -649,7 +656,7 @@ async function applyResearch(id: number) {
   if (r.kind === "spot") {
     const cur = loadConfig(bots.spot.config);
     const plan = toSpotPlan(r);
-    const config = { ...cur, plans: [plan, ...cur.plans.filter((p) => p.symbol !== plan.symbol)].slice(0, 3) };
+    const config = { ...cur, plans: [plan, ...cur.plans.filter((p) => p.symbol !== plan.symbol)].slice(0, 6) };
     await setBot("spot", { config });
     await notify(`Chercheur : stratégie #${r.id} ajoutée au bot spot (${plan.symbol}, ${desc})`);
     return { ok: true, kind: "spot", config };

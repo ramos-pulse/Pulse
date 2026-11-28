@@ -904,7 +904,7 @@ export function sanitizeSpotPlans(raw: unknown): SpotPlan[] {
   const SYMBOLS = new Set<string>(allTokens().map((t) => t.symbol));
   const out: SpotPlan[] = [];
   for (const x of raw as Partial<SpotPlan>[]) {
-    if (out.length >= 3) break; // 3 plans maximum, comptés après avoir écarté les tokens inconnus
+    if (out.length >= 6) break; // 6 plans maximum (28/11 : 3 auparavant), comptés après avoir écarté les tokens inconnus
     if (!x || !SYMBOLS.has(String(x.symbol))) continue;
     const family: SpotFamily = x.family === "rsi" ? "rsi" : isSetup(x.family) && !PERPS_ONLY.includes(x.family) ? x.family as SpotFamily : "tendance";
     const params = family === "rsi" ? sanitizeRsi(x.params as Partial<RsiParams>) : family === "tendance" ? sanitizeTrend(x.params) : sanitizeSetup(family, x.params);

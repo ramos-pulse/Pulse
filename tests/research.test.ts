@@ -45,7 +45,7 @@ test("évaluation : temps de calcul compatible avec la limite Supabase", () => {
 });
 
 import { loadConfig, loadPerpsConfig, sanitizeSpotPlans } from "../supabase/functions/pulse/engine/strategy.ts";
-test("plans du pilote : tokens inconnus refusés, 3 plans max, réglages bornés", () => {
+test("plans du pilote : tokens inconnus refusés, 6 plans max (28/11), réglages bornés", () => {
   const plans = sanitizeSpotPlans([
     { symbol: "WIF", family: "tendance", params: { breakout: 24, trailAtr: 3, minTrend: 1 }, interval: "15m", source: "#1", score: 2 },
     { symbol: "RUGCOIN", family: "tendance", params: { breakout: 24, trailAtr: 3, minTrend: 1 } },
@@ -53,7 +53,7 @@ test("plans du pilote : tokens inconnus refusés, 3 plans max, réglages bornés
     { symbol: "JTO", family: "tendance", params: { breakout: 24, trailAtr: 3, minTrend: 1 } },
     { symbol: "BONK", family: "tendance", params: { breakout: 24, trailAtr: 3, minTrend: 1 } },
   ]);
-  assert.deepEqual(plans.map((p) => p.symbol), ["WIF", "SOL", "JTO"]);
+  assert.deepEqual(plans.map((p) => p.symbol), ["WIF", "SOL", "JTO", "BONK"]);
   assert.equal(plans[0]!.interval, "15m"); assert.equal((plans[1]!.params as { riskPct: number }).riskPct, 3);
   assert.equal(loadPerpsConfig({ plan: { asset: "DOGE", params: { breakout: 24, trailAtr: 3, minTrend: 1 } } }).plan, null);
   assert.equal(loadPerpsConfig({ plan: { asset: "ETH", params: { breakout: 24, trailAtr: 3, minTrend: 1 }, interval: "15m" } }).plan?.asset, "ETH");
