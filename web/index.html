@@ -475,7 +475,15 @@ function rulesNote() {
 function renderHist() {
   const rows = ["spot", "perps"].flatMap(k => S.bots[k].trades.map(t => ({...t, k}))).filter(t => HF === "all" || t.k === HF)
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-  const closes = rows.filter(t => t.pnl_usd != null), wins = closes.filter(t => t.pnl_usd > 0);
+  // une vente partielle compte avec la vente finale de sa position (une position = un trade)
+  const pend = {}, closes = [];
+  for (const t of [...rows].reverse()) {
+    if (t.pnl_usd == null) continue;
+    const key = `${t.k}|${t.source || ""}|${t.symbol || t.asset || ""}`;
+    if (/partielle/.test(t.reason || "")) { pend[key] = (pend[key] || 0) + t.pnl_usd; continue; }
+    closes.push(pend[key] ? {...t, pnl_usd: t.pnl_usd + pend[key]} : t); delete pend[key];
+  }
+  const wins = closes.filter(t => t.pnl_usd > 0);
   const gw = wins.reduce((s, t) => s + t.pnl_usd, 0), gl = -closes.filter(t => t.pnl_usd <= 0).reduce((s, t) => s + t.pnl_usd, 0);
   const net = gw - gl, pf = gl ? gw / gl : gw ? Infinity : 0;
   $("#p-hist").innerHTML = `${reportCard()}<div class="eyebrow">Historique</div>
