@@ -454,7 +454,7 @@ function modeText(i) {
   const L = S.rules.aggrLevels?.[i]; if (!L) return "";
   const c = S.bots.perps.config || {};
   const capped = c.autopilot && !c.pilotAggressive && i > 1;
-  return `${i >= 3 ? "⚠ " : ""}Risque ×${String(L.riskMult).replace(".", ",")} (jusqu'à ${nf(L.maxRisk * 100, 1)} % du capital perdu si le stop est touché), perte max ${nf(L.dailyLoss * 100, 1)} % par jour.${i >= 3 ? " Il trade même quand aucun réglage n'a fait ses preuves sur 60 jours." : ""}${capped ? " Pilote automatique actif : plafonné à « Normal » tant que le mode agressif du chercheur est coupé (Agents)." : ""}`;
+  return `${i >= 3 ? "⚠ " : ""}Risque ×${String(L.riskMult).replace(".", ",")} (jusqu'à ${nf(L.maxRisk * 100, 1)} % du capital perdu si le stop est touché), ${c.dailyStop ? `perte max ${nf(L.dailyLoss * 100, 1)} % par jour` : "pas de limite de perte par jour (« Stop du jour » coupé)"}.${i >= 3 ? " Il trade même quand aucun réglage n'a fait ses preuves sur 60 jours." : ""}${capped ? " Pilote automatique actif : plafonné à « Normal » tant que le mode agressif du chercheur est coupé (Agents)." : ""}`;
 }
 const HL_LEV_TXT = "Automatique, adapté au stop : le bot prend le plus haut levier du marché (BTC jusqu'à x40, ETH x25…) qui garde la liquidation au moins 3 fois plus loin que le stop. Le levier ne change pas la perte au stop, fixée par l'agressivité : il réduit seulement la marge bloquée, pour laisser de la place aux autres positions. Garde-fous : frais et glissement comptés dans le risque, taille d'une position plafonnée à 10 × le capital.";
 function levText(l) {
@@ -464,7 +464,12 @@ function rulesNote() {
   const st = S.rules.strategy, r = S.rules.risk, c = S.bots.spot.config;
   if (c?.strategy === "rsi") { const p = c.rsi;
     return `<div class="note">Bot spot · stratégie RSI en bougies 1 h · ${p.naive ? `achat RSI sous ${p.entry}, vente RSI au-dessus de 70, sans filtre de tendance` : `achat quand le RSI(${p.rsiPeriod}) passe sous ${p.entry} au-dessus de la MM${p.smaPeriod}, sortie RSI au-dessus de ${p.exit}`} · stop sous le creux des ${p.swingBars} dernières bougies · risque ${String(p.riskPct).replace(".", ",")} % par trade · une position à la fois</div>`; }
-  return `<div class="note">Suivi de tendance en bougies 1 h · entrée sur cassure en tendance forte · stop initial ${st.stopAtr} ATR puis stop suiveur · risque ${nf(r.perTrade * 100, 1)} % du capital par trade · perte max ${r.dailyLoss * 100} % par jour</div>`;
+  // 28/11 : description fidèle à ce que font les bots aujourd'hui (pilote, plusieurs familles, protections réellement actives)
+  const pc = S.bots.perps.config || {}, fam = pl => [...new Set((pl || []).map(p => ({tendance: "tendance", rsi: "RSI", range: "range", orb: "ORB", vwap: "VWAP", squeeze: "compression", volume: "volume", funding: "funding"})[p.family || "tendance"] || p.family))].join(", ");
+  const day = x => x.dailyStop ? "perte max du jour active" : "pas de limite de perte par jour";
+  const b1 = c?.autopilot || c?.plans?.length ? `${c.plans?.length || 0} stratégie(s) surveillée(s) (${fam(c.plans) || "en attente"}) · jusqu'à ${c.maxPositions ?? 2} position(s) · risque ~${nf(r.perTrade * 100, 1)} % par trade${c.extraSoft ? " (÷2 en extra souple)" : ""} · stop sur chaque position · pause 15 min après une vraie perte · ${day(c)}` : "réglages de l'app";
+  const b2 = pc.autopilot || pc.plans?.length ? `${pc.plans?.length || 0} marché(s) surveillé(s) (${fam(pc.plans) || "en attente"}) · jusqu'à ${pc.maxPositions ?? 3} position(s) · agressivité ${(S.rules.aggrLevels?.[pc.aggr ?? 1]?.name || "").toLowerCase()} · ${S.perpsVenue === "hyperliquid" ? "levier auto, stops posés chez Hyperliquid" : `levier jusqu'à x${pc.maxLev ?? 3}`} · ${day(pc)}` : "réglages de l'app";
+  return `<div class="note">Bot 1 · ${b1}<br>Bot 2 · ${b2}</div>`;
 }
 
 function renderHist() {
