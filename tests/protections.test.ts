@@ -71,3 +71,13 @@ test("dépôt : le plus haut du cerveau se décale (un dépôt n'est pas un nouv
   applyTransfer(mem, -5);
   assert.ok(Math.abs((mem as never as { brain: { equityHigh: number } }).brain.equityHigh - 17.35) < 1e-9);
 });
+
+test("cerveau : une sortie à l'équilibre (stop remonté à l'entrée) ne réduit pas le risque", async () => {
+  const { learn, newBrain } = await import("../supabase/functions/pulse/engine/brain.ts");
+  const b = newBrain(39);
+  learn(b, "ETH", -0.2, 39, Date.now(), true);
+  assert.equal(b.riskMult, 1);
+  assert.equal(b.streak, 0);
+  learn(b, "ETH", -2, 38, Date.now());
+  assert.ok(b.riskMult < 1, "une vraie perte réduit toujours le risque");
+});

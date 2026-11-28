@@ -349,7 +349,7 @@ function recordClose(admin: Admin, mem: Memory, cfg: PerpsConfig, coin: string, 
     detail: { pourquoi: label(reason), entree: p?.entry, stop: p?.stop, strategie: p?.source, duree_h: p?.openedAt ? Math.round((Date.now() - p.openedAt) / 360_000) / 10 : null, entree_pourquoi: p?.why, coffre: mem.vault, plateforme: "Hyperliquid", note: "résultat hors financement horaire (funding), qui s'ajoute ou se retire du compte à part",
       ...(pnlUsd == null ? { estimation: "résultat estimé (exécutions Hyperliquid illisibles)" } : {}),
       ...(p?.regimeFit ? { regime: p.regime, regime_accord: p.regimeFit } : {}) } });
-  learn(mem.brain ?? newBrain(value), coin, pnlPct, value, Date.now());
+  learn(mem.brain ?? newBrain(value), coin, pnlPct, value, Date.now(), stopProtects(p) && /stop/.test(String(reason ?? "")));
   if (lossPause(pnl, stopProtects(p) && /stop/.test(String(reason ?? "")))) mem.cooldownUntil = Date.now() + cooldownMs(p?.posInterval); // sortie à l'équilibre par le stop : pas de pause
   if (mem.positions) delete mem.positions[coin];
   return `Position ${coin} fermée (${label(reason)}) : ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ (${pnlPct.toFixed(1)} % du capital).${pnl > 0 && cfg.vaultPct ? ` ${cfg.vaultPct} % du gain mis au coffre.` : ""}`;

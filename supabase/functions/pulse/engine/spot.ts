@@ -537,7 +537,7 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, a
       ...(pos?.regimeFit ? { regime: pos.regime, regime_accord: pos.regimeFit } : {}) },
   });
   const brain = mem.brain ?? newBrain(valueBefore);
-  learn(brain, sym, pnlPct, valueBefore + pnl, Date.now());
+  learn(brain, sym, pnlPct, valueBefore + pnl, Date.now(), stopProtects(pos) && /stop/.test(String(p.reason ?? "")));
   if (lossPause(pnl, stopProtects(pos) && /stop/.test(String(p.reason ?? "")))) mem.cooldownUntil = Date.now() + cooldownMs(pos?.posInterval); // sortie à l'équilibre par le stop : pas de pause
   delete positions[mint];
   if (mem.signal?.startsWith(`${sym} `)) mem.signal = undefined; // analyse liée à la position vendue : périmée

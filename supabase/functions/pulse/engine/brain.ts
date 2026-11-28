@@ -51,8 +51,10 @@ export function riskPerTrade(b: Brain): number {
 }
 
 /** À appeler après chaque trade clôturé (PnL réel, frais inclus). */
-export function learn(b: Brain, asset: string, pnlPct: number, equity: number, now: number): void {
+export function learn(b: Brain, asset: string, pnlPct: number, equity: number, now: number, neutral = false): void {
   b.trades = [...b.trades, { asset, pnlPct, t: now }].slice(-BRAIN.memory);
+  // 28/11 : sortie à l'équilibre par un stop déjà remonté à l'entrée (frais seulement) : ni victoire ni défaite pour la forme du bot
+  if (neutral && pnlPct <= 0) { b.equityHigh = Math.max(b.equityHigh, equity); return; }
   if (pnlPct > 0) {
     b.streak = b.streak > 0 ? b.streak + 1 : 1;
     b.riskMult = Math.min(1, b.riskMult + BRAIN.winStep);
