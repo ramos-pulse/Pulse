@@ -306,7 +306,7 @@ export function backtestSetup(family: SetupFamily, candles: Candle[], P: SetupPa
       }
       if (exit !== null) {
         const pnl = close(exit, reason, c.t);
-        if (lossPause(pnl, reason === "trailing_stop") && !o.noCooldown) cooldownUntil = c.t + T.cooldownMs;
+        if (lossPause(pnl, reason === "trailing_stop") && !o.noCooldown) cooldownUntil = c.t + (o.cooldownMs ?? T.cooldownMs);
         pos = null;
       } else if (trailing) {
         const tgt = long ? pos.entry + PARTIAL.atR * pos.risk : pos.entry - PARTIAL.atR * pos.risk;

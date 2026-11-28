@@ -158,7 +158,9 @@ export const barMsOf = (c: Candle[]) => (c.length > 1 ? c[c.length - 1]!.t - c[c
 export const ivOfMs = (ms: number): Interval => (ms <= 900_000 ? "15m" : "1h");
 export const tfOf = (c: Candle[]) => TF[ivOfMs(barMsOf(c))];
 /** Pause après une perte, selon l'unité de temps de la position. */
-export const cooldownMs = (iv: Interval | undefined) => TF[iv ?? "1h"].cooldownMs;
+/** Pause après une vraie perte. Bot 1 (spot) : 15 min quelle que soit l'unité de temps (28/11, pour trader plus). */
+export const SPOT_COOLDOWN_MS = 15 * 60_000;
+export const cooldownMs = (iv: Interval | undefined, kind: "spot" | "perps" = "perps") => kind === "spot" ? SPOT_COOLDOWN_MS : TF[iv ?? "1h"].cooldownMs;
 
 /**
  * HEURES ACTIVES (filtre « heures creuses », testé par le chercheur) : du lundi au vendredi, 7 h – 21 h UTC.
@@ -702,7 +704,7 @@ export interface BacktestResult {
  *  - blockedAt : filtre de marché (ex. BTC qui chute) qui bloque les entrées du spot à cet instant
  */
 export interface SimOpts { allowShort: boolean; feePct: number; hourlyCost?: number; leverageCap?: number; risk?: number; bias?: number;
-  partial?: "half" | "breakeven" | null; blockedAt?: (t: number) => boolean; noCooldown?: boolean; noVolScale?: boolean }
+  partial?: "half" | "breakeven" | null; blockedAt?: (t: number) => boolean; noCooldown?: boolean; noVolScale?: boolean; cooldownMs?: number }
 
 /** Résultat final d'une simulation (log des trades → statistiques). */
 export function summarize(log: BacktestResult["log"], equityCurve: { maxDd: number; equity: number }, first?: Candle, lastC?: Candle): BacktestResult {
@@ -749,7 +751,7 @@ export function backtest(candles: Candle[], o: SimOpts & { params?: Params }): B
       }
       if (exit !== null) {
         const pnl = close(exit, reason, c.t);
-        if (lossPause(pnl, reason === "trailing_stop") && !o.noCooldown) cooldownUntil = c.t + T.cooldownMs;
+        if (lossPause(pnl, reason === "trailing_stop") && !o.noCooldown) cooldownUntil = c.t + (o.cooldownMs ?? T.cooldownMs);
         pos = null;
       } else {
         // prise de bénéfices à +1,5 R pendant la bougie, comme le bot réel
@@ -904,7 +906,7 @@ export function sanitizeSpotPlans(raw: unknown): SpotPlan[] {
   const SYMBOLS = new Set<string>(allTokens().map((t) => t.symbol));
   const out: SpotPlan[] = [];
   for (const x of raw as Partial<SpotPlan>[]) {
-    if (out.length >= 6) break; // 6 plans maximum (28/11 : 3 auparavant), comptés après avoir écarté les tokens inconnus
+    if (out.length >= 10) break; // 10 plans maximum (28/11 : 3 auparavant), comptés après avoir écarté les tokens inconnus
     if (!x || !SYMBOLS.has(String(x.symbol))) continue;
     const family: SpotFamily = x.family === "rsi" ? "rsi" : isSetup(x.family) && !PERPS_ONLY.includes(x.family) ? x.family as SpotFamily : "tendance";
     const params = family === "rsi" ? sanitizeRsi(x.params as Partial<RsiParams>) : family === "tendance" ? sanitizeTrend(x.params) : sanitizeSetup(family, x.params);
@@ -985,7 +987,7 @@ export function rsiExitSignal(candles: Candle[], p: RsiParams): { exit: boolean;
 }
 
 /** Backtest de la stratégie RSI, frais inclus (feePct par côté), avec prise partielle, pause après perte et filtre BTC comme en réel. */
-export function backtestRsi(candles: Candle[], p: RsiParams, feePct: number, o: Pick<SimOpts, "partial" | "blockedAt" | "noCooldown"> = {}): BacktestResult {
+export function backtestRsi(candles: Candle[], p: RsiParams, feePct: number, o: Pick<SimOpts, "partial" | "blockedAt" | "noCooldown" | "cooldownMs"> = {}): BacktestResult {
   const closes = candles.map((x) => x.c);
   const r = rsiSeries(closes, p.rsiPeriod), s = smaSeries(closes, p.smaPeriod);
   const exitLevel = p.naive ? NAIVE_EXIT : p.exit;
@@ -1008,7 +1010,7 @@ export function backtestRsi(candles: Candle[], p: RsiParams, feePct: number, o: 
       else if (r[i]! > exitLevel) { exit = c.c; reason = "rsi_exit"; }
       if (exit !== null) {
         const pnl = close(exit, reason, c.t);
-        if (lossPause(pnl, reason === "trailing_stop") && !o.noCooldown) cooldownUntil = c.t + T.cooldownMs;
+        if (lossPause(pnl, reason === "trailing_stop") && !o.noCooldown) cooldownUntil = c.t + (o.cooldownMs ?? T.cooldownMs);
         pos = null;
       } else if (o.partial && !pos.partial && c.h >= pos.entry + PARTIAL.atR * pos.risk) {
         pos.partial = true;

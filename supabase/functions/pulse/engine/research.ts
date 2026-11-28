@@ -5,7 +5,7 @@
 //  - puis sur le dernier tiers, qu'aucun réglage n'a « vu » (« validation »).
 // Une stratégie qui ne gagne que sur l'entraînement a appris le passé par cœur : elle est rejetée.
 // Les meilleures servent de parents : le chercheur les fait muter légèrement pour trouver mieux.
-import { backtest, backtestRsi, type BacktestResult, type Candle, type Interval, type Params, type RsiParams, type SimOpts } from "./strategy.ts";
+import { backtest, backtestRsi, type BacktestResult, type Candle, type Interval, type Params, type RsiParams, type SimOpts, SPOT_COOLDOWN_MS } from "./strategy.ts";
 import { backtestSetup, describeSetup, isSetup, type Extra, type SetupFamily, type SetupParams } from "./setups.ts";
 
 export type Family = "tendance" | "rsi" | SetupFamily;
@@ -235,7 +235,8 @@ function segment(log: BacktestResult["log"]): SegmentStats {
 export interface EvalContext { blockedAt?: (t: number) => boolean; extra?: Extra }
 export function simulate(c: Candidate, candles: Candle[], m: Market, ctx: EvalContext = {}): BacktestResult {
   const o: SimOpts = { allowShort: m.kind === "perps", feePct: m.feePct, hourlyCost: m.hourlyCost, leverageCap: m.cap,
-    partial: m.kind === "spot" ? "half" : "breakeven", ...(m.kind === "spot" && ctx.blockedAt ? { blockedAt: ctx.blockedAt } : {}) };
+    partial: m.kind === "spot" ? "half" : "breakeven", ...(m.kind === "spot" && ctx.blockedAt ? { blockedAt: ctx.blockedAt } : {}),
+    ...(m.kind === "spot" ? { cooldownMs: SPOT_COOLDOWN_MS } : {}) }; // même pause qu'en réel
   if (c.family === "rsi") return backtestRsi(candles, c.params as RsiParams, m.feePct, o);
   if (isSetup(c.family)) return backtestSetup(c.family, candles, c.params as SetupParams, { ...o, extra: ctx.extra });
   return backtest(candles, { ...o, params: c.params as Params });

@@ -183,7 +183,7 @@ export async function runHlTick(admin: Admin): Promise<string> {
       collateralUsd: o.marginUsd, sizeUsd: o.size * o.entryPx, lastValueUsd: o.valueUsd, coinSize: o.size, source: "position trouvée sur Hyperliquid", why: `reprise d'une position existante (stop de sécurité ±${pct} %)` };
     message = `Position ${o.side} ${o.coin} trouvée : je reprends sa gestion (stop de sécurité ±${pct} %).`;
   }
-  for (const p of Object.values(mine)) { const o = realOf(p.key); if (o) { p.lastValueUsd = o.valueUsd; p.sizeUsd = o.size * (mids[o.coin] ?? o.entryPx); p.collateralUsd ??= o.marginUsd; } }
+  for (const p of Object.values(mine)) { const o = realOf(p.key); if (o) { p.lastValueUsd = o.valueUsd; p.sizeUsd = o.size * (mids[o.coin] ?? o.entryPx); p.collateralUsd = o.marginUsd > 0 ? o.marginUsd : p.collateralUsd; if (o.entryPx > 0) p.entry = o.entryPx; } } // 28/11 : marge et prix d'entrée réels (ex. après un doublon)
   sampleCurve(mem, value, now);
 
   // 4. Fin de mission (objectif, date limite, plancher).

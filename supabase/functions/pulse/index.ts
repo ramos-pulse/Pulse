@@ -518,7 +518,7 @@ const symbolOfRow = (r: ResearchRow) => r.symbol ?? r.market.replace(/^(Spot|Per
 const confidenceOf = (r: ResearchRow) => (r.live?.confirmed ? "confirmée" as const : "nouvelle" as const);
 const spotFamily = (f: ResearchRow["family"]): SpotPlan["family"] => (f === "rsi" ? "rsi" : isSetup(f) && !PERPS_ONLY.includes(f) ? f as SpotPlan["family"] : "tendance");
 /** Bot 1 : stratégies surveillées (plus que de positions possibles : plus d'occasions, même risque). */
-const SPOT_PLANS = { max: 6, maxGecko: 2 };
+const SPOT_PLANS = { max: 10, maxGecko: 3 }; // 28/11 : 10 surveillées (6 auparavant), 3 au plus sur la sélection
 const toSpotPlan = (r: ResearchRow): SpotPlan => ({ symbol: symbolOfRow(r), family: spotFamily(r.family),
   params: r.family === "rsi" ? sanitizeRsi({ ...(r.params as RsiParams), riskPct: 1, naive: false }) : isSetup(r.family) ? sanitizeSetup(r.family, r.params)! : sanitizeTrend(r.params)!,
   interval: r.interval === "15m" ? "15m" : "1h", source: `chercheur #${r.id} · ${r.market}`, score: effScore(r), confidence: confidenceOf(r) });
@@ -656,7 +656,7 @@ async function applyResearch(id: number) {
   if (r.kind === "spot") {
     const cur = loadConfig(bots.spot.config);
     const plan = toSpotPlan(r);
-    const config = { ...cur, plans: [plan, ...cur.plans.filter((p) => p.symbol !== plan.symbol)].slice(0, 6) };
+    const config = { ...cur, plans: [plan, ...cur.plans.filter((p) => p.symbol !== plan.symbol)].slice(0, 10) };
     await setBot("spot", { config });
     await notify(`Chercheur : stratégie #${r.id} ajoutée au bot spot (${plan.symbol}, ${desc})`);
     return { ok: true, kind: "spot", config };
