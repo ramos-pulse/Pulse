@@ -13,7 +13,8 @@ export const HL_RULES = {
   slippage: 0.01,         // ordre « au marché » = ordre limite IOC 1 % au-delà du prix moyen
   stopSlippage: 0.03,     // stop « au marché » déclenché : prix limite 3 % au-delà du déclencheur
   expectedSlip: 0.0005,   // glissement moyen attendu à la sortie (0,05 %) : compté dans le risque d'un trade
-  maxExposure: 10,        // taille d'une position plafonnée à 10 × le capital, même avec un stop très serré
+  maxExposure: 10,
+  fundingBuffer: 0.005,   // réserve de 0,5 % : en marge isolée, le funding payé ronge la marge et rapproche la liquidation        // taille d'une position plafonnée à 10 × le capital, même avec un stop très serré
 };
 
 // ---------------------------------------------------------------------------------------------------

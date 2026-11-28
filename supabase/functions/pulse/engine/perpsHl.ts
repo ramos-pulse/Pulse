@@ -30,7 +30,7 @@ const FLOOR_USD = 5;
 /** Levier sans risque de liquidation avant le stop : marge de maintien Hyperliquid = moitié de la marge initiale au levier max. */
 export function hlSafeLeverage(dist: number, maxLeverage: number): number {
   const maintenance = 1 / (2 * Math.max(1, maxLeverage));
-  return 1 / (dist / LIQ.safety + maintenance + 2 * HL_RULES.takerFee);
+  return 1 / (dist / LIQ.safety + maintenance + 2 * HL_RULES.takerFee + HL_RULES.fundingBuffer);
 }
 
 /**
@@ -56,6 +56,15 @@ export function hlSizing(equity: number, available: number, price: number, stop:
   return { notional, margin: notional / lev, leverage: lev, coins: notional / price, risk: (notional * loss) / equity };
 }
 
+/**
+ * Stop de secours d'une position reprise sans mémoire : ±4 %, mais toujours au tiers de la distance de liquidation
+ * (avec le levier adapté au stop, une position à x25 serait liquidée vers −2 %, avant un stop à −4 %).
+ */
+export function resumeStopDist(o: { entryPx: number; liqPx: number | null; leverage: number }): number {
+  const liq = o.liqPx && o.liqPx > 0 ? Math.abs(o.entryPx - o.liqPx) / o.entryPx : 1 / Math.max(1, o.leverage) / 2;
+  return Math.max(0.001, Math.min(0.04, liq / 3));
+}
+
 /** Perte si le stop de chaque position est touché, en part du capital. */
 function openRisk(positions: Position[], valueUsd: number) {
   if (!(valueUsd > 0)) return 0;
@@ -63,7 +72,7 @@ function openRisk(positions: Position[], valueUsd: number) {
     const price = p.live?.price ?? p.entry ?? 0, stop = p.stop ?? price;
     if (!(price > 0)) return s;
     const adverse = p.side === "long" ? price - stop : stop - price;
-    return s + Math.max(0, adverse / price) * (p.sizeUsd ?? 0);
+    return s + Math.max(0, adverse / price + 2 * HL_RULES.takerFee + HL_RULES.expectedSlip) * (p.sizeUsd ?? 0); // frais et glissement compris, comme à l'entrée
   }, 0) / valueUsd;
 }
 
@@ -163,10 +172,12 @@ export async function runHlTick(admin: Admin): Promise<string> {
   }
   for (const o of acct.positions) {
     if (mine[o.coin]) continue;
-    const fallback = o.side === "long" ? o.entryPx * 0.96 : o.entryPx * 1.04;
+    const d = resumeStopDist(o);
+    const fallback = o.side === "long" ? o.entryPx * (1 - d) : o.entryPx * (1 + d);
+    const pct = (d * 100).toFixed(1).replace(".", ",");
     mine[o.coin] = { key: o.coin, symbol: o.coin, side: o.side, entry: o.entryPx, stop: fallback, best: o.entryPx, initialRisk: Math.abs(o.entryPx - fallback), openedAt: now,
-      collateralUsd: o.marginUsd, sizeUsd: o.size * o.entryPx, lastValueUsd: o.valueUsd, coinSize: o.size, source: "position trouvée sur Hyperliquid", why: "reprise d'une position existante (stop de sécurité ±4 %)" };
-    message = `Position ${o.side} ${o.coin} trouvée : je reprends sa gestion (stop de sécurité ±4 %).`;
+      collateralUsd: o.marginUsd, sizeUsd: o.size * o.entryPx, lastValueUsd: o.valueUsd, coinSize: o.size, source: "position trouvée sur Hyperliquid", why: `reprise d'une position existante (stop de sécurité ±${pct} %)` };
+    message = `Position ${o.side} ${o.coin} trouvée : je reprends sa gestion (stop de sécurité ±${pct} %).`;
   }
   for (const p of Object.values(mine)) { const o = realOf(p.key); if (o) { p.lastValueUsd = o.valueUsd; p.sizeUsd = o.size * (mids[o.coin] ?? o.entryPx); p.collateralUsd ??= o.marginUsd; } }
   sampleCurve(mem, value, now);

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { addressOf, l1Digest, recoverAddress } from "../supabase/functions/pulse/engine/evm.ts";
 import { floatToWire, roundPrice, roundSize } from "../supabase/functions/pulse/engine/hyperliquid.ts";
-import { hlSafeLeverage, hlSizing, runHlTick } from "../supabase/functions/pulse/engine/perpsHl.ts";
+import { hlSafeLeverage, hlSizing, resumeStopDist, runHlTick } from "../supabase/functions/pulse/engine/perpsHl.ts";
 import { conviction, setPerpsMarkets, type Candle } from "../supabase/functions/pulse/engine/strategy.ts";
 
 test("Hyperliquid : arrondis des prix et des tailles", () => {
@@ -53,6 +53,13 @@ test("Hyperliquid : levier adapté au stop (même perte au stop, beaucoup moins 
   assert.ok(liq >= 3 * dist, `liquidation à ${(liq * 100).toFixed(2)} %, stop à ${(dist * 100).toFixed(2)} %`);
   // stop large (5 %) : levier bas, même sur un marché à x40
   assert.ok(hlSizing(39, 39, 100, 95, 0.01, 40, 0.03)!.leverage <= 6);
+});
+
+test("Hyperliquid : position reprise sans mémoire → stop de secours toujours avant la liquidation", () => {
+  assert.equal(resumeStopDist({ entryPx: 100, liqPx: 70, leverage: 3 }), 0.04);           // x3 : ±4 % comme avant
+  const d = resumeStopDist({ entryPx: 1657, liqPx: 1690, leverage: 25 });                  // x25 : liquidation à +2 %
+  assert.ok(d < 0.0067 && d > 0.006, `stop à ${(d * 100).toFixed(2)} %`);
+  assert.ok(resumeStopDist({ entryPx: 100, liqPx: null, leverage: 40 }) < 0.01);            // liquidation inconnue : déduite du levier
 });
 
 test("Hyperliquid : stop minuscule → taille plafonnée à 10 × le capital", () => {
