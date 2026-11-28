@@ -44,7 +44,7 @@ export const FAMILIES: Record<BotKind, Family[]> = {
   perps: ["tendance", "range", "orb", "vwap", "squeeze", "volume", "funding"],
 };
 /** Part des stratégies testées avec le filtre « heures actives » (pas d'entrée la nuit ni le week-end). */
-export const HOURS_SHARE = 0.25;
+export const HOURS_SHARE = 0; // 28/11 : Ramos veut des bots qui tradent 24 h/24, 7 j/7 — plus de variante « heures actives seulement »
 /** Part des stratégies de tendance tirées en « achat sur repli » plutôt qu'en cassure. */
 export const PULLBACK_SHARE = 0.4;
 
@@ -116,9 +116,9 @@ function randomParams(rnd: () => number, family: Family, S: Space = SPACE as unk
 export function mutate(rnd: () => number, c: Candidate, fast = false): Candidate {
   const grid = space(fast)[c.family];
   const keys = Object.keys(grid);
-  if (c.family !== "rsi" && c.family !== "funding" && rnd() < 0.15) { // parfois : essayer avec / sans le filtre des heures creuses
+  if ((c.params as unknown as { hours?: string }).hours && rnd() < 0.5) { // une ancienne stratégie « heures actives » : on retire ce filtre (24 h/24)
     const p = { ...(c.params as unknown as Record<string, unknown>) };
-    if (p.hours) delete p.hours; else p.hours = "actives";
+    if (p.hours) delete p.hours; // jamais ajoutée : trading 24 h/24
     return { ...c, params: p as unknown as Candidate["params"] };
   }
   const k = pick(rnd, keys);
