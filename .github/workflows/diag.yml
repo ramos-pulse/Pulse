@@ -65,6 +65,7 @@ jobs:
           echo "=== HL ledger ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"userNonFundingLedgerUpdates\",\"user\":\"$A\",\"startTime\":1795800000000}" | head -c 2500; echo
           echo "=== HL role ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"userRole\",\"user\":\"$A\"}" | head -c 300; echo
           echo "=== HL ordres ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"frontendOpenOrders\",\"user\":\"$A\"}" | head -c 1500; echo
+          echo "=== JUP quote ==="; curl -s "https://lite-api.jup.ag/swap/v1/quote?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=So11111111111111111111111111111111111111112&amount=20000000&slippageBps=100&restrictIntermediateTokens=true" | head -c 400; echo
           echo "=== HLCHECK ==="
           supabase functions deploy hlcheck --project-ref "$PROJECT_REF" --no-verify-jwt >/dev/null 2>&1 && sleep 5
           curl -s "https://$PROJECT_REF.supabase.co/functions/v1/hlcheck"; echo
