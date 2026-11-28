@@ -910,15 +910,21 @@ function quickSettings(kind) {
 
 /** Barre stop → objectif d'une position, avec le prix actuel. */
 function posBar(p) {
+  // 28/11 : toujours stop à gauche → objectif à droite (long ET short), objectif 2R calculé sur le risque de DÉPART
+  // (avant : barre inversée pour les shorts, et l'objectif retombait sur le prix actuel quand le stop était remonté à l'entrée)
   const cur = p.live?.price, entry = p.entry, stop = p.stop; if (!cur || !entry || !stop) return "";
-  const long = p.side !== "short", target = p.target ?? (long ? Math.max(p.best ?? entry, cur, entry + 2 * Math.abs(entry - stop)) : Math.min(p.best ?? entry, cur, entry - 2 * Math.abs(entry - stop)));
-  const a = long ? stop : target, b = long ? target : stop, lo = Math.min(a, cur), hi = Math.max(b, cur), at = v => hi > lo ? (v - lo) / (hi - lo) * 100 : 50;
-  const L = long ? at(stop) : at(target), R = long ? at(target) : at(stop), E = at(entry), C = at(cur), win = long ? cur >= entry : cur <= entry;
-  const prog = Math.max(0, Math.min(100, (long ? (cur - stop) / (target - stop) : (stop - cur) / (stop - target)) * 100));
-  return `<div class="pbar" data-tip="Progression de la position, du stop (perte maximale) à l'objectif ${p.target ? "fixé par la stratégie" : "indicatif (2 fois le risque)"} : ${nf(prog, 0)} % du chemin."><div class="t" style="left:${Math.min(L, R)}%;right:${100 - Math.max(L, R)}%${long ? "" : ";transform:scaleX(-1)"}"></div>
+  const long = p.side !== "short", r0 = p.initialRisk > 0 ? p.initialRisk : Math.abs(entry - stop);
+  const target = p.target ?? (long ? entry + 2 * r0 : entry - 2 * r0);
+  if (!(Math.abs(target - stop) > 0)) return "";
+  const f = v => long ? (v - stop) / (target - stop) : (stop - v) / (stop - target); // 0 = stop, 1 = objectif
+  const lo = Math.min(0, f(cur)), hi = Math.max(1, f(cur)), at = v => (f(v) - lo) / (hi - lo) * 100;
+  const S = at(stop), T = at(target), E = at(entry), C = at(cur), win = long ? cur >= entry : cur <= entry;
+  const prog = Math.max(0, Math.min(100, f(cur) * 100));
+  const locked = long ? stop >= entry : stop <= entry; // stop au prix d'entrée ou mieux : plus de perte possible (hors frais)
+  return `<div class="pbar" data-tip="Progression de la position, du stop (à gauche) à l'objectif ${p.target ? "fixé par la stratégie" : "indicatif (2 fois le risque de départ)"} (à droite) : ${nf(prog, 0)} % du chemin.${locked ? " Le stop protège déjà l'entrée." : ""}"><div class="t" style="left:${S}%;right:${100 - T}%"></div>
     <div class="f" style="left:${Math.min(E, C)}%;width:${Math.abs(C - E)}%;background:${win ? "var(--green)" : "var(--red)"};opacity:.75"></div>
     <div class="m" style="left:${E}%"></div><div class="n" style="left:${C}%"></div></div>
-    <div class="pl"><span class="down">stop ${px(stop)}</span><span>entrée ${px(entry)}</span><span class="up">${p.target ? "objectif" : "2R"} ${px(target)}</span></div>`;
+    <div class="pl">${locked ? `<span class="up">stop ${px(stop)} 🔒</span>` : `<span class="down">stop ${px(stop)}</span><span>entrée ${px(entry)}</span>`}<span class="up">${p.target ? "objectif" : "2R"} ${px(target)}</span></div>`;
 }
 
 /** Graphique de prix d'une position : bougies, entrée, stop, objectif et trades passés. */
