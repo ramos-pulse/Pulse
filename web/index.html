@@ -59,6 +59,7 @@ main{max-width:560px;margin:0 auto;padding:4px 16px 20px}
 .row:last-child{border-bottom:0}
 .l1{font:600 14px var(--mono);letter-spacing:.05em}.l2{font:12px var(--mono);color:var(--muted);margin-top:3px}
 .r{text-align:right;font:600 14.5px var(--mono);white-space:nowrap}
+.row>:first-child{min-width:0;flex:1 1 auto;overflow-wrap:anywhere}.row>.r{flex-shrink:0}.row>.r.wrap{flex-shrink:1;white-space:normal;overflow-wrap:anywhere}.r .sub2{font:12px var(--mono);color:var(--muted);font-weight:400;margin-top:2px}
 #p-home .eyebrow{margin:14px 4px 8px;font-size:11px;letter-spacing:.22em}
 #p-home .card{padding:14px 16px;border-radius:18px;margin-bottom:10px}
 #p-home .status{font-size:12px;letter-spacing:.14em}
@@ -509,7 +510,7 @@ function renderHist() {
 /** « Pourquoi ce trade ? » : raison de l'entrée ou de la sortie, stratégie, stop, durée. */
 function whyTrade(t, k) {
   const d = t.detail || {}, act = (t.side || t.action || "").toUpperCase(), sell = act === "SELL" || act === "CLOSE";
-  const line = (label, v) => v == null || v === "" ? "" : `<div class="row"><div class="l2">${label}</div><div class="r" style="text-align:right;max-width:62%">${v}</div></div>`;
+  const line = (label, v) => v == null || v === "" ? "" : `<div class="row"><div class="l2">${label}</div><div class="r wrap" style="text-align:right;max-width:62%">${v}</div></div>`;
   sheet(`<h3>Pourquoi ce trade ?</h3>
     <p><b>${{BUY: "Achat", SELL: "Vente", OPEN: "Ouverture", CLOSE: "Fermeture", DEPOSIT: "Dépôt", WITHDRAW: "Retrait"}[act] || act} ${esc(t.symbol || t.asset || "")}</b>${k === "perps" && t.side ? ` (${esc(t.side)})` : ""} · ${new Date(t.created_at).toLocaleString("fr-FR", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"})}</p>
     <p>${esc(d.pourquoi || t.reason || "Raison non enregistrée (trade antérieur à cette mise à jour).")}</p>
@@ -653,7 +654,7 @@ function mathCard() {
       <div><div class="k">Idées du chercheur</div><div class="v">${pct(m.stats.chercheur.rate)}</div><div class="l2">${m.stats.chercheur.promising} / ${m.stats.chercheur.tested}</div></div></div>
     ${rows ? `<details data-d="math-list" style="margin:10px 0 0"><summary>▸ ${m.insights.length} MARCHÉS · ${trend} EN TENDANCE</summary>${rows}</details>` : `<p class="sub" style="margin:10px 0 0">Première analyse dans les 5 minutes.</p>`}
     ${(() => { const F = m.fit || {}, n = Object.values(F).reduce((a, x) => a + x.n, 0);
-      const line = (k, lab) => F[k] ? `<div class="row" style="padding:5px 0"><div class="l2" style="margin:0">${lab} <span class="mut">(${F[k].n})</span></div><div class="r" style="font-size:14px">${nf(F[k].wins / F[k].n * 100, 0)} % gagnants · <span class="${cl(F[k].pnl)}">${sg(F[k].pnl)} $</span></div></div>` : "";
+      const line = (k, lab) => F[k] ? `<div class="row" style="padding:5px 0"><div class="l2" style="margin:0">${lab} <span class="mut">(${F[k].n})</span></div><div class="r" style="font-size:14px"><span class="${cl(F[k].pnl)}">${sg(F[k].pnl)} $</span><div class="sub2">${nf(F[k].wins / F[k].n * 100, 0)} % gagnants</div></div></div>` : "";
       return `<div class="k" style="margin-top:12px" data-tip="À chaque entrée, le bot note si le régime du marché (calcul du mathématicien) était favorable à la stratégie. Avec assez de trades, ça dira si ce diagnostic aide vraiment.">Son diagnostic vérifié en réel</div>
         ${n ? line("favorable", "Régime favorable") + line("neutre", "Régime neutre") + line("défavorable", "Régime défavorable") : `<p class="sub" style="margin:4px 0 0;font-size:12px">Les premiers résultats arrivent avec les prochains trades fermés.</p>`}`; })()}
   </div>`;
@@ -734,7 +735,7 @@ function swapCard() {
   const w = AGS?.swap; if (!w) return "";
   // compact (28/11) : une ligne d'état, réglage + bouton côte à côte, historique replié
   const line = r => `<div class="row" style="padding:8px 0"><div class="l2" style="margin:0">${r.action === "vente" ? "Vente" : "Récup"} ${r.wallet === "spot" ? "spot" : "perps"} · ${esc(r.detail)}</div>
-    <div class="r" style="font-size:13px;white-space:nowrap">${r.action === "vente" ? `${nf(r.usd)} $` : `+${nf(r.sol, 4)} SOL`} · ${ago(r.created_at)}${r.signature ? ` · <a href="https://solscan.io/tx/${esc(r.signature)}" target="_blank" rel="noopener">tx ↗</a>` : ""}</div></div>`;
+    <div class="r" style="font-size:13px">${r.action === "vente" ? `${nf(r.usd)} $` : `+${nf(r.sol, 4)} SOL`}<div class="sub2">${ago(r.created_at)}${r.signature ? ` · <a href="https://solscan.io/tx/${esc(r.signature)}" target="_blank" rel="noopener">tx ↗</a>` : ""}</div></div></div>`;
   const next = w.auto ? (w.nextRun ? new Date(w.nextRun).toLocaleString("fr-FR", {weekday: "short", hour: "2-digit", minute: "2-digit"}) : "dans 5 min") : null;
   return `<div class="eyebrow">Agent swap</div><div class="card">
     <div class="agh">${avatar("swap", SW_BUSY)}<div><div class="status ${w.auto ? "run" : "off"}" style="font-size:12px;letter-spacing:.12em">${w.auto ? "Nettoyage automatique" : "Automatique coupé"}</div>
@@ -1134,12 +1135,12 @@ function lot2Cards() {
       <button class="btn sm" style="width:100%;margin-top:12px" id="selRun">Refaire la sélection maintenant</button></div>
     <div class="eyebrow">Agent nouveaux tokens</div><div class="card">${(() => { // compact (28/11)
       const d = fr.last?.[0]?.detail || "", head = d.split(" · ")[0], refus = d.split(" · ").slice(1).join(" · ");
-      const tok = t => `<div class="row" style="padding:7px 0"><div class="l1" style="font-size:15px">${esc(t.symbol)}</div><div class="r l2" style="white-space:nowrap">${M(t.liquidity)} · <span class="${cl(t.data?.change1h ?? 0)}">${sg(t.data?.change1h ?? 0, 0)} %</span> · gros ${nf(t.data?.topHolders ?? 0, 0)} % · ${ago(t.seen_at || t.added_at)}</div></div>`;
+      const tok = t => `<div class="row" style="padding:7px 0"><div class="l1" style="font-size:15px">${esc(t.symbol)}</div><div class="r l2" style="margin:0">${M(t.liquidity)} · <span class="${cl(t.data?.change1h ?? 0)}">${sg(t.data?.change1h ?? 0, 0)} %</span><div class="sub2">gros ${nf(t.data?.topHolders ?? 0, 0)} % · ${ago(t.seen_at || t.added_at)}</div></div></div>`;
       return `<div class="agh">${avatar("fresh", recent(fr.last?.[0]?.created_at))}<div><div class="status ${fr.on ? "run" : "off"}" style="font-size:12px;letter-spacing:.12em">${fr.on ? "Achats activés" : "Observation seulement"}</div><div class="l2">${head ? esc(head) : "premier passage dans les 5 minutes"}</div>${refus ? `<div class="l2 mut" style="font-size:12px">${esc(refus)}</div>` : ""}</div></div>
       <p class="sub" style="margin:10px 0 0">Tokens lancés depuis 30 min à 24 h, gardés seulement s'ils passent les garde-fous (émission et gel coupés, RugCheck, liquidité ≥ 50 k$ dont 70 % verrouillée, gros portefeuilles ≤ 30 %…). Avant d'acheter, revente testée ; liquidité surveillée chaque minute. Mise 2 à 5 $, stop −20 %, objectif +40 %, 4 h max, 3 par jour.</p>
       <div class="warnbox" style="margin:10px 0 0;padding:8px 12px;font-size:13px">⚠ Terrain le plus risqué : ne mets que ce que tu acceptes de perdre.</div>
       ${(() => { const P = fr.paper; if (!P) return "";
-        const line = (lab, x) => x ? `<div class="row" style="padding:5px 0"><div class="l2" style="margin:0">${lab} <span class="mut">(${x.n})</span></div><div class="r" style="font-size:14px"><span class="${cl(x.avg)}">${sg(x.avg, 1)} %</span> <span class="mut" style="font-size:12px">· ${x.up} % en hausse · pire ${sg(x.worst, 0)} %</span></div></div>` : "";
+        const line = (lab, x) => x ? `<div class="row" style="padding:5px 0"><div class="l2" style="margin:0">${lab} <span class="mut">(${x.n})</span></div><div class="r" style="font-size:14px"><span class="${cl(x.avg)}">${sg(x.avg, 1)} %</span><div class="sub2">${x.up} % en hausse · pire ${sg(x.worst, 0)} %</div></div></div>` : "";
         return `<div class="k" style="margin-top:12px" data-tip="Pour chaque token retenu, acheté ou non : variation de son prix 1 h et 4 h plus tard. Aucun argent engagé : ça mesure si les choix de l'agent gagnent.">Suivi à blanc · 7 jours · ${P.retained} retenu(s)</div>
           ${P.h1 || P.h4 ? line("1 h après", P.h1) + line("4 h après", P.h4) : `<p class="sub" style="margin:4px 0 0;font-size:12px">Les premiers résultats arrivent 1 h après le prochain token retenu.</p>`}`; })()}
       ${fr.tokens.length ? fold("fresh", `Retenus (${fr.tokens.length})`, `<div class="l2 mut" style="font-size:12px">liquidité · variation 1 h · gros portefeuilles · âge</div>` + fr.tokens.map(tok).join("")) : ""}
