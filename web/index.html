@@ -651,14 +651,14 @@ function renderWal() {
   const sol = w => {
     if (!w) return "";
     if (w.error) return `<div class="warnbox" style="margin-top:10px">Lecture impossible : ${esc(w.error)}</div>`;
-    const tok = t => `<div class="row" style="padding:8px 0;align-items:flex-start"><div><div class="l1" style="font-size:15px">${esc(t.symbol)}${t.botPosition ? ` <span class="pill ok" style="font-size:10px;padding:2px 6px">position du bot</span>` : ""}${t.empty ? ` <span class="pill" style="font-size:10px;padding:2px 6px">vide</span>` : ""}</div>
+    const tok = t => `<div class="row" style="padding:8px 0;align-items:flex-start"><div><div class="l1" style="font-size:15px">${esc(t.symbol)}${t.botPosition ? ` <span class="pill ok" style="font-size:10px;padding:2px 6px">position du bot</span>` : ""}${t.empty ? ` <span class="pill" style="font-size:10px;padding:2px 6px">vide</span>` : ""}${!t.tracked && !t.empty ? ` <span class="pill mid" style="font-size:10px;padding:2px 6px" title="Jeton que le bot n'a jamais choisi : souvent un airdrop non sollicité. N'interagis pas avec un jeton inconnu.">non suivi</span>` : ""}</div>
       <div class="l2" style="font-size:12px">${t.empty ? `compte vide · caution ${nf(t.rentSol, 4)} SOL récupérable (agent swap)` : `${nf(t.amount, t.amount >= 1000 ? 0 : t.amount >= 1 ? 4 : 6)} × ${t.priceUsd != null ? px(t.priceUsd) + " $" : "prix inconnu"}`}${t.program === "Token-2022" ? " · Token-2022" : ""}</div>
       <div class="l2 mut" style="font-size:11px"><a href="https://solscan.io/token/${esc(t.mint)}" target="_blank" rel="noopener">${short(t.mint)} ↗</a></div></div>
       <div class="r" style="font-size:15px">${t.valueUsd != null ? nf(t.valueUsd) + " $" : "—"}</div></div>`;
     const full = w.tokens.filter(t => !t.empty), empty = w.tokens.filter(t => t.empty);
     return `<div class="grid" style="margin-top:12px">${kv("Valeur totale", nf(w.totalUsd) + " $")}${kv("SOL", `${nf(w.sol, 4)}<small style="font-size:12px;color:var(--muted)"> · ${nf(w.solUsd)} $</small>`)}
       ${kv("Réserve frais", nf(w.solReserve, 3) + " SOL")}${w.vaultUsd ? kv("Coffre à gains", nf(w.vaultUsd) + " $", "up") : kv("Cautions", nf(w.rentSol, 4) + " SOL")}</div>
-      <p class="sub" style="margin:8px 0 0;font-size:12px">SOL à ${px(w.solPrice)} $. La réserve de ${nf(w.solReserve, 3)} SOL n'est jamais tradée (frais réseau).${w.unpriced ? ` ${w.unpriced} jeton(s) sans prix : non comptés dans la valeur.` : ""}</p>
+      <p class="sub" style="margin:8px 0 0;font-size:12px">SOL à ${px(w.solPrice)} $. La réserve de ${nf(w.solReserve, 3)} SOL n'est jamais tradée (frais réseau).${w.unpriced ? ` ${w.unpriced} jeton(s) sans prix : non comptés dans la valeur.` : ""}${w.tokens.some(t => !t.tracked && !t.empty) ? " « Non suivi » : jeton que le bot n'a jamais choisi, souvent un airdrop non sollicité ; n'y touche pas." : ""}</p>
       <div class="k" style="margin-top:12px">Jetons (${full.length})</div>${full.map(tok).join("") || `<p class="sub" style="margin:4px 0">Aucun jeton.</p>`}
       ${empty.length ? fold("wal-empty-" + w.address.slice(0, 6), `Comptes vides (${empty.length})`, empty.map(tok).join("")) : ""}`;
   };
@@ -1431,7 +1431,7 @@ document.addEventListener("input", e => { if (e.target.id === "pbias") $("#pbias
   if (e.target.id === "agNerve") { $("#agNerveName").textContent = (AG?.settings?.levels || [])[+e.target.value] || ""; $("#agNerveTxt").textContent = window.__nerveTxt?.(+e.target.value) || ""; }
   if (e.target.id === "paggr") { $("#paggrName").textContent = S.rules.aggrLevels[+e.target.value].name; $("#pmodeTxt").textContent = modeText(+e.target.value); } });
 setInterval(() => { if (PAGE === "ag" && !document.hidden && !AG_BUSY) loadAg(); }, 60000);
-setInterval(() => { if (PAGE === "wal" && !document.hidden && !WAL_BUSY) loadWal(); }, 60000); // wallets relus chaque minute
+setInterval(() => { if (PAGE === "wal" && !document.hidden && !WAL_BUSY) loadWal(); }, 180000); // wallets relus toutes les 3 min (quota Jupiter partagé avec les vrais swaps)
 document.addEventListener("keydown", e => { if (e.target.id === "chatIn" && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
   if (e.target.id === "cmdIn" && e.key === "Enter") { e.preventDefault(); $("#cmdGo")?.click(); } });
 wakeStart();

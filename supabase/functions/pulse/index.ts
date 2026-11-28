@@ -520,23 +520,27 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
 
 // ------------------------------------------------------------------ section Wallets (28/11)
 /** Contenu exact d'un wallet Solana : SOL, chaque compte de jetons (même vide ou inconnu), prix et valeur. Lecture seule. */
+const SYMBOLS = new Map<string, string>(); // noms des jetons inconnus, gardés tant que la fonction reste chaude
 async function solanaWallet(addr: string, mem: Memory | null) {
   const [lamports, accounts] = await Promise.all([rpc<{ value: number }>("getBalance", [addr, { commitment: "confirmed" }]), listTokenAccounts(addr)]);
   const mints = [...new Set([SOL_MINT, ...accounts.map((a) => a.mint)])];
   const known = new Map(allTokens().map((t) => [t.mint, t.symbol]));
   known.set(USDC_MINT, "USDC");
-  const unknown = mints.filter((m) => !known.has(m) && m !== SOL_MINT);
+  const tracked = new Set(known.keys());
+  const unknown = mints.filter((m) => !known.has(m) && m !== SOL_MINT && !SYMBOLS.has(m)); // noms déjà connus : pas redemandés (quota Jupiter)
   const [prices, info] = await Promise.all([
     getPrices(mints.slice(0, 50)).catch(() => ({} as Record<string, number>)),
-    unknown.length ? jupTokens(unknown).catch(() => new Map()) : Promise.resolve(new Map()),
+    unknown.length ? jupTokens(unknown.slice(0, 20)).catch(() => new Map()) : Promise.resolve(new Map()),
   ]);
+  for (const [m, t] of info) SYMBOLS.set(m, (t as { symbol?: string }).symbol ?? "");
   const posMints = new Set(Object.values(mem?.positions ?? {}).map((p) => p.key));
   const sol = lamports.value / 1e9, solPx = prices[SOL_MINT] ?? 0;
   const tokens = accounts.map((a) => {
     const px = a.mint === USDC_MINT ? 1 : prices[a.mint];
-    const symbol = known.get(a.mint) ?? (info.get(a.mint) as { symbol?: string } | undefined)?.symbol ?? `${a.mint.slice(0, 4)}…${a.mint.slice(-4)}`;
+    const symbol = a.mint === SOL_MINT ? "wSOL" : known.get(a.mint) || SYMBOLS.get(a.mint) || `${a.mint.slice(0, 4)}…${a.mint.slice(-4)}`; // wSOL : SOL emballé dans un compte de jetons
     return { mint: a.mint, account: a.pubkey, symbol, amount: a.ui, decimals: a.decimals, program: a.program.startsWith("Tokenz") ? "Token-2022" : "classique",
-      priceUsd: px ?? null, valueUsd: px != null ? a.ui * px : null, rentSol: a.lamports / 1e9, empty: a.amount === 0n, botPosition: posMints.has(a.mint) };
+      priceUsd: px ?? null, valueUsd: px != null ? a.ui * px : null, rentSol: a.lamports / 1e9, empty: a.amount === 0n, botPosition: posMints.has(a.mint),
+      tracked: tracked.has(a.mint) || a.mint === SOL_MINT }; // non suivi : jeton que le bot n'a jamais choisi (souvent un airdrop non sollicité)
   }).sort((x, y) => (y.valueUsd ?? -1) - (x.valueUsd ?? -1));
   const tokensUsd = tokens.reduce((s, t) => s + (t.valueUsd ?? 0), 0);
   return { address: addr, sol, solUsd: sol * solPx, solPrice: solPx, solReserve: SOL_KEEP, tokens, rentSol: tokens.reduce((s, t) => s + t.rentSol, 0),
