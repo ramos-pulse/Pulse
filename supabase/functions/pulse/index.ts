@@ -107,6 +107,7 @@ function freshMissionMemory(ph: unknown, startValue: number | null) {
   const mem = loadMemory(ph);
   mem.day = dayKey(Date.now()); mem.dayStartValue = startValue ?? undefined; mem.cooldownUntil = undefined;
   delete mem.lastUsdc; delete mem.lastSol;
+  mem.hlLedgerAt = Date.now(); // Hyperliquid : un dépôt fait AVANT le lancement est déjà dans la valeur de départ, il ne doit pas être recompté
   mem.curve = startValue ? [{ t: Date.now(), v: Math.round(startValue * 100) / 100 }] : [];
   return mem;
 }
@@ -123,9 +124,12 @@ async function startMission(kind: BotKind, body: { goal_usd?: number; days?: num
   if (sc0.breakerTrippedAt) await setBot("spot", { config: { ...sc0, breakerTrippedAt: null, breakerBase: null } });
   if (isNew) {
     try { startValue = (kind === "spot" ? await currentValue() : await perpsValueNow()).valueUsd; } catch { startValue = null; }
+    // compte vide : la mission s'arrêterait aussitôt (« capital sous le plancher ») — on refuse avec une explication
+    if (kind === "perps" && startValue != null && startValue < 10)
+      throw new Error(`Compte perps à ${startValue.toFixed(2)} $ : dépose au moins 10 $ d'USDC${onHl() ? " côté « Perps » sur Hyperliquid" : ""} avant de lancer la mission.`);
   }
   await setBot(kind, {
-    status: "running", goal_usd: goal,
+    status: "running", goal_usd: goal, last_tick_at: new Date().toISOString(), // le chien de garde ne doit pas croire à une panne juste après le lancement
     ...(isNew ? { started_at: new Date().toISOString(), start_value_usd: startValue, end_at: new Date(Date.now() + days * 86_400_000).toISOString(), price_history: freshMissionMemory(bot.price_history, startValue) as never } : {}),
     last_message: isNew ? "Mission lancée. J'analyse le marché." : "Je reprends la mission.",
   });
