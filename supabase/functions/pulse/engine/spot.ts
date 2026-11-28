@@ -8,7 +8,7 @@ import { candles as getCandles, hourlyCandles, lastClosedCandle } from "./candle
 import { executeSwap, getPrices, getQuote, verifyToken } from "./jupiter.ts";
 import { getBalances, loadKeyPairFrom, txStatus, waitForTx, type Balances } from "./solana.ts";
 import { dexPrices, tokenLiquidity } from "./dex.ts";
-import { FRESH, freshStake } from "./agents.ts";
+import { FRESH, freshAffordable, freshStake } from "./agents.ts";
 import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type SetupParams } from "./setups.ts";
 import {
   addToVault, applyTransfer, conviction, pruneSignal, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate,
@@ -448,7 +448,7 @@ async function freshEntry(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfi
   if (Object.values(mem.fresh).filter((d) => d === today).length >= FRESH.maxPerDay) return null;
   const T = tradable(value, b.usdc, mem.vault);
   const stake = Math.min(freshStake(T.equity), T.usdc);
-  if (!(stake >= RISK.minOrderUsd) || stake * FRESH.stopPct > T.equity * 0.04) return null;
+  if (!(stake >= RISK.minOrderUsd) || !freshAffordable(T.equity)) return null; // capital trop petit (< 10 $) : l'agent observe sans acheter
   const pick = allTokens().find((t) => t.extra === "nouveau" && t.active !== false && t.seenAt && now - t.seenAt < (cfg.extraSoft ? 30 : 15) * 60_000 && !mem.fresh![t.mint] && !(b.raw[t.mint] ?? 0n));
   if (!pick) return null;
   mem.fresh[pick.mint] = `skip:${today}`; // jamais deux tentatives sur le même token

@@ -147,7 +147,12 @@ export const FRESH_SOFT = { minLiquidity: 25_000, minVolume1h: 10_000, minSells1
 /** Noms de marques et de grands tokens : un « nouveau » token qui les porte est presque toujours une imitation. */
 const FAMOUS = new Set(["metamask", "phantom", "solflare", "binance", "bnb", "coinbase", "kraken", "okx", "bybit", "jupiter", "jup", "raydium", "orca", "solana", "sol", "wsol",
   "bitcoin", "btc", "wbtc", "ethereum", "eth", "weth", "usdc", "usdt", "tether", "pyusd", "usd", "xrp", "ripple", "doge", "dogecoin", "bonk", "wif", "pump", "pumpfun",
-  "trump", "melania", "elon", "tesla", "spacex", "x", "openai", "chatgpt", "anthropic", "claude", "google", "apple", "nvidia", "microsoft", "amazon", "blackrock", "paypal", "visa"]);
+  "trump", "melania", "elon", "tesla", "spacex", "x", "openai", "chatgpt", "anthropic", "claude", "google", "apple", "nvidia", "microsoft", "amazon", "blackrock", "paypal", "visa",
+  // 28/11 : grands tokens actuels (un « nouveau » WLFI a passé le filtre)
+  "wlfi", "worldliberty", "worldlibertyfinancial", "usd1", "hype", "hyperliquid", "pengu", "pudgypenguins", "jto", "jito", "pyth", "ray", "popcat", "render", "link", "chainlink",
+  "sui", "ton", "toncoin", "avax", "avalanche", "ada", "cardano", "dot", "polkadot", "shib", "shiba", "pepe", "trx", "tron", "ltc", "litecoin", "near", "apt", "aptos", "arb", "arbitrum",
+  "op", "optimism", "ena", "ethena", "ondo", "tao", "bittensor", "fartcoin", "ai16z", "virtual", "virtuals", "mew", "bome", "moodeng", "pnut", "goat", "msol", "jitosol", "bnsol",
+  "usde", "dai", "fdusd", "paxg", "xaut", "kraken", "robinhood", "hood", "circle", "stripe", "meta", "facebook", "grok", "xai", "deepseek", "gemini", "perplexity", "mistral"]);
 export function impersonates(symbol: string, name = ""): boolean {
   const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]/g, "");
   return FAMOUS.has(norm(symbol)) || FAMOUS.has(norm(name)) || /^(official|real|the)?(metamask|phantom|binance|coinbase|jupiter|solana|bitcoin|ethereum|tether|usdc|trump)/.test(norm(name));
@@ -238,6 +243,11 @@ export async function freshCandidates(exclude: Set<string>, soft = false): Promi
 }
 
 /** Mise de l'agent nouveaux tokens : 5 % du capital (2 à 5 $), jamais plus de 20 % du capital. 0 = pas de mise possible. */
+/**
+ * Le capital permet-il d'acheter un nouveau token ? Mise ≤ 20 % du capital ET perte au stop ≤ 4 % du capital :
+ * avec la mise minimale de 2 $, il faut au moins 10 $ (sous ce seuil, l'agent observe mais n'achète pas).
+ */
+export const freshAffordable = (equity: number) => { const s = freshStake(equity); return s >= FRESH.minStakeUsd && s * FRESH.stopPct <= equity * 0.04 + 1e-9; };
 export function freshStake(equity: number): number {
   const s = Math.min(FRESH.maxStakeUsd, Math.max(FRESH.minStakeUsd, equity * FRESH.stakePct));
   return s <= equity * FRESH.maxShareOfEquity ? s : 0;

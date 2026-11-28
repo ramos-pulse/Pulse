@@ -11,10 +11,10 @@ import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick 
 import { currentHlValue, getHlAddress, liquidateHl, runHlTick } from "./engine/perpsHl.ts";
 import { hlAccount, hlCredentials, hlMarkets, hlMids, hlOpenOrders, hlSpotBalances } from "./engine/hyperliquid.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { SOL_MINT, USDC_MINT, AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, perpsMarkets, setPerpsMarkets, PERPS_PLANS_MAX, type PerpsMarket, type TokenInfo, type Memory, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
+import { SOL_MINT, USDC_MINT, tradable, AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, perpsMarkets, setPerpsMarkets, PERPS_PLANS_MAX, type PerpsMarket, type TokenInfo, type Memory, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, simulate, tempo, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, pushHook, type BotKind, type BotState } from "./store.ts";
-import { jupTokens, arbScan, bestPools, FRESH, freshCandidates, freshRefusal, impersonates, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
+import { freshAffordable, jupTokens, arbScan, bestPools, FRESH, freshCandidates, freshRefusal, impersonates, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
 import { newVapid, sendPush, type Subscription, type Vapid } from "./engine/webpush.ts";
 import { cleanWallet, CLEANER } from "./engine/cleaner.ts";
 import { analyze, LUCK, luckProbability, propose } from "./engine/math.ts";
@@ -891,7 +891,12 @@ async function runFreshScout(): Promise<string> {
       score: f.change1h, active: true, why: "garde-fous passés", data: { change1h: f.change1h, buys1h: f.buys1h, sells1h: f.sells1h, topHolders: f.topHolders, ...(f.program ? { program: f.program } : {}) }, added_at: now, updated_at: now, seen_at: now }, { onConflict: "mint" });
   }
   const top = Object.entries(refusals).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${k} (${n})`).join(", ");
-  const text = `${list.length} lancement(s) examiné(s), ${ok.length} retenu(s)${ok.length ? ` : ${ok.map((f) => f.symbol).join(", ")}` : ""}${top ? ` · refus : ${top}` : ""}`;
+  // achats activés mais capital du bot 1 trop petit : le dire clairement (sinon « Achats activés » sans jamais rien acheter)
+  const spotBot = (await readBots().catch(() => null))?.spot;
+  const sc = spotBot ? loadConfig(spotBot.config) : null;
+  const eq = spotBot ? tradable(Number(spotBot.last_value_usd ?? 0), Infinity, loadMemory(spotBot.price_history).vault).equity : 0;
+  const blocked = sc?.newTokens && spotBot && !freshAffordable(eq) ? ` · achat impossible : capital du bot 1 trop petit (${eq.toFixed(2)} $, il faut au moins 10 $)` : "";
+  const text = `${list.length} lancement(s) examiné(s), ${ok.length} retenu(s)${ok.length ? ` : ${ok.map((f) => f.symbol).join(", ")}` : ""}${top ? ` · refus : ${top}` : ""}${blocked}`;
   if (list.length) await db.from("agent_log").insert({ agent: "nouveaux", wallet: "spot", action: "scan", detail: text, usd: ok.length });
   await db.from("agent_log").delete().eq("agent", "nouveaux").lt("created_at", new Date(Date.now() - 3 * 86_400_000).toISOString());
   return text;

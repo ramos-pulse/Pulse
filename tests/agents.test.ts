@@ -1,7 +1,7 @@
 // Agents on-chain : filtres du sélectionneur, garde-fous de l'agent nouveaux tokens, mise, arbitrage éclaireur.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dexSpread, freshRefusal, freshStake, rankSelection, selectionRefusal, type JupToken } from "../supabase/functions/pulse/engine/agents.ts";
+import { dexSpread, freshRefusal, freshStake, rankSelection, selectionRefusal, type JupToken, freshAffordable, impersonates } from "../supabase/functions/pulse/engine/agents.ts";
 
 const TP = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const safe = (x: Partial<JupToken> = {}): JupToken => ({ id: "M", symbol: "OK", decimals: 6, tokenProgram: TP, isVerified: true, audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: true, topHoldersPercentage: 10, devBalancePercentage: 2 }, ...x });
@@ -86,4 +86,15 @@ test("RugCheck : le vrai rapport de NINE (27/11) aurait bloqué l'achat", async 
   // token sain : RugCheck ne bloque pas
   const ok = parseRugcheck({ creatorBalance: 0, token: { supply: 1e15 }, risks: [{ name: "Mutable metadata", level: "warn" }] })!;
   assert.deepEqual([ok.devPct, ok.dangers.length, ok.rugged], [0, 0, false]);
+});
+
+test("nouveaux tokens : imitations de grands tokens actuels (WLFI, HYPE…) refusées", () => {
+  for (const s of ["WLFI", "wlfi", "HYPE", "PENGU", "Fartcoin", "USD1"]) assert.ok(impersonates(s), s);
+  assert.ok(!impersonates("STEADY") && !impersonates("Memeball"));
+});
+
+test("nouveaux tokens : pas d'achat sous 10 $ de capital (mise ≤ 20 %, perte au stop ≤ 4 %)", () => {
+  assert.equal(freshAffordable(9.86), false); // le bot 1 le 28/11
+  assert.equal(freshAffordable(10), true);
+  assert.equal(freshAffordable(11.65), true); // quand NINE a été acheté
 });
