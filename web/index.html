@@ -631,17 +631,18 @@ function mathCard() {
 }
 function swapCard() {
   const w = AGS?.swap; if (!w) return "";
-  const line = r => `<div class="row"><div><div class="l1">${r.action === "vente" ? "VENTE" : "RÉCUP"} <span class="mut" style="font-weight:400">${r.wallet === "spot" ? "spot" : "perps"}</span></div><div class="l2">${esc(r.detail)}</div></div>
-    <div class="r">${r.action === "vente" ? `${nf(r.usd)} $` : `+${nf(r.sol, 4)} SOL`}<div class="l2">${ago(r.created_at)}${r.signature ? ` · <a href="https://solscan.io/tx/${esc(r.signature)}" target="_blank" rel="noopener">tx ↗</a>` : ""}</div></div></div>`;
+  // compact (28/11) : une ligne d'état, réglage + bouton côte à côte, historique replié
+  const line = r => `<div class="row" style="padding:8px 0"><div class="l2" style="margin:0">${r.action === "vente" ? "Vente" : "Récup"} ${r.wallet === "spot" ? "spot" : "perps"} · ${esc(r.detail)}</div>
+    <div class="r" style="font-size:13px;white-space:nowrap">${r.action === "vente" ? `${nf(r.usd)} $` : `+${nf(r.sol, 4)} SOL`} · ${ago(r.created_at)}${r.signature ? ` · <a href="https://solscan.io/tx/${esc(r.signature)}" target="_blank" rel="noopener">tx ↗</a>` : ""}</div></div>`;
+  const next = w.auto ? (w.nextRun ? new Date(w.nextRun).toLocaleString("fr-FR", {weekday: "short", hour: "2-digit", minute: "2-digit"}) : "dans 5 min") : null;
   return `<div class="eyebrow">Agent swap</div><div class="card">
-    <div class="agh">${avatar("swap", SW_BUSY)}<div class="status ${w.auto ? "run" : "off"}" style="font-size:12px;letter-spacing:.12em">${w.auto ? "Nettoyage automatique" : "Automatique coupé"}</div></div>
-    <p class="sub" style="margin:10px 0 0">Comme le bouton « Reclaim » de Jupiter, mais tout seul, sur les wallets des bots : il revend les restes de tokens (au moins ${nf(w.rules.minSellUsd)} $) en USDC et ferme les comptes de tokens vides pour récupérer le SOL de caution. Il ne détruit jamais de tokens et ne touche ni à l'USDC ni aux positions en cours.</p>
-    <div class="grid"><div><div class="k">SOL récupéré</div><div class="v up">+${nf(w.totals.sol, 4)}</div></div><div><div class="k">Restes revendus</div><div class="v">${nf(w.totals.usd)} $</div></div>
-      <div><div class="k">Dernier passage</div><div class="v">${w.lastRun ? "il y a " + ago(w.lastRun) : "jamais"}</div></div><div><div class="k">Prochain</div><div class="v">${w.auto ? (w.nextRun ? new Date(w.nextRun).toLocaleString("fr-FR", {weekday: "short", hour: "2-digit", minute: "2-digit"}) : "dans 5 min") : "—"}</div></div></div>
-    <label class="field" style="margin-top:8px"><span>Une fois par jour, tout seul</span><input type="checkbox" data-swapauto="1" ${w.auto ? "checked" : ""} style="width:26px;height:26px"></label>
-    <button class="btn go sm" style="width:100%;margin-top:12px" id="swapRun">${SW_BUSY ? "Nettoyage en cours… (jusqu'à 2 min)" : "Nettoyer maintenant"}</button>
-    ${w.log.length ? `<div class="sep"></div>${w.log.map(line).join("")}` : ""}
-    ${w.runs[0] ? `<p class="sub" style="margin:10px 0 0;font-size:13px">Dernier passage : ${esc(w.runs[0].detail)}</p>` : ""}
+    <div class="agh">${avatar("swap", SW_BUSY)}<div><div class="status ${w.auto ? "run" : "off"}" style="font-size:12px;letter-spacing:.12em">${w.auto ? "Nettoyage automatique" : "Automatique coupé"}</div>
+      <div class="l2" style="margin-top:4px"><span class="up">+${nf(w.totals.sol, 4)} SOL</span> · ${nf(w.totals.usd)} $ revendus · ${w.lastRun ? "il y a " + ago(w.lastRun) : "jamais passé"}${next ? ` · prochain ${next}` : ""}</div></div></div>
+    <p class="sub" style="margin:10px 0 0">Comme « Reclaim » de Jupiter, sur les wallets des bots : revend les restes de tokens (≥ ${nf(w.rules.minSellUsd)} $) en USDC et ferme les comptes vides pour récupérer le SOL de caution. Ne touche ni à l'USDC ni aux positions.</p>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:12px">
+      <label style="display:flex;gap:8px;align-items:center;flex:1;font-size:14px"><input type="checkbox" data-swapauto="1" ${w.auto ? "checked" : ""} style="width:22px;height:22px">1×/jour, tout seul</label>
+      <button class="btn go sm" style="flex:1" id="swapRun">${SW_BUSY ? "En cours…" : "Nettoyer"}</button></div>
+    ${w.log.length || w.runs[0] ? `<details style="margin-top:10px"><summary class="l2" style="cursor:pointer">Historique (${w.log.length})</summary>${w.log.map(line).join("")}${w.runs[0] ? `<p class="sub" style="margin:8px 0 0;font-size:13px">Dernier passage : ${esc(w.runs[0].detail)}</p>` : ""}</details>` : ""}
   </div>`;
 }
 const TIPS = {
