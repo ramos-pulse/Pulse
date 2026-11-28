@@ -566,7 +566,7 @@ function protectionsCard() {
   return `<div class="eyebrow">Protections</div><div class="card" id="protCard">
     <div class="k" data-tip="Nombre de positions ouvertes en même temps. Avec plusieurs positions, la perte totale si tous les stops sont touchés reste plafonnée (3 % du capital en spot, 1,5 fois le risque max en perps).">Positions simultanées</div>
     <div class="l2" style="margin-top:6px">Bot 1 · spot</div>${chips("sp-max", [1, 2, 3], sc.maxPositions ?? 3, v => v)}
-    <div class="l2" style="margin-top:8px">Bot 2 · perps (une par marché : SOL, ETH, BTC)</div>${chips("pp-max", [1, 2, 3], pc.maxPositions ?? 3, v => v)}
+    <div class="l2" style="margin-top:8px">Bot 2 · perps (une par marché${S.perpsVenue === "hyperliquid" ? "" : " : SOL, ETH, BTC"})</div>${chips("pp-max", S.perpsVenue === "hyperliquid" ? [1, 2, 3, 4, 5] : [1, 2, 3], pc.maxPositions ?? 3, v => v)}
     <div class="sep"></div>
     <div class="k" data-tip="Part de chaque gain mise de côté : elle reste dans le wallet du bot mais n'est plus jamais retradée. Une mauvaise série ne peut pas reprendre ces gains.">Coffre à gains</div>
     <div class="l2" style="margin-top:6px">Bot 1 · spot</div>${chips("sp-vault", R.vaultSteps || [0, 25, 50, 75], sc.vaultPct ?? 25, v => v ? v + " %" : "aucun")}

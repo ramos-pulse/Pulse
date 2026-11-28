@@ -666,7 +666,7 @@ type UniverseRow = { mint: string; kind: "selection" | "nouveau"; symbol: string
 /** Source d'historique d'un token on-chain : Birdeye si la clé existe (GeckoTerminal en secours), sinon GeckoTerminal. */
 const candleSource = (r: Pick<UniverseRow, "mint" | "pool">) => (env("BIRDEYE_API_KEY") ? `be:${r.mint}|${r.pool ?? ""}` : `gt:${r.pool}`);
 /** Marchés Hyperliquid tradés : choisis une fois par jour (les plus échangés), gardés dans app_kv. */
-const HL_SELECT = { keep: 12, minDayVolume: 20_000_000, minMaxLeverage: 3, always: ["BTC", "ETH", "SOL"] };
+const HL_SELECT = { keep: 12, minDayVolume: 5_000_000, minMaxLeverage: 3, always: ["BTC", "ETH", "SOL"] };
 async function loadHlMarkets() {
   if (!onHl()) { setPerpsMarkets(PERPS_ASSETS.map((a) => ({ ...a }))); return; }
   const { data } = await db.from("app_kv").select("value").eq("key", "hl_markets").limit(1);

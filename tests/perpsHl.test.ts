@@ -236,3 +236,15 @@ test("premier passage sur Hyperliquid : point de départ remis à la valeur du c
   assert.equal(Number(b.start_value_usd), 50);
   assert.match(String(b.last_message), /passé sur Hyperliquid/);
 });
+
+test("transfert Spot → Perps sur son propre compte : ni dépôt ni retrait (cas réel du 28/11)", async () => {
+  reset(); hl.mids.SOL = 1;
+  const { s, b, trades } = store({ autopilot: true, plans: [] });
+  b.price_history = { v: 3, venue: "hyperliquid", hlLedgerAt: Date.now() - 1000 };
+  b.start_value_usd = 50;
+  const me = ACCOUNT;
+  (hl.ledger as unknown[]).push({ time: Date.now(), delta: { type: "send", user: me, destination: me, sourceDex: "spot", destinationDex: "", token: "USDC", amount: "39.17", usdcValue: "39.17" } });
+  await runHlTick(s as never);
+  assert.equal(Number(b.start_value_usd), 50, "point de départ inchangé");
+  assert.equal(trades.filter((t) => t.action === "deposit").length, 0);
+});

@@ -844,7 +844,7 @@ export const BREAKER_DEFAULT = 15;
 export function protections(o: { maxPositions?: unknown; vaultPct?: unknown; partialTp?: unknown }) {
   const n = Math.round(Number(o.maxPositions));
   return {
-    maxPositions: n >= 1 && n <= 3 ? n : 3,
+    maxPositions: n >= 1 && n <= 5 ? n : 3, // 4-5 utiles surtout pour le bot perps sur Hyperliquid (plus de marchés)
     vaultPct: (VAULT_STEPS as readonly number[]).includes(Number(o.vaultPct)) ? Number(o.vaultPct) : VAULT_DEFAULT,
     partialTp: o.partialTp !== false,
   };

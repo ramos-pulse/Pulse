@@ -124,6 +124,8 @@ export async function hlTransfers(address: string, startTime: number): Promise<{
   for (const r of rows ?? []) {
     const d = r.delta, usd = Number(d.usdc ?? (d.token === "USDC" ? d.amount : NaN));
     if (!Number.isFinite(usd) || usd === 0) continue;
+    // mouvement entre les soldes d'un MÊME compte (Spot → Perps, d'une plateforme à l'autre) : la valeur totale ne change pas
+    if (d.user && d.destination && d.user.toLowerCase() === d.destination.toLowerCase()) continue;
     if (d.type === "deposit") out.push({ time: r.time, usd: Math.abs(usd), kind: "dépôt" });
     else if (d.type === "withdraw") out.push({ time: r.time, usd: -Math.abs(usd), kind: "retrait" });
     else if (d.type === "send" || d.type === "spotTransfer" || d.type === "internalTransfer") // envoi entre comptes : signe selon le sens
