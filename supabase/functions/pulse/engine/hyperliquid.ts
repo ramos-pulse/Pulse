@@ -225,7 +225,6 @@ export async function hlMakerEntry(key: string, account: string, asset: HlAsset,
   wait = HL_RULES.makerWaitMs, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))): Promise<HlFillResult & { makerSize: number }> {
   const sz = roundSize(size, asset.szDecimals);
   if (!(sz > 0)) throw new Error(`taille trop petite pour ${asset.name}`);
-  const t0 = Date.now() - 2_000;
   const book = await hlBook(asset.name).catch(() => null);
   let oid: number | null = null;
   if (book) {
@@ -235,17 +234,26 @@ export async function hlMakerEntry(key: string, account: string, asset: HlAsset,
     if (typeof st === "object" && st.filled) return { size: Number(st.filled.totalSz), avgPx: Number(st.filled.avgPx), oid: st.filled.oid, makerSize: Number(st.filled.totalSz) };
     oid = typeof st === "object" ? st.resting?.oid ?? null : null; // refusé (le prix a bougé) : directement au marché
   }
-  const mine = async () => (await hlFills(account, t0).catch(() => [] as HlFill[])).filter((f) => oid != null && f.oid === oid);
+  // 28/11 (bug XRP) : la liste des exécutions arrive avec quelques secondes de retard. La quantité exécutée est lue dans
+  // l'ÉTAT DE L'ORDRE (taille d'origine − reste), qui est à jour tout de suite ; illisible → exception, rien de plus envoyé.
+  let px0 = 0;
+  const filledOf = async (): Promise<number> => {
+    const r = await info<{ status?: string; order?: { status?: string; order?: { origSz?: string; sz?: string; limitPx?: string } } }>({ type: "orderStatus", user: account, oid });
+    const o = r.order?.order;
+    if (r.status !== "order" || !o) throw new Error(`état de l'ordre ${asset.name} illisible`);
+    px0 = Number(o.limitPx) || px0;
+    return Math.max(0, Number(o.origSz) - Number(r.order?.status === "filled" ? 0 : o.sz));
+  };
+  let makerSize = 0;
   if (oid != null) {
     for (let waited = 0; waited < wait; waited += HL_RULES.makerPollMs) {
       await sleep(HL_RULES.makerPollMs);
-      const done = (await mine()).reduce((a, f) => a + f.sz, 0);
-      if (done >= sz * 0.999) break;
+      if ((await filledOf().catch(() => 0)) >= sz * 0.999) break;
     }
     await hlCancel(key, asset, oid); // erreur → exception : rien de plus n'est envoyé
+    makerSize = roundSize(await filledOf(), asset.szDecimals); // après l'annulation : quantité définitive (exception si illisible)
   }
-  const fills = await mine();
-  const makerSize = fills.reduce((a, f) => a + f.sz, 0), makerCost = fills.reduce((a, f) => a + f.sz * f.px, 0);
+  const makerCost = makerSize * px0; // un ordre « faiseur » s'exécute à son prix limite
   const rest = roundSize(sz - makerSize, asset.szDecimals);
   if (rest <= 0 || rest * refPx < HL_RULES.minNotionalUsd) {
     if (makerSize > 0) return { size: makerSize, avgPx: makerCost / makerSize, oid: oid!, makerSize };
