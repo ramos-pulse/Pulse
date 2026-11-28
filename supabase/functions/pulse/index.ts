@@ -6,15 +6,15 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { riskPerTrade } from "./engine/brain.ts";
 import { candles as getCandles, hourlyCandles } from "./engine/candles.ts";
-import { env, token2022Danger } from "./engine/solana.ts";
+import { env, listTokenAccounts, rpc, SOL_RESERVE as SOL_KEEP, token2022Danger } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
 import { currentHlValue, getHlAddress, liquidateHl, runHlTick } from "./engine/perpsHl.ts";
-import { hlMarkets } from "./engine/hyperliquid.ts";
+import { hlAccount, hlCredentials, hlMarkets, hlMids, hlOpenOrders, hlSpotBalances } from "./engine/hyperliquid.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { SOL_MINT, USDC_MINT, AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, perpsMarkets, setPerpsMarkets, PERPS_PLANS_MAX, type PerpsMarket, type TokenInfo, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
+import { SOL_MINT, USDC_MINT, AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, perpsMarkets, setPerpsMarkets, PERPS_PLANS_MAX, type PerpsMarket, type TokenInfo, type Memory, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, simulate, tempo, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, pushHook, type BotKind, type BotState } from "./store.ts";
-import { arbScan, bestPools, FRESH, freshCandidates, freshRefusal, impersonates, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
+import { jupTokens, arbScan, bestPools, FRESH, freshCandidates, freshRefusal, impersonates, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
 import { newVapid, sendPush, type Subscription, type Vapid } from "./engine/webpush.ts";
 import { cleanWallet, CLEANER } from "./engine/cleaner.ts";
 import { analyze, LUCK, luckProbability, propose } from "./engine/math.ts";
@@ -517,6 +517,54 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
 }
 
 
+
+// ------------------------------------------------------------------ section Wallets (28/11)
+/** Contenu exact d'un wallet Solana : SOL, chaque compte de jetons (même vide ou inconnu), prix et valeur. Lecture seule. */
+async function solanaWallet(addr: string, mem: Memory | null) {
+  const [lamports, accounts] = await Promise.all([rpc<{ value: number }>("getBalance", [addr, { commitment: "confirmed" }]), listTokenAccounts(addr)]);
+  const mints = [...new Set([SOL_MINT, ...accounts.map((a) => a.mint)])];
+  const known = new Map(allTokens().map((t) => [t.mint, t.symbol]));
+  known.set(USDC_MINT, "USDC");
+  const unknown = mints.filter((m) => !known.has(m) && m !== SOL_MINT);
+  const [prices, info] = await Promise.all([
+    getPrices(mints.slice(0, 50)).catch(() => ({} as Record<string, number>)),
+    unknown.length ? jupTokens(unknown).catch(() => new Map()) : Promise.resolve(new Map()),
+  ]);
+  const posMints = new Set(Object.values(mem?.positions ?? {}).map((p) => p.key));
+  const sol = lamports.value / 1e9, solPx = prices[SOL_MINT] ?? 0;
+  const tokens = accounts.map((a) => {
+    const px = a.mint === USDC_MINT ? 1 : prices[a.mint];
+    const symbol = known.get(a.mint) ?? (info.get(a.mint) as { symbol?: string } | undefined)?.symbol ?? `${a.mint.slice(0, 4)}…${a.mint.slice(-4)}`;
+    return { mint: a.mint, account: a.pubkey, symbol, amount: a.ui, decimals: a.decimals, program: a.program.startsWith("Tokenz") ? "Token-2022" : "classique",
+      priceUsd: px ?? null, valueUsd: px != null ? a.ui * px : null, rentSol: a.lamports / 1e9, empty: a.amount === 0n, botPosition: posMints.has(a.mint) };
+  }).sort((x, y) => (y.valueUsd ?? -1) - (x.valueUsd ?? -1));
+  const tokensUsd = tokens.reduce((s, t) => s + (t.valueUsd ?? 0), 0);
+  return { address: addr, sol, solUsd: sol * solPx, solPrice: solPx, solReserve: SOL_KEEP, tokens, rentSol: tokens.reduce((s, t) => s + t.rentSol, 0),
+    totalUsd: sol * solPx + tokensUsd, vaultUsd: mem?.vault ?? 0, unpriced: tokens.filter((t) => t.valueUsd == null && !t.empty).length };
+}
+async function walletsBoard() {
+  const bots = await readBots();
+  const spotMem = loadMemory(bots.spot.price_history), perpsMem = loadMemory(bots.perps.price_history);
+  const out: Record<string, unknown> = { at: new Date().toISOString() };
+  const spotAddr = await getWalletAddress();
+  out.spot = spotAddr ? await solanaWallet(spotAddr, spotMem).catch((e) => ({ address: spotAddr, error: (e as Error).message })) : { error: "secret BOT_WALLET_PRIVATE_KEY manquant" };
+  if (onHl()) {
+    try {
+      const { account } = hlCredentials();
+      const [acct, spotBal, orders, mids] = await Promise.all([hlAccount(account), hlSpotBalances(account).catch(() => []), hlOpenOrders(account).catch(() => []), hlMids().catch(() => ({} as Record<string, number>))]);
+      out.hyperliquid = { address: account, valueUsd: acct.valueUsd, perpValueUsd: acct.perpValueUsd, withdrawable: acct.withdrawable, spot: spotBal, vaultUsd: perpsMem.vault ?? 0,
+        positions: acct.positions.map((p) => ({ ...p, markPx: mids[p.coin] ?? null, notionalUsd: p.size * (mids[p.coin] ?? p.entryPx) })),
+        orders: orders.map((o) => ({ ...o, kind: o.isTrigger ? "stop" : "ordre" })) };
+    } catch (e) { out.hyperliquid = { error: (e as Error).message }; }
+  }
+  // ancien wallet perps Solana (Jupiter) : affiché s'il contient encore quelque chose
+  const oldAddr = await getPerpsWalletAddress();
+  if (oldAddr) {
+    const w = await solanaWallet(oldAddr, onHl() ? null : perpsMem).catch((e) => ({ address: oldAddr, error: (e as Error).message }));
+    if (!onHl() || "error" in w || w.sol > 0.0005 || w.tokens.length) out.perpsSolana = { ...w, legacy: onHl() };
+  }
+  return out;
+}
 
 async function researchBoard() {
   const [{ count }, { data: top }, { data: last }, bots] = await Promise.all([
@@ -1057,6 +1105,7 @@ Deno.serve(async (req) => {
     }
     if (req.method === "POST" && route === "/api/research/run") return json(await runResearch()); // lancer une recherche tout de suite
     if (req.method === "GET" && route === "/api/agents") return json(await agentsBoard());
+    if (req.method === "GET" && route === "/api/wallets") return json(await walletsBoard()); // contenu exact des wallets (lecture seule)
     if (req.method === "GET" && route === "/api/report") return json(await strategyReport());
     if (req.method === "GET" && route === "/api/curve") { // courbes complètes du capital (un point par heure, 30 jours) pour le grand graphique
       const bots = await readBots();

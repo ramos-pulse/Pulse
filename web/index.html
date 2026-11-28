@@ -198,6 +198,7 @@ nav{background:color-mix(in srgb,var(--bg) 94%,transparent) !important}
     <section class="page" id="p-bt"></section>
     <section class="page" id="p-ag"></section>
     <section class="page" id="p-set"></section>
+    <section class="page" id="p-wal"></section>
   </main>
   <nav id="nav">
     <button data-p="home" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12l9-8 9 8M5 10v10h14V10"/></svg>Missions</button>
@@ -258,7 +259,7 @@ $("#loginBtn").onclick = () => { BASE = serverUrl($("#srv").value); TOKEN = $("#
   const box = $("#loginErr"); box.style.display = "block"; box.textContent = "Connexion…"; refresh(); };
 
 $("#nav").onclick = e => { const b = e.target.closest("button"); if (b) go(b.dataset.p); };
-function go(p) { PAGE = p; if (p === "set") $("#p-set").innerHTML = ""; if (p === "ag") loadAg(); if (p === "hist") loadReport(); if (p === "home") loadCurve(); document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
+function go(p) { PAGE = p; if (p === "wal") loadWal(); if (p === "set") $("#p-set").innerHTML = ""; if (p === "ag") loadAg(); if (p === "hist") loadReport(); if (p === "home") loadCurve(); document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
   document.querySelectorAll(".page").forEach(x => x.classList.toggle("on", x.id === "p-" + p)); render(); updateFloat(); scrollTo(0, 0); }
 
 async function refresh() {
@@ -635,6 +636,57 @@ function mathCard() {
     ${rows ? `<details data-d="math-list" style="margin:10px 0 0"><summary>▸ ${m.insights.length} MARCHÉS · ${trend} EN TENDANCE</summary>${rows}</details>` : `<p class="sub" style="margin:10px 0 0">Première analyse dans les 5 minutes.</p>`}
   </div>`;
 }
+/**
+ * SECTION WALLETS (28/11) : contenu exact des wallets, lu en direct (lecture seule).
+ * Wallet spot Solana (SOL, chaque compte de jetons, même vide ou inconnu), compte Hyperliquid (soldes, positions, stops).
+ */
+let WAL = null, WAL_BUSY = false;
+async function loadWal() { WAL_BUSY = true; renderWal(); try { WAL = await api("/api/wallets"); } catch (e) { WAL = {error: e.message}; } WAL_BUSY = false; renderWal(); }
+function renderWal() {
+  const el = $("#p-wal"); if (!el || PAGE !== "wal") return;
+  const short = a => a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "—";
+  const head = (title, addr, link) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div class="v txt" style="font-weight:600">${title}</div>
+    ${addr ? `<div style="display:flex;gap:6px"><button class="btn sm" data-copy="${esc(addr)}" style="padding:6px 10px">${short(addr)} ⧉</button><a class="btn sm" href="${link}" target="_blank" rel="noopener" style="padding:6px 10px">↗</a></div>` : ""}</div>`;
+  const kv = (k, v, cls = "") => `<div><div class="k">${k}</div><div class="v ${cls}" style="font-size:17px">${v}</div></div>`;
+  const sol = w => {
+    if (!w) return "";
+    if (w.error) return `<div class="warnbox" style="margin-top:10px">Lecture impossible : ${esc(w.error)}</div>`;
+    const tok = t => `<div class="row" style="padding:8px 0;align-items:flex-start"><div><div class="l1" style="font-size:15px">${esc(t.symbol)}${t.botPosition ? ` <span class="pill ok" style="font-size:10px;padding:2px 6px">position du bot</span>` : ""}${t.empty ? ` <span class="pill" style="font-size:10px;padding:2px 6px">vide</span>` : ""}</div>
+      <div class="l2" style="font-size:12px">${t.empty ? `compte vide · caution ${nf(t.rentSol, 4)} SOL récupérable (agent swap)` : `${nf(t.amount, t.amount >= 1000 ? 0 : t.amount >= 1 ? 4 : 6)} × ${t.priceUsd != null ? px(t.priceUsd) + " $" : "prix inconnu"}`}${t.program === "Token-2022" ? " · Token-2022" : ""}</div>
+      <div class="l2 mut" style="font-size:11px"><a href="https://solscan.io/token/${esc(t.mint)}" target="_blank" rel="noopener">${short(t.mint)} ↗</a></div></div>
+      <div class="r" style="font-size:15px">${t.valueUsd != null ? nf(t.valueUsd) + " $" : "—"}</div></div>`;
+    const full = w.tokens.filter(t => !t.empty), empty = w.tokens.filter(t => t.empty);
+    return `<div class="grid" style="margin-top:12px">${kv("Valeur totale", nf(w.totalUsd) + " $")}${kv("SOL", `${nf(w.sol, 4)}<small style="font-size:12px;color:var(--muted)"> · ${nf(w.solUsd)} $</small>`)}
+      ${kv("Réserve frais", nf(w.solReserve, 3) + " SOL")}${w.vaultUsd ? kv("Coffre à gains", nf(w.vaultUsd) + " $", "up") : kv("Cautions", nf(w.rentSol, 4) + " SOL")}</div>
+      <p class="sub" style="margin:8px 0 0;font-size:12px">SOL à ${px(w.solPrice)} $. La réserve de ${nf(w.solReserve, 3)} SOL n'est jamais tradée (frais réseau).${w.unpriced ? ` ${w.unpriced} jeton(s) sans prix : non comptés dans la valeur.` : ""}</p>
+      <div class="k" style="margin-top:12px">Jetons (${full.length})</div>${full.map(tok).join("") || `<p class="sub" style="margin:4px 0">Aucun jeton.</p>`}
+      ${empty.length ? fold("wal-empty-" + w.address.slice(0, 6), `Comptes vides (${empty.length})`, empty.map(tok).join("")) : ""}`;
+  };
+  const hl = h => {
+    if (!h) return "";
+    if (h.error) return `<div class="card">${head("Bot 2 · Hyperliquid")}<div class="warnbox" style="margin-top:10px">Lecture impossible : ${esc(h.error)}</div></div>`;
+    const pos = p => `<div class="row" style="padding:9px 0;align-items:flex-start"><div><div class="l1" style="font-size:15px">${p.side === "short" ? "SHORT ▼" : "LONG ▲"} ${esc(p.coin)} <span class="mut" style="font-weight:400;font-size:12px">x${p.leverage} isolé</span></div>
+      <div class="l2" style="font-size:12px">${nf(p.size, 4)} ${esc(p.coin)} · entrée ${px(p.entryPx)} · cours ${px(p.markPx)}</div>
+      <div class="l2" style="font-size:12px">taille ${nf(p.notionalUsd)} $ · marge ${nf(p.marginUsd)} $ · liquidation ${px(p.liqPx)}</div></div>
+      <div class="r ${cl(p.pnlUsd)}" style="font-size:15px">${sg(p.pnlUsd)} $</div></div>`;
+    const ord = o => `<div class="row" style="padding:7px 0"><div class="l2" style="margin:0">${o.kind === "stop" ? "🛡 Stop" : "Ordre"} ${esc(o.coin)} · ${o.side === "B" ? "rachat" : "vente"} ${nf(o.sz, 4)}${o.reduceOnly ? " · ferme seulement" : ""}</div><div class="r" style="font-size:14px">${px(o.triggerPx)}</div></div>`;
+    return `<div class="card">${head("Bot 2 · Hyperliquid", h.address, `https://app.hyperliquid.xyz/explorer/address/${h.address}`)}
+      <div class="grid" style="margin-top:12px">${kv("Valeur du compte", nf(h.valueUsd) + " $")}${kv("Libre (USDC)", nf(h.withdrawable) + " $")}
+        ${kv("Côté Perps", nf(h.perpValueUsd) + " $")}${kv("Côté Spot", (h.spot || []).map(b => `${nf(b.total, b.coin === "USDC" ? 2 : 6)} ${esc(b.coin)}`).join("<br>") || "0 $")}</div>
+      ${h.vaultUsd ? `<p class="sub" style="margin:8px 0 0;font-size:12px">Coffre à gains : ${nf(h.vaultUsd)} $ mis de côté (jamais retradé).</p>` : ""}
+      <div class="k" style="margin-top:12px">Positions (${h.positions.length})</div>${h.positions.map(pos).join("") || `<p class="sub" style="margin:4px 0">Aucune position ouverte.</p>`}
+      <div class="k" style="margin-top:12px">Ordres en attente (${h.orders.length})</div>${h.orders.map(ord).join("") || `<p class="sub" style="margin:4px 0">Aucun ordre.</p>`}
+      <p class="sub" style="margin:10px 0 0;font-size:12px">Le portefeuille API du bot peut trader mais ne peut pas retirer : seul ton compte principal peut sortir l'argent.</p></div>`;
+  };
+  const W = WAL, total = W && !W.error ? (W.spot?.totalUsd ?? 0) + (W.hyperliquid?.valueUsd ?? 0) + (W.perpsSolana?.totalUsd ?? 0) : null;
+  el.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px"><button class="btn sm" data-go="home">← Missions</button><button class="btn sm" id="walRefresh">${WAL_BUSY ? "Lecture…" : "↻ Actualiser"}</button></div>
+    <div class="eyebrow">Wallets</div>
+    ${!W ? `<div class="skel" style="height:220px;margin-top:10px"></div>` : W.error ? `<div class="warnbox">${esc(W.error)}</div>` : `
+    <div class="card"><div class="k">Total de tous les wallets</div><div class="big" style="font-size:36px">${nf(total)}<small>$</small></div><div class="l2">lu en direct ${ago(W.at)} · chaque solde vient directement de la blockchain et de Hyperliquid</div></div>
+    <div class="card">${head("Bot 1 · Wallet spot Solana", W.spot?.address, `https://solscan.io/account/${W.spot?.address}`)}${sol(W.spot)}</div>
+    ${hl(W.hyperliquid)}
+    ${W.perpsSolana ? `<div class="card">${head(W.perpsSolana.legacy ? "Ancien wallet perps (Solana)" : "Bot 2 · Wallet perps Solana", W.perpsSolana.address, `https://solscan.io/account/${W.perpsSolana.address}`)}${W.perpsSolana.legacy ? `<p class="sub" style="margin:8px 0 0;font-size:12px">Plus utilisé depuis le passage sur Hyperliquid : ce qui reste ici ne compte pas dans le bot 2.</p>` : ""}${sol(W.perpsSolana)}</div>` : ""}`}`;
+}
 /** Dérouleur (28/11) : liste repliée, état ouvert / fermé gardé quand l'app se rafraîchit. */
 let FOLDS = new Set(); try { FOLDS = new Set(JSON.parse(localStorage.getItem("pulse_folds") || "[]")); } catch (e) {}
 const fold = (id, title, body) => `<details data-fold="${id}" ${FOLDS.has(id) ? "open" : ""} style="margin-top:10px"><summary class="k" style="cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;padding:8px 0">${title}<span class="mut">${FOLDS.has(id) ? "▴" : "▾"}</span></summary>${body}</details>`;
@@ -879,7 +931,7 @@ function hero() {
   return `<div class="hero"><div class="t"><span class="dot ${live.find(x => x.startsWith("alert")) || live.find(x => x.startsWith("ok")) || ""}"></span>CAPITAL TOTAL</div>
     <div class="n" data-roll="total" data-v="${v}">${nf(v)}<small>$</small></div>
     <div class="k ${cl(d)}">${d == null ? "variation du jour dans 1 h" : `${sg(d)} $ (${sg(ref.v ? d / ref.v * 100 : 0)} %) sur 24 h`}</div>
-    <button class="btn sm" style="width:100%;margin:10px 0 0" id="whatsUp">🤖 Tu fais quoi ?</button>
+    <div style="display:flex;gap:8px;margin:10px 0 0"><button class="btn sm" style="flex:1" id="whatsUp">🤖 Tu fais quoi ?</button><button class="btn sm" style="flex:1" data-go="wal">👛 Wallets</button></div>
     <div class="periods">${Object.keys(PERIODS).map(p => `<button class="${RANGE === p ? "on" : ""}" data-range="${p}">${p}</button>`).join("")}</div>
     ${bigChart(pts)}</div>`;
 }
@@ -1274,6 +1326,8 @@ document.addEventListener("click", async e => {
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content", getComputedStyle(document.documentElement).getPropertyValue("--bg").trim()); renderSet(); return; }
   if (t.id === "pushOn") return enablePush();
   if (t.id === "whatsUp") return whatsUp();
+  if (t.dataset.go) return go(t.dataset.go);
+  if (t.id === "walRefresh") return loadWal();
   if (t.id === "whatsSpeak") { speak(window.__whats || ""); return; }
   if (t.id === "pushTest") { try { const r = await api("/api/push/test", {method: "POST"}); toast(r.sent ? "Notification envoyée" : "Aucun téléphone abonné"); } catch (err) {} return; }
   if (t.id === "gameStart") { GAME.score = GAME.n = GAME.bot = GAME.streak = 0; sheet(""); return gameRound(true); }
@@ -1377,6 +1431,7 @@ document.addEventListener("input", e => { if (e.target.id === "pbias") $("#pbias
   if (e.target.id === "agNerve") { $("#agNerveName").textContent = (AG?.settings?.levels || [])[+e.target.value] || ""; $("#agNerveTxt").textContent = window.__nerveTxt?.(+e.target.value) || ""; }
   if (e.target.id === "paggr") { $("#paggrName").textContent = S.rules.aggrLevels[+e.target.value].name; $("#pmodeTxt").textContent = modeText(+e.target.value); } });
 setInterval(() => { if (PAGE === "ag" && !document.hidden && !AG_BUSY) loadAg(); }, 60000);
+setInterval(() => { if (PAGE === "wal" && !document.hidden && !WAL_BUSY) loadWal(); }, 60000); // wallets relus chaque minute
 document.addEventListener("keydown", e => { if (e.target.id === "chatIn" && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
   if (e.target.id === "cmdIn" && e.key === "Enter") { e.preventDefault(); $("#cmdGo")?.click(); } });
 wakeStart();

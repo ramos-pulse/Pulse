@@ -114,6 +114,12 @@ export async function hlAccount(address: string): Promise<HlAccount> {
   return { address, valueUsd: perp + usdc, perpValueUsd: perp, spotUsdc: usdc, withdrawable: Number(st.withdrawable) || 0, positions };
 }
 
+/** Soldes du côté « Spot » du compte Hyperliquid (USDC et autres jetons), pour la section Wallets. */
+export async function hlSpotBalances(address: string): Promise<{ coin: string; total: number; hold: number }[]> {
+  const r = await info<{ balances?: { coin: string; total: string; hold: string }[] }>({ type: "spotClearinghouseState", user: address });
+  return (r.balances ?? []).map((b) => ({ coin: b.coin, total: +b.total, hold: +b.hold })).filter((b) => b.total > 0);
+}
+
 export interface HlFill { coin: string; px: number; sz: number; side: "B" | "A"; time: number; closedPnl: number; fee: number; oid: number; dir: string }
 export async function hlFills(address: string, startTime: number): Promise<HlFill[]> {
   const rows = await info<{ coin: string; px: string; sz: string; side: "B" | "A"; time: number; closedPnl: string; fee: string; oid: number; dir: string }[]>({ type: "userFillsByTime", user: address, startTime });
