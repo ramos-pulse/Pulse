@@ -87,7 +87,10 @@ async function tickBot(kind: BotKind): Promise<string> {
 let cronReady = false;
 async function ensureCron() {
   if (cronReady) return;
-  const { error } = await db.rpc("pulse_install_cron", { fn_url: `${SUPABASE_URL}/functions/v1/pulse/tick`, secret: await cronSecret() });
+  const args = { fn_url: `${SUPABASE_URL}/functions/v1/pulse/tick`, secret: await cronSecret() };
+  let { error } = await db.rpc("pulse_install_cron", args);
+  // 28/11 : deux installations simultanées (juste après une mise à jour) : l'autre a fait le travail, on revérifie une fois
+  if (error && /concurrently|deadlock/i.test(error.message)) ({ error } = await db.rpc("pulse_install_cron", args));
   if (error) throw new Error(`cron : ${error.message}`);
   cronReady = true;
 }
