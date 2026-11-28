@@ -20,7 +20,8 @@ export interface MathInsight {
   regime: Regime; hurst: number; ac1: number; halfLife: number | null;
   vr: { q: number; vr: number; z: number }[]; bestQ: number; significant: boolean; bars: number; note: string;
 }
-export interface Proposal { candidate: Candidate; rationale: string }
+/** idea : type d'idée (le mathématicien apprend lesquels réussissent, 28/11). */
+export interface Proposal { candidate: Candidate; rationale: string; idea: string }
 
 const mean = (a: number[]) => a.reduce((s, x) => s + x, 0) / (a.length || 1);
 const variance = (a: number[]) => { const m = mean(a); return a.reduce((s, x) => s + (x - m) ** 2, 0) / Math.max(1, a.length - 1); };
@@ -150,13 +151,13 @@ export function propose(trainCandles: Candle[], m: Market, ins = analyze(trainCa
     : ins.regime === "hasard" ? [grid[grid.length - 1]!] : []; // au hasard : seulement des cassures lentes, plus robustes aux faux signaux
   for (const q of trendQs.length ? trendQs : ins.regime === "tendance" ? [ins.bestQ] : []) {
     const p = trendParams(trainCandles, q);
-    out.push({ candidate: { ...base, family: "tendance", params: p },
+    out.push({ idea: "tendance", candidate: { ...base, family: "tendance", params: p },
       rationale: `${ins.note} ⇒ suivre la tendance sur ${q} bougies (horizon où l'effet est le plus fort) ; stop ${p.trailAtr} ATR = 70 % des replis observés pendant les tendances ; force ≥ ${p.minTrend} ATR = force typique des vraies cassures` });
   }
   // TENDANCE : achat sur repli, en plus de la cassure (plus d'entrées, meilleur prix)
   if (ins.regime === "tendance" && out[0]?.candidate.family === "tendance") {
     const p0 = out[0].candidate.params as Params;
-    out.push({ candidate: { ...base, family: "tendance", params: { ...p0, entry: "repli" } },
+    out.push({ idea: "repli", candidate: { ...base, family: "tendance", params: { ...p0, entry: "repli" } },
       rationale: `même tendance mesurée, mais entrée sur repli vers la moyenne 20 au lieu d'attendre une cassure : plus d'entrées, à un meilleur prix` });
   }
   // NERVEUX : horizon court parmi les cassures rapides, si les rendements s'y prolongent encore (VR > 1)
@@ -165,7 +166,7 @@ export function propose(trainCandles: Candle[], m: Market, ins = analyze(trainCa
     const fastQ = [6, 8, 12].map((q) => ({ q, ...varianceRatio(r, q) })).sort((a, b) => b.z - a.z)[0]!;
     if (fastQ.vr > 1 && !out.some((x) => (x.candidate.params as Params).breakout === fastQ.q)) {
       const p = trendParams(trainCandles, fastQ.q, o.aggressive, true);
-      out.push({ candidate: { ...base, family: "tendance", params: p },
+      out.push({ idea: "nerveuse", candidate: { ...base, family: "tendance", params: p },
         rationale: `version nerveuse : cassure courte de ${fastQ.q} bougies (VR(${fastQ.q}) = ${fastQ.vr.toFixed(2)}, z = ${fastQ.z.toFixed(1)}) ⇒ beaucoup plus de trades ; stop ${p.trailAtr} ATR` });
     }
   }
@@ -174,39 +175,57 @@ export function propose(trainCandles: Candle[], m: Market, ins = analyze(trainCa
     const q = (out[0].candidate.params as Params).breakout;
     const p = trendParams(trainCandles, q, true, o.fast);
     if (p.trailAtr !== (out[0].candidate.params as Params).trailAtr || p.minTrend !== (out[0].candidate.params as Params).minTrend)
-      out.push({ candidate: { ...base, family: "tendance", params: p }, rationale: `variante agressive : stop au repli médian (${p.trailAtr} ATR) et force ≥ ${p.minTrend} ATR, plus de trades mais plus de faux départs` });
+      out.push({ idea: "tendance-agressive", candidate: { ...base, family: "tendance", params: p }, rationale: `variante agressive : stop au repli médian (${p.trailAtr} ATR) et force ≥ ${p.minTrend} ATR, plus de trades mais plus de faux départs` });
   }
   // PERPS en marché qui revient à la moyenne : range (bandes de Bollinger) réglé sur la demi-vie mesurée
   if (m.kind === "perps" && ins.regime !== "tendance") {
     const S = space(o.fast).range;
     const p = { bbPeriod: snap((ins.halfLife ?? 10) * 2, S.bbPeriod as readonly number[]), bbK: 2, stopAtr: 1.5, maxTrend: ins.regime === "retour à la moyenne" ? 1.5 : 1 };
-    out.push({ candidate: { ...base, family: "range", params: p },
+    out.push({ idea: "range", candidate: { ...base, family: "range", params: p },
       rationale: `${ins.note} ⇒ trader le range : vendre au-dessus de la bande haute, acheter sous la bande basse, objectif le retour à la moyenne ; période ${p.bbPeriod} ≈ 2 × la demi-vie${ins.halfLife ? ` (${ins.halfLife.toFixed(0)} bougies)` : ""}` });
-    if (o.aggressive) out.push({ candidate: { ...base, family: "range", params: { ...p, bbK: 1.5 } }, rationale: "variante agressive : bandes plus étroites (1,5 écart-type), plus de signaux" });
+    if (o.aggressive) out.push({ idea: "range-agressif", candidate: { ...base, family: "range", params: { ...p, bbK: 1.5 } }, rationale: "variante agressive : bandes plus étroites (1,5 écart-type), plus de signaux" });
   }
   if (m.kind === "spot" && (ins.regime !== "tendance" || o.aggressive)) {
     const p = rsiParams(trainCandles, ins.halfLife, o);
-    out.push({ candidate: { ...base, family: "rsi", params: p },
+    out.push({ idea: "rsi", candidate: { ...base, family: "rsi", params: p },
       rationale: `${ins.note} ⇒ acheter les excès de baisse : RSI(${p.rsiPeriod}) ≈ demi-vie, entrée sous ${p.entry} (atteint seulement ~${o.aggressive ? 12 : 7} % du temps sur ce marché), sortie au-dessus de ${p.exit}${ins.regime === "tendance" ? " (proposée en mode agressif malgré la tendance)" : ""}` });
     const p2 = { ...p, entry: snap(p.entry - 5, SPACE.rsi.entry) };
-    if (p2.entry !== p.entry) out.push({ candidate: { ...base, family: "rsi", params: p2 }, rationale: `variante plus sélective de la précédente (entrée sous ${p2.entry}) : moins de trades, chaque signal plus extrême` });
+    if (p2.entry !== p.entry) out.push({ idea: "rsi-selectif", candidate: { ...base, family: "rsi", params: p2 }, rationale: `variante plus sélective de la précédente (entrée sous ${p2.entry}) : moins de trades, chaque signal plus extrême` });
   }
   // RETOUR AU VWAP : même logique que le range (les écarts se corrigent), mais autour du prix moyen du jour
   if (ins.regime !== "tendance" || o.aggressive) {
     const dev = ins.regime === "retour à la moyenne" ? 2 : 2.5;
-    out.push({ candidate: { ...base, family: "vwap", params: { dev: o.aggressive ? dev - 0.5 : dev, stopAtr: 1.5, maxTrend: 1.5 } },
+    out.push({ idea: "vwap", candidate: { ...base, family: "vwap", params: { dev: o.aggressive ? dev - 0.5 : dev, stopAtr: 1.5, maxTrend: 1.5 } },
       rationale: `${ins.note} ⇒ quand le prix s'écarte de ${o.aggressive ? dev - 0.5 : dev} ATR de son prix moyen du jour (VWAP), parier sur le retour vers ce prix moyen` });
   }
   // COMPRESSION : la volatilité revient toujours après une période calme (regroupement de la volatilité) ; marche dans tous les régimes
   {
     const p = trendParams(trainCandles, 24, o.aggressive, o.fast);
-    out.push({ candidate: { ...base, family: "squeeze", params: { bbPeriod: 20, bbK: 2, lookback: 100, pct: o.aggressive ? 0.2 : 0.1, trailAtr: p.trailAtr } },
+    out.push({ idea: "compression", candidate: { ...base, family: "squeeze", params: { bbPeriod: 20, bbK: 2, lookback: 100, pct: o.aggressive ? 0.2 : 0.1, trailAtr: p.trailAtr } },
       rationale: `la volatilité se regroupe : après une compression des bandes de Bollinger (parmi les ${o.aggressive ? 20 : 10} % les plus serrées), le prix part souvent fort d'un côté ⇒ suivre la cassure, stop suiveur ${p.trailAtr} ATR (replis typiques mesurés)` });
   }
   // ORB : en 15 min, la nouvelle journée (minuit UTC, ouverture asiatique) — séance tous les jours, week-end compris
-  if (m.interval === "15m") out.push({ candidate: { ...base, family: "orb", params: { session: "utc", zoneMin: 30, target: 2, window: 4 } },
+  if (m.interval === "15m") out.push({ idea: "orb", candidate: { ...base, family: "orb", params: { session: "utc", zoneMin: 30, target: 2, window: 4 } },
     rationale: "la nouvelle journée (minuit UTC) relance l'activité tous les jours, week-end compris : la cassure de la zone des 30 premières minutes donne souvent la direction ; objectif 2 × la zone" });
-  return out;
+  // 28/11 : pas de théorie sans effet mesuré. En régime « hasard », seules les idées valables dans tous les régimes restent
+  // (compression de volatilité, cassure de minuit) : le reste reposait sur un effet que l'analyse n'a pas trouvé.
+  return ins.regime === "hasard" ? out.filter((x) => ANY_REGIME.has(x.idea)) : out;
+}
+const ANY_REGIME = new Set(["compression", "orb"]);
+
+/**
+ * Accord entre une famille de stratégie et le régime du marché (28/11 : partagé par le pilote et les bots, pour vérifier en réel
+ * si le diagnostic du mathématicien aide vraiment). Tendance ⇄ range/RSI/VWAP ; les cassures sont utiles partout.
+ */
+export function regimeFitLabel(family: string, regime: string | undefined): "favorable" | "neutre" | "défavorable" {
+  if (!regime || regime === "hasard") return "neutre";
+  if (family === "orb" || family === "squeeze" || family === "volume" || family === "funding") return regime === "tendance" ? "favorable" : "neutre";
+  const meanRev = family === "range" || family === "rsi" || family === "vwap";
+  return (regime === "tendance") === !meanRev ? "favorable" : "défavorable";
+}
+/** Régime en direct, calculé par le bot au moment d'entrer (300 dernières bougies, comme le mathématicien). */
+export function liveRegimeOf(c: Candle[]): string | undefined {
+  return c.length >= 120 ? analyze(c.slice(-300)).regime : undefined;
 }
 
 // ------------------------------------------------------------------------------------------------

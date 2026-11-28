@@ -634,6 +634,10 @@ function mathCard() {
     <div class="grid"><div><div class="k">Ses idées validées</div><div class="v">${pct(m.stats.math.rate)}</div><div class="l2">${m.stats.math.promising} / ${m.stats.math.tested}</div></div>
       <div><div class="k">Idées du chercheur</div><div class="v">${pct(m.stats.chercheur.rate)}</div><div class="l2">${m.stats.chercheur.promising} / ${m.stats.chercheur.tested}</div></div></div>
     ${rows ? `<details data-d="math-list" style="margin:10px 0 0"><summary>▸ ${m.insights.length} MARCHÉS · ${trend} EN TENDANCE</summary>${rows}</details>` : `<p class="sub" style="margin:10px 0 0">Première analyse dans les 5 minutes.</p>`}
+    ${(() => { const F = m.fit || {}, n = Object.values(F).reduce((a, x) => a + x.n, 0);
+      const line = (k, lab) => F[k] ? `<div class="row" style="padding:5px 0"><div class="l2" style="margin:0">${lab} <span class="mut">(${F[k].n})</span></div><div class="r" style="font-size:14px">${nf(F[k].wins / F[k].n * 100, 0)} % gagnants · <span class="${cl(F[k].pnl)}">${sg(F[k].pnl)} $</span></div></div>` : "";
+      return `<div class="k" style="margin-top:12px" data-tip="À chaque entrée, le bot note si le régime du marché (calcul du mathématicien) était favorable à la stratégie. Avec assez de trades, ça dira si ce diagnostic aide vraiment.">Son diagnostic vérifié en réel</div>
+        ${n ? line("favorable", "Régime favorable") + line("neutre", "Régime neutre") + line("défavorable", "Régime défavorable") : `<p class="sub" style="margin:4px 0 0;font-size:12px">Les premiers résultats arrivent avec les prochains trades fermés.</p>`}`; })()}
   </div>`;
 }
 /**

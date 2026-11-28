@@ -39,3 +39,28 @@ test("répartition : le mathématicien garde entre 15 et 50 % du temps", () => {
 test("validation : 8 trades sur la période jamais vue pour « prometteuse »", () => {
   assert.equal(VALID.minTestTrades, 8);
 });
+
+test("mathématicien : en régime « hasard », seulement les idées valables partout (compression, ORB de minuit)", async () => {
+  const { propose } = await import("../supabase/functions/pulse/engine/math.ts");
+  const c = [...Array(800)].map((_, i) => { const p = 100 + Math.sin(i * 1.7) * 2 + Math.cos(i * 0.31) * 3; return { t: i * 900_000, o: p, h: p * 1.004, l: p * 0.996, c: p, v: 1000 }; });
+  const m = { name: "X", product: "X", symbol: "X", kind: "perps" as const, interval: "15m" as const, feePct: 0.0007, hourlyCost: 0, cap: 3 };
+  const ins = { regime: "hasard" as const, hurst: 0.5, ac1: 0, halfLife: null, vr: [], bestQ: 12, significant: false, bars: 800, note: "aucun effet" };
+  const ideas = propose(c, m, ins, { aggressive: true, fast: true }).map((p) => p.idea);
+  assert.ok(ideas.length > 0 && ideas.every((i) => i === "compression" || i === "orb"), ideas.join(","));
+});
+
+test("mathématicien : une idée qui échoue toujours devient rare (jamais moins de 10 %), son diagnostic se lit en clair", async () => {
+  const { emptyStats, recordIdeas, ideaChance } = await import("../supabase/functions/pulse/engine/research.ts");
+  const { regimeFitLabel } = await import("../supabase/functions/pulse/engine/math.ts");
+  const st = emptyStats();
+  recordIdeas(st, "perps", "15m", [...Array(46)].map(() => ({ idea: "range-agressif", verdict: "rejetée" })));
+  recordIdeas(st, "perps", "15m", [...Array(46)].map((_, i) => ({ idea: "compression", verdict: i < 5 ? "prometteuse" : "rejetée" })));
+  assert.ok(ideaChance(st, "perps", "15m", "range-agressif") < 0.4); // 46 échecs : ~38 %
+  recordIdeas(st, "perps", "15m", [...Array(200)].map(() => ({ idea: "range-agressif", verdict: "rejetée" })));
+  assert.ok(ideaChance(st, "perps", "15m", "range-agressif") <= 0.15); // ~240 échecs : proche du plancher de 10 %
+  assert.equal(ideaChance(st, "perps", "15m", "compression"), 1);
+  assert.equal(ideaChance(st, "perps", "15m", "jamais-essayée"), 1);
+  assert.equal(regimeFitLabel("tendance", "tendance"), "favorable");
+  assert.equal(regimeFitLabel("range", "tendance"), "défavorable");
+  assert.equal(regimeFitLabel("squeeze", "hasard"), "neutre");
+});

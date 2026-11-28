@@ -8,6 +8,7 @@ import { candles as getCandles, hourlyCandles, lastClosedCandle } from "./candle
 import { executeSwap, getPrices, getQuote, verifyToken } from "./jupiter.ts";
 import { getBalances, loadKeyPairFrom, txStatus, waitForTx, type Balances } from "./solana.ts";
 import { dexPrices, tokenLiquidity } from "./dex.ts";
+import { liveRegimeOf, regimeFitLabel } from "./math.ts";
 import { FRESH, freshAffordable, freshStake } from "./agents.ts";
 import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type SetupParams } from "./setups.ts";
 import { addToVault, applyTransfer, conviction, pruneSignal, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate, EXTRA_SOFT, cooldownMs, exitSlippageBps, floorOf, solReserveAlert, volScale, groupOf, LIQUIDITY, type SpotFamily, rsiExitSignal, rsiSignal, RULES, sampleCurve, SOL_MINT, TOKENS, allTokens, type TokenInfo, TOTAL_RISK, tradable, trailStop, trendSignal, USDC_MINT, type Interval, type Memory, type Params, type Position, type RsiParams, type Signal, type SpotConfig, type SpotStrategy, lossPause, stopProtects, spotOrderSize } from "./strategy.ts";
@@ -321,7 +322,7 @@ export async function runTick(admin: Admin): Promise<string> {
     }
     if (usePlans && cfg.plans.length === 0) { mem.signal = "Pilote automatique : aucune stratégie n'a encore passé la validation du chercheur."; return await hold("Pilote automatique : j'attends que le chercheur valide une stratégie."); }
 
-    type Choice = { token: Token; sig: Signal & { target?: number }; strategy: SpotStrategy | SpotFamily; params: Params | RsiParams | SetupParams; interval: Interval; rank: number; risk: number; source: string; seenKey: string; closed: number };
+    type Choice = { token: Token; sig: Signal & { target?: number }; strategy: SpotStrategy | SpotFamily; params: Params | RsiParams | SetupParams; interval: Interval; rank: number; risk: number; source: string; seenKey: string; closed: number; regime?: string };
     const choices: Choice[] = [];
     const notes: string[] = [];
     let analysed = 0;
@@ -347,7 +348,7 @@ export async function runTick(admin: Admin): Promise<string> {
         const sig = rsi ? rsiSignal(c, rp) : setup ? setupSignal(setup, c, false, plan.params as SetupParams) : trendSignal(c, false, plan.params as Params);
         // stratégie non confirmée en réel : 75 % ; marché agité : taille réduite
         const risk = (rsi ? rp.riskPct / 100 : riskPerTrade(brain)) * riskFactor(plan.confidence) * volScale(c) * (cfg.extraSoft ? EXTRA_SOFT.riskMult : 1) * conviction(plan.score); // mise selon la confiance
-        if (sig.side === "long") choices.push({ token: token!, sig, strategy: plan.family, params: plan.params, interval: plan.interval, rank: plan.score, risk, source: plan.source, seenKey: key, closed: closedP });
+        if (sig.side === "long") choices.push({ token: token!, sig, strategy: plan.family, params: plan.params, interval: plan.interval, rank: plan.score, risk, source: plan.source, seenKey: key, closed: closedP, regime: liveRegimeOf(c) });
         else { notes.push(`${token!.symbol} ${plan.interval === "15m" ? "15 min" : "1 h"} : ${sig.reason}`); done(); }
       } catch { notes.push(`${token!.symbol} : historique indisponible`); }
     }
@@ -418,6 +419,7 @@ export async function runTick(admin: Admin): Promise<string> {
     mem.pending = { kind: "buy", sig, at: now, mint: pick.token.mint, usdcBefore: b.usdc, expectedPrice: fillPrice, draft: {
       key: pick.token.mint, symbol: pick.token.symbol, side: "long", stop: pick.sig.stop, best: fillPrice, initialRisk: fillPrice - pick.sig.stop, openedAt: now,
       strategy: pick.strategy, posParams: pick.params, posInterval: pick.interval, source: pick.source, stopCandle: closed,
+      ...(pick.regime ? { regime: pick.regime, regimeFit: regimeFitLabel(pick.strategy, pick.regime) } : {}),
       ...(pick.sig.target != null ? { target: pick.sig.target * (fillPrice / pick.sig.price) } : {}), ...(liqAtEntry ? { liqAtEntry, liqCheckedAt: now } : {}),
       why: `${pick.sig.reason} · stratégie : ${pick.source} · risque ${(realRisk * 100).toFixed(1)} % du capital tradable${sameGroup ? " (demi-risque : un token du même groupe est déjà en portefeuille)" : ""}${mem.vault ? ` (coffre de ${mem.vault.toFixed(2)} $ exclu)` : ""}`,
     } };
@@ -531,7 +533,8 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, a
   mem.vault = addToVault(mem.vault, pnl, cfg.vaultPct);
   admin.addTrade("spot", {
     side: "sell", symbol: sym, mint, amount_usd: proceeds, price: pos?.live?.price ?? (pos?.entry ?? 0) * (1 + pnlPct / 100), pnl_usd: pnl, reason: p.reason ?? "sortie", signature: p.sig, source: pos?.source,
-    detail: { pourquoi: label(p.reason), entree: pos?.entry, stop: pos?.stop, strategie: pos?.source, duree_h: pos?.openedAt ? Math.round((Date.now() - pos.openedAt) / 360_000) / 10 : null, entree_pourquoi: pos?.why, coffre: mem.vault },
+    detail: { pourquoi: label(p.reason), entree: pos?.entry, stop: pos?.stop, strategie: pos?.source, duree_h: pos?.openedAt ? Math.round((Date.now() - pos.openedAt) / 360_000) / 10 : null, entree_pourquoi: pos?.why, coffre: mem.vault,
+      ...(pos?.regimeFit ? { regime: pos.regime, regime_accord: pos.regimeFit } : {}) },
   });
   const brain = mem.brain ?? newBrain(valueBefore);
   learn(brain, sym, pnlPct, valueBefore + pnl, Date.now());

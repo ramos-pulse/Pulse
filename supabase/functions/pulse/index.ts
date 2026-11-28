@@ -12,7 +12,7 @@ import { currentHlValue, getHlAddress, liquidateHl, runHlTick } from "./engine/p
 import { hlAccount, hlCredentials, hlMarkets, hlMids, hlOpenOrders, hlSpotBalances } from "./engine/hyperliquid.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
 import { SOL_MINT, USDC_MINT, tradable, AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, perpsMarkets, setPerpsMarkets, PERPS_PLANS_MAX, type PerpsMarket, type TokenInfo, type Memory, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
-import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, simulate, tempo, type Candidate, type Market, pickMarket, recordCycle, familyWeights, mathShare, emptyStats, marketKey, type ResearchStats, FAMILIES, type Family } from "./engine/research.ts";
+import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, simulate, tempo, type Candidate, type Market, pickMarket, recordCycle, familyWeights, mathShare, emptyStats, marketKey, type ResearchStats, FAMILIES, type Family, recordIdeas, ideaChance, MATH_GRID } from "./engine/research.ts";
 import { DbStore, notify, pushHook, type BotKind, type BotState } from "./store.ts";
 import { freshAffordable, jupTokens, arbScan, bestPools, FRESH, freshCandidates, freshRefusal, impersonates, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
 import { newVapid, sendPush, type Subscription, type Vapid } from "./engine/webpush.ts";
@@ -390,13 +390,21 @@ async function runResearch() {
   const insight = analyze(train);
   const liveInsight = analyze(candles.slice(-300)); // régime EN DIRECT (300 dernières bougies) : oriente le pilote
   let proposed = 0;
-  for (const pr of propose(train, m, insight, { aggressive: A.aggressive, fast })) {
-    if (left() < RESEARCH_BUDGET_MS * (1 - mathShare(stats, m.kind, m.interval))) break; // part du mathématicien : 15 à 50 % selon sa réussite
-    const key = candidateKey(pr.candidate);
-    if (seen.has(key)) continue;
-    seen.add(key); proposed++;
-    const e = evaluate(pr.candidate, candles, m, ctx);
-    rows.push({ key, market: pr.candidate.market, product: pr.candidate.product, symbol: pr.candidate.symbol, interval: pr.candidate.interval, kind: pr.candidate.kind, family: pr.candidate.family, params: pr.candidate.params, train: e.train, test: e.test, score: e.score, verdict: e.verdict, why: e.why, origin: "mathématicien", rationale: pr.rationale });
+  const mrnd = seeded(cycle * 104729 + 13), ideas: { idea: string; verdict: string }[] = [];
+  outer: for (const pr of propose(train, m, insight, { aggressive: A.aggressive, fast })) {
+    // B (28/11) : les types d'idées qui échouent sont essayés plus rarement (jamais moins d'une fois sur 10)
+    if (mrnd() > ideaChance(stats, m.kind, m.interval, pr.idea)) continue;
+    // A (28/11) : l'idée elle-même + quelques variantes voisines
+    const variants = [{ c: pr.candidate, why: pr.rationale }, ...[...Array(MATH_GRID)].map(() => ({ c: mutate(mrnd, pr.candidate, fast), why: `variante proche (un réglage voisin) de : ${pr.rationale}` }))];
+    for (const v of variants) {
+      if (left() < RESEARCH_BUDGET_MS * (1 - mathShare(stats, m.kind, m.interval))) break outer; // part du mathématicien : 15 à 50 % selon sa réussite
+      const key = candidateKey(v.c);
+      if (seen.has(key)) continue;
+      seen.add(key); proposed++;
+      const e = evaluate(v.c, candles, m, ctx);
+      ideas.push({ idea: pr.idea, verdict: e.verdict });
+      rows.push({ key, market: v.c.market, product: v.c.product, symbol: v.c.symbol, interval: v.c.interval, kind: v.c.kind, family: v.c.family, params: v.c.params, train: e.train, test: e.test, score: e.score, verdict: e.verdict, why: e.why, origin: "mathématicien", rationale: v.why });
+    }
   }
   await db.from("math_insights").upsert({ key: `${m.product}|${m.kind}|${m.interval}`, updated_at: new Date().toISOString(), market: m.name, kind: m.kind, interval: m.interval, regime: insight.regime, hurst: insight.hurst, ac1: insight.ac1, half_life: insight.halfLife, significant: insight.significant, vr: insight.vr, note: insight.note, proposed,
     live_regime: liveInsight.regime, live_note: liveInsight.note }, { onConflict: "key" });
@@ -424,6 +432,7 @@ async function runResearch() {
     if (error) throw new Error(`recherche : ${error.message}`);
   }
   recordCycle(stats, m, rows as { family: Family; verdict: string; origin: string }[], Date.now());
+  recordIdeas(stats, m.kind, m.interval, ideas);
   await saveResearchStats(stats).catch(() => null);
   // ménage : les stratégies rejetées depuis plus de 3 jours sont oubliées, SAUF celles qu'un bot trade encore (extra souple)
   await keepPlans(db.from("research").delete().eq("verdict", "rejetée").lt("created_at", new Date(Date.now() - 3 * 86_400_000).toISOString()));
@@ -745,8 +754,15 @@ async function mathBoard() {
     count("mathématicien"), count("mathématicien", "prometteuse"), count("chercheur"), count("chercheur", "prometteuse"),
   ]);
   const rate = (p: number, t: number) => (t ? Math.round((p / t) * 1000) / 10 : null);
+  // 28/11 : son diagnostic aide-t-il en réel ? Trades clôturés selon l'accord régime / famille noté à l'entrée par les bots
+  const { data: closed } = await db.from("trades").select("pnl_usd, detail").not("pnl_usd", "is", null).gt("created_at", new Date(Date.now() - 60 * 86_400_000).toISOString()).limit(2000);
+  const fit: Record<string, { n: number; wins: number; pnl: number }> = {};
+  for (const t of (closed ?? []) as { pnl_usd: number; detail?: { regime_accord?: string } | null }[]) {
+    const k = t.detail?.regime_accord; if (!k) continue;
+    const e = (fit[k] ??= { n: 0, wins: 0, pnl: 0 }); e.n++; if (t.pnl_usd > 0) e.wins++; e.pnl = Math.round((e.pnl + t.pnl_usd) * 100) / 100;
+  }
   // comparaison honnête : les idées du mathématicien réussissent-elles plus souvent que les idées au hasard ?
-  return { insights: insights ?? [], stats: { math: { tested: mT, promising: mP, rate: rate(mP, mT) }, chercheur: { tested: cT, promising: cP, rate: rate(cP, cT) } } };
+  return { insights: insights ?? [], fit, stats: { math: { tested: mT, promising: mP, rate: rate(mP, mT) }, chercheur: { tested: cT, promising: cP, rate: rate(cP, cT) } } };
 }
 
 async function agentsBoard() {

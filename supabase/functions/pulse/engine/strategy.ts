@@ -509,6 +509,8 @@ export interface Position {
   strategy?: SpotStrategy | SetupFamily | "nouveau"; posParams?: Params | RsiParams | SetupParams; posInterval?: Interval; source?: string;
   target?: number;           // objectif de prix (familles « à objectif » : ORB, VWAP, funding)
   liqAtEntry?: number;       // liquidité du token à l'entrée (spot) : sortie d'urgence si elle s'effondre
+  regime?: string;           // 28/11 : régime du marché à l'entrée (calcul du mathématicien) et accord avec la famille de la stratégie
+  regimeFit?: "favorable" | "neutre" | "défavorable";
   liqCheckedAt?: number;
   costUsd?: number;          // spot : USDC encore engagés (après une vente partielle, la moitié)
   collateralUsd?: number;    // perps : collatéral déposé à l'ouverture

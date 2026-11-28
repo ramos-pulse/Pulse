@@ -92,9 +92,20 @@ export function tempo(c: { interval?: string | null; family: Family; params: unk
 // ---------------------------------------------------------------------------------------------------
 /** Compteurs avec oubli progressif : n = stratégies testées, ok = non rejetées, last = dernier passage (marchés). */
 export interface Tally { n: number; ok: number; last?: number }
-export interface ResearchStats { family: Record<string, Tally>; market: Record<string, Tally>; math: Record<string, Tally> }
+export interface ResearchStats { family: Record<string, Tally>; market: Record<string, Tally>; math: Record<string, Tally>; idea?: Record<string, Tally> }
 export const ALLOC = { decay: 0.995, floor: 0.05, prior: { n: 20, ok: 2 }, minMath: 0.15, maxMath: 0.5 };
-export const emptyStats = (): ResearchStats => ({ family: {}, market: {}, math: {} });
+export const emptyStats = (): ResearchStats => ({ family: {}, market: {}, math: {}, idea: {} });
+/** Mathématicien (28/11) : réussite par type d'idée (tendance, range, compression…), par bot et unité de temps. */
+export const ideaKey = (kind: BotKind, interval: Interval, idea: string) => `${kind}|${interval}|${idea}`;
+export function recordIdeas(st: ResearchStats, kind: BotKind, interval: Interval, list: { idea: string; verdict: string }[]) {
+  const by = new Map<string, { n: number; ok: number }>();
+  for (const r of list) { const t = by.get(r.idea) ?? { n: 0, ok: 0 }; t.n++; if (r.verdict !== "rejetée") t.ok++; by.set(r.idea, t); }
+  for (const [idea, t] of by) bump((st.idea ??= {}), ideaKey(kind, interval, idea), t.n, t.ok);
+}
+/** Chance qu'une idée du mathématicien soit essayée : selon sa réussite (8 % de réussite = toujours), jamais moins de 10 %. */
+export const ideaChance = (st: ResearchStats, kind: BotKind, interval: Interval, idea: string) => Math.min(1, Math.max(0.1, yieldOf(st.idea?.[ideaKey(kind, interval, idea)]) / 0.08));
+/** Variantes voisines d'une idée du mathématicien (sa théorie situe la zone, la grille trouve le bon réglage). */
+export const MATH_GRID = 4;
 export const familyKey = (kind: BotKind, interval: Interval, f: Family) => `${kind}|${interval}|${f}`;
 export const marketKey = (m: Pick<Market, "product" | "kind" | "interval">) => `${m.product}|${m.kind}|${m.interval}`;
 /** Taux de réussite lissé (un a priori de 2 réussites sur 20 évite de juger sur 3 essais). */

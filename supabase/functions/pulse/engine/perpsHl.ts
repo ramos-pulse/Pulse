@@ -5,6 +5,7 @@
 //    protégée même si le serveur tombe ;
 //  - minimum 10 $ de TAILLE (et non 10 $ de collatéral) : plusieurs petites positions possibles avec peu de capital.
 // Marge ISOLÉE : chaque position a sa propre marge ; levier plafonné pour que la liquidation reste 3 fois plus loin que le stop.
+import { liveRegimeOf, regimeFitLabel } from "./math.ts";
 import type { BotState, Store } from "../store.ts";
 import { isBenched, learn, mindset, newBrain, riskPerTrade } from "./brain.ts";
 import { candles as getCandles, lastClosedCandle } from "./candles.ts";
@@ -306,7 +307,8 @@ export async function runHlTick(admin: Admin): Promise<string> {
       const source = plan.source || "réglages de l'app";
       const pos: Position = {
         key: plan.asset, symbol: plan.asset, side: sig.side, entry: fill.avgPx, stop: fillStop, best: fill.avgPx, initialRisk: dist, openedAt: now, stopCandle: closed,
-        posParams: plan.params, posInterval: iv, source, ...(setup ? { strategy: setup } : {}), ...("target" in sig && sig.target != null ? { target: (sig.target as number) + (fill.avgPx - sig.price) } : {}),
+        posParams: plan.params, posInterval: iv, source, ...(setup ? { strategy: setup } : {}),
+        ...((): Partial<Position> => { const regime = liveRegimeOf(c); return regime ? { regime, regimeFit: regimeFitLabel(setup ?? plan.family ?? "tendance", regime) } : {}; })(), ...("target" in sig && sig.target != null ? { target: (sig.target as number) + (fill.avgPx - sig.price) } : {}),
         collateralUsd: (fill.size * fill.avgPx) / lev, sizeUsd: fill.size * fill.avgPx, coinSize: fill.size,
         why: `${sig.reason} · stratégie : ${source} · ${L.name.toLowerCase()}, risque ${(size.risk * 100).toFixed(1)} %, levier x${lev} (marge isolée)${conv !== 1 ? `, confiance ×${conv}` : ""}${vol < 1 ? `, taille réduite (marché agité ×${vol})` : ""}${mem.vault ? ` (coffre de ${mem.vault.toFixed(2)} $ exclu)` : ""}`,
       };
@@ -345,7 +347,8 @@ function recordClose(admin: Admin, mem: Memory, cfg: PerpsConfig, coin: string, 
   mem.vault = addToVault(mem.vault, pnl, cfg.vaultPct);
   admin.addTrade("perps", { action: "close", asset: coin, side: p?.side, collateral_usd: (p?.collateralUsd ?? 0) + pnl, price: p?.live?.price, pnl_usd: pnl, reason, source: p?.source,
     detail: { pourquoi: label(reason), entree: p?.entry, stop: p?.stop, strategie: p?.source, duree_h: p?.openedAt ? Math.round((Date.now() - p.openedAt) / 360_000) / 10 : null, entree_pourquoi: p?.why, coffre: mem.vault, plateforme: "Hyperliquid", note: "résultat hors financement horaire (funding), qui s'ajoute ou se retire du compte à part",
-      ...(pnlUsd == null ? { estimation: "résultat estimé (exécutions Hyperliquid illisibles)" } : {}) } });
+      ...(pnlUsd == null ? { estimation: "résultat estimé (exécutions Hyperliquid illisibles)" } : {}),
+      ...(p?.regimeFit ? { regime: p.regime, regime_accord: p.regimeFit } : {}) } });
   learn(mem.brain ?? newBrain(value), coin, pnlPct, value, Date.now());
   if (lossPause(pnl, stopProtects(p) && /stop/.test(String(reason ?? "")))) mem.cooldownUntil = Date.now() + cooldownMs(p?.posInterval); // sortie à l'équilibre par le stop : pas de pause
   if (mem.positions) delete mem.positions[coin];
