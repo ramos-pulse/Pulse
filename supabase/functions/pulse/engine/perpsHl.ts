@@ -262,10 +262,16 @@ export async function runHlTick(admin: Admin): Promise<string> {
       }
     }
     // stops orphelins (position fermée, ordre resté) : nettoyés pour ne pas encombrer le compte
-    if ((!Object.keys(mine).length || Object.values(mine).some((p) => !p.stopOid)) && now - (mem.hlOrphanAt ?? 0) > 10 * 60_000) {
+    // 28/11 : toutes les 10 min, TOUT stop « fermeture seulement » qui n'est le stop d'aucune position suivie est annulé
+    // (avant : seulement sans position ouverte ; un vieux stop resté après une annulation ratée pouvait fermer une
+    // nouvelle position du même sens sur le même marché)
+    if (now - (mem.hlOrphanAt ?? 0) > 10 * 60_000) {
       mem.hlOrphanAt = now;
+      const tracked = new Set(Object.values(mine).map((p) => p.stopOid).filter((x): x is number => x != null));
       const orders = await hlOpenOrders(creds.account).catch(() => []);
-      for (const od of orders) if (od.isTrigger && od.reduceOnly && !realOf(od.coin)) await hlCancel(creds.key, await hlAsset(od.coin), od.oid).catch(() => null);
+      // sécurité : une position suivie SANS stop connu garde tous les stops de son marché (ils sont peut-être sa seule protection)
+      const unprotected = new Set(Object.values(mine).filter((p) => !p.stopOid).map((p) => p.key));
+      for (const od of orders) if (od.isTrigger && od.reduceOnly && !tracked.has(od.oid) && !unprotected.has(od.coin)) await hlCancel(creds.key, await hlAsset(od.coin), od.oid).catch(() => null);
     }
     const held = Object.values(mine);
     const posText = held.map((p) => `${p.side === "long" ? "long" : "short"} ${p.key} ${p.live ? `${p.live.pnlPct >= 0 ? "+" : ""}${p.live.pnlPct.toFixed(2)} %` : ""}`).join(", ");
@@ -317,6 +323,8 @@ export async function runHlTick(admin: Admin): Promise<string> {
       if (!size) { notes.push(`${plan.asset} : signal ${sig.side} refusé — la position minimale de Hyperliquid (10 $) dépasserait ton plafond de risque, ou pas assez d'USDC disponibles`); continue; }
       // levier (marge isolée), ordre au marché, puis stop chez Hyperliquid ; si le stop ne peut pas être posé, on referme aussitôt
       const lev = await hlSetLeverage(creds.key, asset, size.leverage);
+      // 28/11 : aucun vieux stop ne doit traîner sur ce marché avant d'entrer (il pourrait fermer la nouvelle position)
+      for (const od of await hlOpenOrders(creds.account).catch(() => [])) if (od.coin === asset.name && od.isTrigger && od.reduceOnly) await hlCancel(creds.key, asset, od.oid).catch(() => null);
       // 28/11 : entrée « faiseur » d'abord (frais ~3 fois plus bas), complétée au marché si besoin
       const fill = await hlMakerEntry(creds.key, creds.account, asset, sig.side === "long", size.coins, price);
       const fillStop = sig.side === "long" ? fill.avgPx - dist : fill.avgPx + dist;
