@@ -32,7 +32,7 @@ export const SPACE = {
   tendance: { breakout: [12, 24, 36, 48, 72, 96], trailAtr: [2, 2.5, 3, 3.5, 4], minTrend: [0.5, 0.8, 1, 1.2, 1.5, 2] },
   rsi: { rsiPeriod: [7, 10, 14, 21], entry: [20, 25, 30, 35], exit: [45, 50, 55, 60, 65], smaPeriod: [50, 100, 150, 200], swingBars: [5, 10, 15, 20] },
   range: { bbPeriod: [14, 20, 30], bbK: [1.5, 2, 2.5], stopAtr: [1, 1.5, 2, 3], maxTrend: [0.5, 1, 1.5] },
-  orb: { session: ["utc", "eu", "us"], zoneMin: [15, 30, 60], target: [1, 1.5, 2, 3], window: [2, 4, 6] },
+  orb: { session: ["utc"], /* 28/11 : non-stop, les séances Europe / Wall Street ne jouent pas le week-end */ zoneMin: [15, 30, 60], target: [1, 1.5, 2, 3], window: [2, 4, 6] },
   vwap: { dev: [1.5, 2, 2.5, 3], stopAtr: [1, 1.5, 2], maxTrend: [0.5, 1, 1.5, 3] },
   squeeze: { bbPeriod: [20], bbK: [2], lookback: [50, 100, 200], pct: [0.05, 0.1, 0.2], trailAtr: [1.5, 2, 2.5, 3] },
   volume: { volMult: [2, 2.5, 3, 4], body: [0.6, 0.8, 1.2], trailAtr: [1.5, 2, 2.5, 3] },

@@ -414,7 +414,8 @@ function qualifies(r: ResearchRow, a: AgentSettings = { aggressive: false, nerve
   // « fraîche » = créée ou re-validée sur des données récentes depuis moins de 10 jours (re-validation chaque semaine)
   const young = Date.now() - Date.parse(r.validated_at ?? r.created_at) < QUALIFY.maxAgeDays * 86_400_000;
   if (!young || r.verdict === "déçue en réel" || r.verdict === "périmée" || r.live?.failed) return false;
-  if ((r.params as { hours?: string } | null)?.hours === "actives") return false; // 24 h/24 demandé : pas de stratégie qui s'arrête la nuit et le week-end
+  if ((r.params as { hours?: string } | null)?.hours === "actives") return false;
+  if (r.family === "orb" && (r.params as { session?: string } | null)?.session !== "utc") return false; // ORB Europe / Wall Street : muette le week-end // 24 h/24 demandé : pas de stratégie qui s'arrête la nuit et le week-end
   const luck = r.test.luck;
   if (a.soft) { // mode extra souple : presque tout ce qui est positif sur la période jamais vue (risque divisé par 2 dans les bots)
     const t0 = tempo(r); if (a.nerve === 0 && t0 > 1) return false; if (a.nerve === 3 && t0 < 2) return false;

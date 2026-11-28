@@ -203,9 +203,9 @@ export function propose(trainCandles: Candle[], m: Market, ins = analyze(trainCa
     out.push({ candidate: { ...base, family: "squeeze", params: { bbPeriod: 20, bbK: 2, lookback: 100, pct: o.aggressive ? 0.2 : 0.1, trailAtr: p.trailAtr } },
       rationale: `la volatilité se regroupe : après une compression des bandes de Bollinger (parmi les ${o.aggressive ? 20 : 10} % les plus serrées), le prix part souvent fort d'un côté ⇒ suivre la cassure, stop suiveur ${p.trailAtr} ATR (replis typiques mesurés)` });
   }
-  // ORB : en 15 min, l'ouverture de Wall Street donne le plus gros afflux de volume de la journée
-  if (m.interval === "15m") out.push({ candidate: { ...base, family: "orb", params: { session: "us", zoneMin: 30, target: 2, window: 4 } },
-    rationale: "l'ouverture de Wall Street concentre le volume de la journée : la cassure de la zone des 30 premières minutes donne souvent la direction ; objectif 2 × la zone" });
+  // ORB : en 15 min, la nouvelle journée (minuit UTC, ouverture asiatique) — séance tous les jours, week-end compris
+  if (m.interval === "15m") out.push({ candidate: { ...base, family: "orb", params: { session: "utc", zoneMin: 30, target: 2, window: 4 } },
+    rationale: "la nouvelle journée (minuit UTC) relance l'activité tous les jours, week-end compris : la cassure de la zone des 30 premières minutes donne souvent la direction ; objectif 2 × la zone" });
   return out;
 }
 
