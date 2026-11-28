@@ -994,9 +994,18 @@ async function runFreshScout(): Promise<string> {
 
 /** ARBITRAGE ÉCLAIREUR : écarts de prix entre DEX et boucles de swaps, frais déduits ; aucun argent engagé. */
 async function runArbScout(): Promise<string> {
-  const tokens = allTokens().filter((t) => t.extra !== "nouveau" && t.active !== false);
+  const all = allTokens().filter((t) => t.extra !== "nouveau" && t.active !== false);
   const cycle = Math.floor(Date.now() / 300_000);
-  const obs = await arbScan(tokens, 3, cycle * 3);
+  // 28/11 : économe et ciblé. Les boucles USDC → token → USDC coûtent 2 cotations Jupiter chacune, sur la même clé que les
+  // vrais achats du bot. Un seul essai par cycle, d'abord sur les tokens qui ont déjà montré un écart positif (7 jours),
+  // un cycle sur deux ; les écarts entre DEX (DexScreener, sans quota Jupiter) restent mesurés à chaque cycle.
+  const { data: hist } = await db.from("arb_log").select("token, net_pct").gt("created_at", new Date(Date.now() - 7 * 86_400_000).toISOString()).order("net_pct", { ascending: false }).limit(200);
+  const bestOf = new Map<string, number>();
+  for (const h of (hist ?? []) as { token: string; net_pct: number }[]) if (!bestOf.has(h.token)) bestOf.set(h.token, h.net_pct);
+  const tokens = [...all].sort((a, b) => (bestOf.get(b.symbol) ?? -9) - (bestOf.get(a.symbol) ?? -9));
+  const promising = tokens.filter((t) => (bestOf.get(t.symbol) ?? -9) > 0);
+  const order = cycle % 4 === 0 || !promising.length ? tokens : [...promising, ...tokens.filter((t) => !promising.includes(t))]; // 1 cycle sur 4 : tour complet
+  const obs = await arbScan(order, cycle % 2 === 0 ? 1 : 0, cycle % 4 === 0 ? Math.floor(cycle / 4) : 0);
   if (!obs.length) return "aucune donnée";
   const best = [...obs].sort((a, b) => b.netPct - a.netPct)[0]!;
   const rows = obs.filter((o) => o.netPct > 0 || o === best).map((o) => ({ kind: o.kind, token: o.token, detail: o.detail, gross_pct: Math.round(o.grossPct * 1000) / 1000, net_pct: Math.round(o.netPct * 1000) / 1000 }));
@@ -1006,6 +1015,47 @@ async function runArbScout(): Promise<string> {
 }
 
 /** CHIEN DE GARDE : un bot en mission qui ne se contrôle plus depuis 5 minutes déclenche une alerte (au plus une par heure). */
+/**
+ * CHIEN DE GARDE (28/11 : plus de contrôles, tirés des vrais incidents). Chaque alerte n'est envoyée qu'une fois par période.
+ *  - bot en mission sans contrôle depuis 5 min (déjà là) ;
+ *  - bot laissé en pause plus de 2 h (souvent oublié après une mise à jour) ;
+ *  - position perps sans stop chez Hyperliquid depuis plus de 5 min ;
+ *  - erreurs à répétition (3 contrôles de suite) ;
+ *  - chercheur à l'arrêt depuis 30 min.
+ */
+const WATCH = { pausedH: 2, noStopMin: 5, errStreak: 3, researchStaleMin: 30, repeatH: 6 };
+async function alertOnce(key: string, text: string, repeatH: number): Promise<string> {
+  const { data } = await db.from("agent_log").select("id").eq("agent", "garde").eq("wallet", key).gt("created_at", new Date(Date.now() - repeatH * 3_600_000).toISOString()).limit(1);
+  if (data?.length) return `${key} : déjà signalé`;
+  await db.from("agent_log").insert({ agent: "garde", wallet: key, action: "alerte", detail: text });
+  await notify(text);
+  return text;
+}
+async function runWatchdogMore(bots: Awaited<ReturnType<typeof readBots>>): Promise<string[]> {
+  const out: string[] = [], now = Date.now();
+  const { data: kv } = await db.from("app_kv").select("value").eq("key", "watchdog").limit(1);
+  const st = ((kv?.[0]?.value ?? {}) as { pausedSince?: Partial<Record<string, number>> });
+  st.pausedSince ??= {};
+  for (const k of KINDS) {
+    const b = bots[k], name = k === "spot" ? "Bot 1 (spot)" : "Bot 2 (perps)", mem = loadMemory(b.price_history);
+    if (b.status === "paused") {
+      st.pausedSince[k] ??= now;
+      const h = (now - st.pausedSince[k]!) / 3_600_000;
+      if (h >= WATCH.pausedH) out.push(await alertOnce(`pause-${k}`, `${name} est en pause depuis ${Math.floor(h)} h : aucune nouvelle entrée. Pense à le relancer si la pause n'est pas voulue.`, WATCH.repeatH));
+    } else delete st.pausedSince[k];
+    if (b.status === "running" && (mem.errStreak ?? 0) >= WATCH.errStreak)
+      out.push(await alertOnce(`erreurs-${k}`, `${name} : ${mem.errStreak} contrôles de suite en erreur. Dernier message : ${String(b.last_message ?? "").slice(0, 160)}`, 1));
+    if (k === "perps" && onHl()) for (const p of Object.values(mem.positions ?? {}))
+      if (!p.stopOid && now - (p.openedAt ?? now) > WATCH.noStopMin * 60_000)
+        out.push(await alertOnce(`stop-${p.key}`, `Bot 2 : la position ${p.side} ${p.key} n'a pas de stop chez Hyperliquid depuis plus de ${WATCH.noStopMin} min. Le bot réessaie à chaque minute ; vérifie dans l'app Hyperliquid.`, 1));
+  }
+  const { data: last } = await db.from("research").select("created_at").order("created_at", { ascending: false }).limit(1);
+  const ago = last?.[0] ? (now - Date.parse((last[0] as { created_at: string }).created_at)) / 60_000 : Infinity;
+  if (ago >= WATCH.researchStaleMin) out.push(await alertOnce("chercheur", `Chercheur : aucune nouvelle stratégie testée depuis ${Number.isFinite(ago) ? Math.round(ago) + " min" : "longtemps"}. Les bots continuent avec leurs stratégies actuelles.`, WATCH.repeatH));
+  await db.from("app_kv").upsert({ key: "watchdog", value: st, updated_at: new Date().toISOString() }, { onConflict: "key" });
+  return out.filter((x) => !x.endsWith("déjà signalé"));
+}
+
 async function runWatchdog(): Promise<string> {
   const bots = await readBots(), out: string[] = [];
   for (const k of KINDS) {
@@ -1019,7 +1069,8 @@ async function runWatchdog(): Promise<string> {
     await db.from("agent_log").insert({ agent: "garde", wallet: k, action: "alerte", detail: text });
     await notify(text); out.push(text);
   }
-  return out.join(" · ") || "tout va bien";
+  out.push(...await runWatchdogMore(bots).catch((e) => [`contrôles supplémentaires indisponibles : ${(e as Error).message}`]));
+  return out.filter((x) => !x.endsWith("déjà signalé")).join(" · ") || "tout va bien";
 }
 
 /** Tableau des nouveaux agents (onglet Agents). */
