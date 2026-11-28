@@ -90,12 +90,15 @@ export async function currentHlValue() {
 }
 
 /** Résultat réel d'une fermeture : gains réalisés moins frais, d'après les exécutions Hyperliquid depuis l'ouverture. */
-async function realizedPnl(account: string, coin: string, since: number): Promise<number | null> {
+export async function realizedPnl(account: string, coin: string, since: number): Promise<number | null> {
   const fills = await hlFills(account, Math.max(0, since - 60_000)).catch(() => null);
   if (!fills) return null;
-  const mine = fills.filter((f) => f.coin === coin);
-  if (!mine.length) return null;
-  return mine.reduce((s, f) => s + f.closedPnl - f.fee, 0); // les frais d'ouverture sont inclus (closedPnl = 0 à l'ouverture)
+  // 28/11 (bug XMR) : on part de la PREMIÈRE exécution d'ouverture de cette position. Avant, tout ce qui précédait l'ouverture
+  // d'une minute était compté : la fermeture d'une position précédente sur le même marché était comptée une seconde fois.
+  const mine = fills.filter((f) => f.coin === coin).sort((a, b) => a.time - b.time);
+  const open = mine.find((f) => /^Open/.test(f.dir) && f.time >= since - 60_000);
+  if (!open) return null;
+  return mine.filter((f) => f.time >= open.time).reduce((s, f) => s + f.closedPnl - f.fee, 0); // frais d'ouverture inclus (closedPnl = 0 à l'ouverture)
 }
 
 /** Pose (ou déplace) le stop chez Hyperliquid : le nouveau d'abord, l'ancien annulé ensuite (jamais sans stop). */

@@ -57,3 +57,16 @@ test("entrée faiseur (bug XRP du 28/11) : exécutions affichées en retard → 
   assert.equal(f.size, 0.5);
   assert.ok(!S.sent.some((x) => x.startsWith("marché")), `envoyé : ${S.sent.join(", ")}`);
 });
+
+test("résultat d'un trade (bug XMR du 28/11) : la fermeture du trade précédent n'est plus comptée deux fois", async () => {
+  const { realizedPnl } = await import("../supabase/functions/pulse/engine/perpsHl.ts");
+  const t = (iso: string) => Date.parse(iso);
+  S.fills = [
+    { coin: "XMR", dir: "Close Long", px: "433.88", sz: "0.067", closedPnl: "1.05994", fee: "0.013081", time: t("2026-11-28T09:00:26Z"), oid: 1, side: "A" },
+    { coin: "XMR", dir: "Open Long", px: "439.92", sz: "0.051", closedPnl: "0", fee: "0.010096", time: t("2026-11-28T09:01:06Z"), oid: 2, side: "B" },
+    { coin: "XMR", dir: "Close Long", px: "440.99", sz: "0.051", closedPnl: "0.05457", fee: "0.01012", time: t("2026-11-28T13:00:05Z"), oid: 3, side: "A" },
+  ];
+  S.fillsLag = false;
+  const pnl = await realizedPnl("0x" + "ab".repeat(20), "XMR", t("2026-11-28T09:01:07Z"));
+  assert.ok(Math.abs(pnl! - 0.034354) < 1e-6, `résultat ${pnl}`);
+});
