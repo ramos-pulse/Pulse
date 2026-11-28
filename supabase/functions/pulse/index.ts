@@ -702,6 +702,7 @@ async function loadSpotCosts() {
   const { data } = await db.from("app_kv").select("value").eq("key", "spot_costs").limit(1);
   setSpotCosts(((data?.[0]?.value as { costs?: SpotCosts } | undefined)?.costs) ?? {});
 }
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function runCostScout(): Promise<string> {
   const tokens = [...TOKENS, ...allTokens().filter((t) => t.extra === "selection" && t.active !== false)];
   const costs: SpotCosts = { ...spotCosts() };
@@ -714,17 +715,20 @@ async function runCostScout(): Promise<string> {
     const t = tokens.find((x) => x.symbol.toUpperCase() === sym)!;
     try {
       const usdIn = BigInt(COSTS.quoteUsd * 1e6);
-      const buy = await getQuote(USDC_MINT, t.mint, usdIn, 100);
-      const sell = await getQuote(t.mint, USDC_MINT, BigInt(buy.outAmount), 100);
+      // Jupiter limite le nombre d'appels par seconde : une pause entre chaque cotation, et un second essai si refusée
+      const quote = async (a: string, b: string, n: bigint) => { try { return await getQuote(a, b, n, 100); } catch { await sleep(COSTS.pauseMs * 2); return await getQuote(a, b, n, 100); } };
+      const buy = await quote(USDC_MINT, t.mint, usdIn);
+      await sleep(COSTS.pauseMs);
+      const sell = await quote(t.mint, USDC_MINT, BigInt(buy.outAmount));
       const c = costFromRoundTrip(COSTS.quoteUsd, Number(sell.outAmount) / 1e6, sol);
-      if (!c) { failed.push(sym); continue; }
+      if (!c) { failed.push(`${sym} (cotation incohérente)`); continue; }
       const fixed = TOKENS.some((x) => x.symbol.toUpperCase() === sym) ? COSTS.defaultFixed : COSTS.defaultSelected;
       if (costChanged(costs[sym], fixed, c)) // coût très différent : les stratégies rejetées de ce token seront re-testées avec le vrai coût
         await db.from("research").delete().eq("kind", "spot").eq("product", t.candles).eq("verdict", "rejetée");
       costs[sym] = { ...c, at: Date.now() };
       done.push(`${sym} ${(c.side * 100).toFixed(2).replace(".", ",")} %`);
-    } catch { failed.push(sym); }
-    await new Promise((r) => setTimeout(r, 300));
+    } catch (e) { failed.push(`${sym} (${(e as Error).message.slice(0, 60)})`); }
+    await sleep(COSTS.pauseMs);
   }
   await db.from("app_kv").upsert({ key: "spot_costs", value: { costs }, updated_at: new Date().toISOString() }, { onConflict: "key" });
   setSpotCosts(costs);

@@ -10,7 +10,8 @@ export const COSTS = {
   margin: 1.5,           // perte de l'aller-retour comptée ×1,5
   floor: 0.001,          // jamais moins de 0,1 % par côté
   maxAgeMs: 24 * 3_600_000,
-  perCycle: 6,
+  perCycle: 3,
+  pauseMs: 1100,         // pause entre deux cotations (limite de débit de Jupiter)
   defaultFixed: 0.003,   // avant la première mesure : l'ancien coût (tokens de la liste fixe)
   defaultSelected: 0.004,
 };
