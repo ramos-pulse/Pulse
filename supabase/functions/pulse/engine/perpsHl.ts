@@ -15,7 +15,7 @@ import {
   hlAccount, hlAsset, hlCancel, hlCredentials, hlFills, hlMarketOrder, hlMids, hlOpenOrders, hlPlaceStop, hlSetLeverage, hlTransfers, HL_RULES,
   type HlAccount, type HlAsset, type HlPosition,
 } from "./hyperliquid.ts";
-import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type Extra, type SetupParams, extendOnTime } from "./setups.ts";
+import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type Extra, type SetupParams, extendOnTime, EDGE, expectedMove } from "./setups.ts";
 import { addToVault, applyTransfer, AGGR_AGGRESSIVE, AGGR_LEVELS, atr, conviction, cooldownMs, DEFAULT_PARAMS, effectiveAggr, exitCheck, EXTRA_SOFT, floorOf, LIQ, loadMemory, loadPerpsConfig, migratePositions, missionEnd, PARTIAL, pruneSignal, perpsChange, perpsMarkets, PRESETS, riskFactor, riskGate, RULES, sampleCurve, sideMult, TOTAL_RISK, tradable, trailStop, trendSignal, volScale, type Interval, type Memory, type Params, type PerpsConfig, type PerpsPlan, type Position, lossPause, stopProtects } from "./strategy.ts";
 
 type Admin = Store;
@@ -90,6 +90,9 @@ export async function currentHlValue() {
 }
 
 /** Résultat réel d'une fermeture : gains réalisés moins frais, d'après les exécutions Hyperliquid depuis l'ouverture. */
+/** Coût par côté compté par le chercheur pour Hyperliquid (frais + glissement) : sert au filtre « ça vaut les frais ». */
+export const HL_RESEARCH_FEE = 0.0007;
+
 export async function realizedPnl(account: string, coin: string, since: number, opts: { tries?: number; waitMs?: number } = {}): Promise<number | null> {
   const tries = opts.tries ?? 4, waitMs = opts.waitMs ?? 2_000;
   for (let i = 0; i < tries; i++) {
@@ -237,7 +240,7 @@ export async function runHlTick(admin: Admin): Promise<string> {
             const extra = fam === "funding" ? { funding: await fundingHistory(p.key, c[0]!.t - 86_400_000).catch(() => []) } : undefined;
             const ext = extendOnTime(rangeOut, fam!, c, p.side, sideMult(cfg.bias, "short") > 0, p.posParams as SetupParams, extra);
             if (ext) {
-              p.holdSince = now; p.stop = ext.stop; if (ext.target != null) p.target = ext.target + (price - ext.price);
+              p.holdSince = now; p.stop = ext.stop + (price - ext.price); if (ext.target != null) p.target = ext.target + (price - ext.price); // 28/11 : stop et objectif décalés pareil (bougies d'une autre source que le prix Hyperliquid)
               message = `${p.key} : durée maximale atteinte mais le signal est toujours valable : position prolongée (pas de frais de sortie et de re-entrée).`;
               rangeOut = null;
             }
@@ -322,6 +325,8 @@ export async function runHlTick(admin: Admin): Promise<string> {
       if (!sig.side || mult === 0) { notes.push(sig.side ? `${plan.asset} : ${sig.side} désactivé par ta barre longs/shorts` : `${plan.asset} : ${sig.reason}`); continue; }
       const price = mids[plan.asset] ?? 0;
       if (!(price > 0)) { notes.push(`${plan.asset} : prix indisponible`); continue; }
+      // 28/11 : rebond — l'objectif doit valoir 4 fois l'aller-retour Hyperliquid (même règle que le chercheur)
+      if (setup === "rebond" && expectedMove(sig) < EDGE.mult * 2 * HL_RESEARCH_FEE) { notes.push(`${plan.asset} : rebond ignoré, objectif à ${(expectedMove(sig) * 100).toFixed(2)} % < ${(EDGE.mult * 2 * HL_RESEARCH_FEE * 100).toFixed(2)} % (4 × les frais)`); continue; }
       const asset = await hlAsset(plan.asset);
       const dist = Math.abs(sig.price - sig.stop);
       const stop = sig.side === "long" ? price - dist : price + dist;

@@ -43,7 +43,7 @@ export const SPACE = {
 /** Familles proposées selon le bot : le spot n'achète que (pas de range ni de funding). */
 export const FAMILIES: Record<BotKind, Family[]> = {
   spot: ["tendance", "rsi", "orb", "vwap", "squeeze", "volume", "rebond"],
-  perps: ["tendance", "range", "orb", "vwap", "squeeze", "volume", "funding"],
+  perps: ["tendance", "range", "orb", "vwap", "squeeze", "volume", "funding", "rebond"],
 };
 /** Part des stratégies testées avec le filtre « heures actives » (pas d'entrée la nuit ni le week-end). */
 export const HOURS_SHARE = 0; // 28/11 : Ramos veut des bots qui tradent 24 h/24, 7 j/7 — plus de variante « heures actives seulement »
@@ -242,7 +242,8 @@ export function simulate(c: Candidate, candles: Candle[], m: Market, ctx: EvalCo
   if (c.family === "rsi") return backtestRsi(candles, c.params as RsiParams, m.feePct, o);
   // 28/11 : bot 1 — entrée refusée si le mouvement visé fait moins de 4 fois l'aller-retour ; pause 5 min (au lieu de 15) pour le rebond
   if (isSetup(c.family)) return backtestSetup(c.family, candles, c.params as SetupParams, { ...o, extra: ctx.extra,
-    ...(m.kind === "spot" ? { minEdge: EDGE.mult * 2 * m.feePct, ...(c.family === "rebond" ? { cooldownMs: REBOND_COOLDOWN_MS } : {}) } : {}) });
+    ...(m.kind === "spot" ? { minEdge: EDGE.mult * 2 * m.feePct, ...(c.family === "rebond" ? { cooldownMs: REBOND_COOLDOWN_MS } : {}) }
+      : c.family === "rebond" ? { minEdge: EDGE.mult * 2 * m.feePct } : {}) }); // bot 2 : filtre de frais pour le rebond seulement (frais bien plus bas)
   return backtest(candles, { ...o, params: c.params as Params });
 }
 /** Exigences de validation (28/11) : 8 trades sur la période jamais vue pour « prometteuse », et 2 tiers gagnés sur 3. */

@@ -51,3 +51,17 @@ test("rebond : pause de 5 min après une perte (15 min pour les autres stratégi
   const r = simulate({ market: m.name, product: m.product, symbol: "SOL", kind: "spot", interval: "15m", family: "rebond", params: P }, series(1200), m);
   assert.ok(r.trades > 5 && r.profitFactor > 1, `${r.trades} trades, PF ${r.profitFactor}`);
 });
+
+test("bot 2 : rebond dans les deux sens (envolée anormale → short), filtre de frais pour le rebond seulement", () => {
+  assert.ok(FAMILIES.perps.includes("rebond"));
+  const up = series(241).map((x) => ({ ...x, o: 200 - x.o, c: 200 - x.c, h: 200 - x.l, l: 200 - x.h })); // miroir : les chutes deviennent des envolées
+  const sig = setupSignal("rebond", up, true, P);
+  assert.equal(sig.side, "short", sig.reason);
+  assert.ok(sig.target! < sig.price && sig.stop > sig.price);
+  assert.equal(setupSignal("rebond", up, false, P).side, null); // sans short (bot 1) : rien
+  const m: Market = { name: "Perps SOL · 15 min", product: "SOL-USD", symbol: "SOL", kind: "perps", interval: "15m", feePct: 0.0007, hourlyCost: 0.00002, cap: 10 };
+  const cand = (f: "rebond" | "vwap", params: unknown) => ({ market: m.name, product: m.product, symbol: "SOL", kind: "perps" as const, interval: "15m" as const, family: f, params: params as RebondParams });
+  const tiny: RebondParams = { drop: 3, target: 0.05, stopAtr: 2, hold: 4 }; // objectif minuscule : jamais 4 × les frais
+  assert.equal(simulate(cand("rebond", tiny), series(1200), m).trades, 0);
+  assert.ok(simulate(cand("rebond", P), series(1200), m).trades > 5);
+});

@@ -8,7 +8,7 @@ import { riskPerTrade } from "./engine/brain.ts";
 import { candles as getCandles, hourlyCandles } from "./engine/candles.ts";
 import { env, listTokenAccounts, rpc, SOL_RESERVE as SOL_KEEP, token2022Danger } from "./engine/solana.ts";
 import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick } from "./engine/perps.ts";
-import { currentHlValue, getHlAddress, liquidateHl, runHlTick } from "./engine/perpsHl.ts";
+import { currentHlValue, getHlAddress, HL_RESEARCH_FEE, liquidateHl, runHlTick } from "./engine/perpsHl.ts";
 import { hlAccount, hlCredentials, hlMarkets, hlMids, hlOpenOrders, hlSpotBalances } from "./engine/hyperliquid.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
 import { SOL_MINT, USDC_MINT, tradable, AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, perpsMarkets, setPerpsMarkets, PERPS_PLANS_MAX, type PerpsMarket, type TokenInfo, type Memory, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
@@ -296,7 +296,7 @@ const RESEARCH_MARKETS: Market[] = INTERVALS.flatMap((interval) => [
 
 ]);
 /** Marchés perps étudiés : ceux de la plateforme active (Jupiter : SOL, ETH, BTC ; Hyperliquid : les plus échangés du jour). */
-const PERPS_COSTS = { jupiter: { feePct: 0.0012, hourlyCost: 0.00008 }, hyperliquid: { feePct: 0.0007, hourlyCost: 0.00002 } }; // HL : 0,045 % + glissement ; funding moyen
+const PERPS_COSTS = { jupiter: { feePct: 0.0012, hourlyCost: 0.00008 }, hyperliquid: { feePct: HL_RESEARCH_FEE, hourlyCost: 0.00002 } }; // HL : 0,045 % + glissement ; funding moyen
 const perpsResearchMarkets = (): Market[] => INTERVALS.flatMap((interval) => perpsMarkets().map((a) => ({ name: `Perps ${a.asset}${interval === "15m" ? " · 15 min" : ""}`, product: a.candles, symbol: a.asset,
   kind: "perps" as const, interval, ...PERPS_COSTS[onHl() ? "hyperliquid" : "jupiter"], cap: PERPS_RULES.maxLeverage })));
 /** Historique utilisé : 90 jours en 1 h, 60 jours en 15 min (2/3 pour régler, 1/3 jamais vu pour valider : 20 jours en 15 min). */
