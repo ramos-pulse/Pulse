@@ -81,3 +81,15 @@ test("cerveau : une sortie à l'équilibre (stop remonté à l'entrée) ne rédu
   learn(b, "ETH", -2, 38, Date.now());
   assert.ok(b.riskMult < 1, "une vraie perte réduit toujours le risque");
 });
+
+test("journal : une vente partielle compte avec la vente finale de sa position (un seul trade)", async () => {
+  const { mergePartials } = await import("../supabase/functions/pulse/engine/trades.ts");
+  const rows = mergePartials([
+    { bot: "spot", source: "chercheur #1 · Spot ORCA", symbol: "ORCA", reason: "prise de bénéfices partielle", pnl_usd: 0.038, created_at: "2026-11-27T10:00:00Z" },
+    { bot: "spot", source: "chercheur #1 · Spot ORCA", symbol: "ORCA", reason: "stop_loss", pnl_usd: 0.030, created_at: "2026-11-27T12:00:00Z" },
+    { bot: "spot", source: "chercheur #2 · Spot SOL", symbol: "SOL", reason: "prise de bénéfices partielle", pnl_usd: 0.05, created_at: "2026-11-27T13:00:00Z" }, // position encore ouverte
+  ]);
+  const closed = rows.filter((r) => typeof r.pnl_usd === "number");
+  assert.equal(closed.length, 1);
+  assert.ok(Math.abs(closed[0]!.pnl_usd! - 0.068) < 1e-9);
+});

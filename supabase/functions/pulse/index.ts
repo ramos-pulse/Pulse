@@ -21,6 +21,7 @@ import { analyze, LUCK, luckProbability, propose } from "./engine/math.ts";
 import { costChanged, costFromRoundTrip, COSTS, dueForMeasure, setSpotCosts, spotCosts, spotFee, type SpotCosts } from "./engine/costs.ts";
 import { getPrices, getQuote } from "./engine/jupiter.ts";
 import { dexPrices } from "./engine/dex.ts";
+import { mergePartials, type TradeRow } from "./engine/trades.ts";
 import { FAMILY_NAMES, isSetup, PERPS_ONLY, sanitizeSetup, type Extra, type SetupParams } from "./engine/setups.ts";
 import { fundingHistory } from "./engine/funding.ts";
 
@@ -258,7 +259,7 @@ async function learnFromBots(): Promise<string[]> {
   const since = new Date(Date.now() - LIVE.days * 86_400_000).toISOString();
   const { data } = await db.from("trades").select("*").gt("created_at", since).limit(5000);
   const by = new Map<number, { pnl: number[]; lastAt: string }>();
-  for (const t of (data ?? []) as { source?: string | null; pnl_usd?: number | null; created_at: string }[]) {
+  for (const t of mergePartials((data ?? []) as TradeRow[])) {
     const m = /chercheur #(\d+)/.exec(t.source ?? "");
     if (!m || typeof t.pnl_usd !== "number") continue; // seuls les trades clôturés comptent
     const e = by.get(+m[1]!) ?? { pnl: [], lastAt: t.created_at };
@@ -1099,7 +1100,7 @@ async function strategyReport() {
   const since = new Date(Date.now() - 60 * 86_400_000).toISOString();
   const { data } = await db.from("trades").select("*").gt("created_at", since).limit(5000);
   const by = new Map<string, { source: string; bot: string; trades: number; wins: number; gain: number; loss: number; last: string }>();
-  for (const t of (data ?? []) as { bot: string; source?: string | null; pnl_usd?: number | null; created_at: string }[]) {
+  for (const t of mergePartials((data ?? []) as (TradeRow & { bot: string })[])) {
     if (typeof t.pnl_usd !== "number") continue;
     const key = `${t.bot}|${t.source ?? "réglages de l'app"}`;
     const e = by.get(key) ?? { source: t.source ?? "réglages de l'app", bot: t.bot, trades: 0, wins: 0, gain: 0, loss: 0, last: t.created_at };
