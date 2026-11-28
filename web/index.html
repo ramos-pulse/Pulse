@@ -76,6 +76,7 @@ main{max-width:560px;margin:0 auto;padding:4px 16px 20px}
 #p-home details{margin-top:8px}
 #p-home summary{font:600 11px var(--mono);letter-spacing:.14em;color:var(--muted);cursor:pointer;list-style:none;padding:4px 0}
 #p-home summary::-webkit-details-marker{display:none}
+details[data-fold]>summary::-webkit-details-marker{display:none}details[data-fold]>summary{border-top:1px solid var(--line,rgba(255,255,255,.08))}
 #p-home details[open] summary{color:var(--lime)}
 .sum{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0 2px}
 .sum a{display:block;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px 14px;color:inherit;text-decoration:none}
@@ -629,6 +630,11 @@ function mathCard() {
     ${rows ? `<details data-d="math-list" style="margin:10px 0 0"><summary>▸ ${m.insights.length} MARCHÉS · ${trend} EN TENDANCE</summary>${rows}</details>` : `<p class="sub" style="margin:10px 0 0">Première analyse dans les 5 minutes.</p>`}
   </div>`;
 }
+/** Dérouleur (28/11) : liste repliée, état ouvert / fermé gardé quand l'app se rafraîchit. */
+let FOLDS = new Set(); try { FOLDS = new Set(JSON.parse(localStorage.getItem("pulse_folds") || "[]")); } catch (e) {}
+const fold = (id, title, body) => `<details data-fold="${id}" ${FOLDS.has(id) ? "open" : ""} style="margin-top:10px"><summary class="k" style="cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;padding:8px 0">${title}<span class="mut">${FOLDS.has(id) ? "▴" : "▾"}</span></summary>${body}</details>`;
+document.addEventListener("toggle", e => { const d = e.target; if (!d?.dataset?.fold) return; d.open ? FOLDS.add(d.dataset.fold) : FOLDS.delete(d.dataset.fold);
+  const a = d.querySelector("summary .mut"); if (a) a.textContent = d.open ? "▴" : "▾"; try { localStorage.setItem("pulse_folds", JSON.stringify([...FOLDS])); } catch (x) {} }, true);
 function swapCard() {
   const w = AGS?.swap; if (!w) return "";
   // compact (28/11) : une ligne d'état, réglage + bouton côte à côte, historique replié
@@ -642,7 +648,7 @@ function swapCard() {
     <div style="display:flex;gap:10px;align-items:center;margin-top:12px">
       <label style="display:flex;gap:8px;align-items:center;flex:1;font-size:14px"><input type="checkbox" data-swapauto="1" ${w.auto ? "checked" : ""} style="width:22px;height:22px">1×/jour, tout seul</label>
       <button class="btn go sm" style="flex:1" id="swapRun">${SW_BUSY ? "En cours…" : "Nettoyer"}</button></div>
-    ${w.log.length || w.runs[0] ? `<details style="margin-top:10px"><summary class="l2" style="cursor:pointer">Historique (${w.log.length})</summary>${w.log.map(line).join("")}${w.runs[0] ? `<p class="sub" style="margin:8px 0 0;font-size:13px">Dernier passage : ${esc(w.runs[0].detail)}</p>` : ""}</details>` : ""}
+    ${w.log.length || w.runs[0] ? fold("swap", `Historique (${w.log.length})`, w.log.map(line).join("") + (w.runs[0] ? `<p class="sub" style="margin:8px 0 0;font-size:13px">Dernier passage : ${esc(w.runs[0].detail)}</p>` : "")) : ""}
   </div>`;
 }
 const TIPS = {
@@ -729,7 +735,7 @@ function renderAg() {
       <p class="sub" style="margin:6px 0 4px">Il choisit lui-même tokens et stratégies parmi ses découvertes validées (${AG?.settings?.aggressive ? "mode agressif : « prometteuses » ou « à surveiller », ≥ 4 trades, profit factor ≥ 1,15 et baisse ≤ 20 %" : "≥ 5 trades, profit factor ≥ 1,3 et baisse ≤ 10 %"} sur la période jamais vue). En perps, agressivité ${AG?.settings?.aggressive ? "celle choisie dans Réglages" : "plafonnée à « Normal »"}. Il apprend des vrais trades : une stratégie nouvelle est tradée à 75 % du risque, puis à 100 % une fois confirmée en réel ; une stratégie qui perd en réel est abandonnée.</p>
       <label class="field"><span>Bot spot</span><input type="checkbox" data-pilot="spot" ${sc.autopilot ? "checked" : ""} style="width:26px;height:26px"></label>
       <label class="field"><span>Bot perps</span><input type="checkbox" data-pilot="perps" ${pc.autopilot ? "checked" : ""} style="width:26px;height:26px"></label>
-      ${(sc.plans?.length || pc.plans?.length) ? `<div class="k" style="margin-top:12px">Plans en cours</div>${(sc.plans || []).map(planLine).join("")}${(pc.plans || []).map(planLine).join("")}` : (sc.autopilot || pc.autopilot) ? `<p class="sub" style="margin:10px 0 0">Aucune stratégie ne passe encore les critères : les bots attendent.</p>` : ""}
+      ${(sc.plans?.length || pc.plans?.length) ? (sc.plans?.length ? fold("plans-spot", `Plans bot 1 · spot (${sc.plans.length})`, sc.plans.map(planLine).join("")) : "") + (pc.plans?.length ? fold("plans-perps", `Plans bot 2 · perps (${pc.plans.length})`, pc.plans.map(planLine).join("")) : "") : (sc.autopilot || pc.autopilot) ? `<p class="sub" style="margin:10px 0 0">Aucune stratégie ne passe encore les critères : les bots attendent.</p>` : ""}
       ${manual ? `<button class="btn sm" style="margin-top:12px;width:100%" data-auto="all">Revenir aux réglages automatiques du cerveau</button>` : ""}
     </div>`;
   const cards = (AG?.best || []).map(r => `<div class="card">
@@ -755,7 +761,7 @@ function renderAg() {
       <button class="btn sm" style="width:100%;margin-top:14px" id="agRun">${AG_BUSY ? "Recherche en cours…" : "Chercher maintenant"}</button></div>
     ${pilot}
     <div class="eyebrow">Ses meilleures découvertes</div>
-    ${cards || `<div class="card"><p class="sub" style="margin:0">Aucune stratégie n'a encore passé la validation sur une période jamais vue. C'est normal au début : il faut quelques heures de recherche.</p></div>`}
+    ${cards ? fold("best", `${(AG?.best || []).length} stratégies · ${(AG?.best || []).filter(r => r.qualifies).length} retenues par le pilote`, cards) : `<div class="card"><p class="sub" style="margin:0">Aucune stratégie n'a encore passé la validation sur une période jamais vue. C'est normal au début : il faut quelques heures de recherche.</p></div>`}
     <div class="eyebrow">Parler au chercheur</div>
     <div class="card">
       <div id="chatLog">${CHAT.length ? CHAT.map(m => `<div class="bubble ${m.role === "user" ? "me" : "ai"}">${esc(m.content)}</div>`).join("") : `<div class="bubble ai">Salut Ramos. Pose-moi une question : « quelle est ta meilleure piste ? », « pourquoi le bot n'achète pas ? », « le mode agressif vaut le coup ? »…</div>`}
@@ -1001,12 +1007,12 @@ function lot2Cards() {
       return `<div class="agh">${avatar("fresh", recent(fr.last?.[0]?.created_at))}<div><div class="status ${fr.on ? "run" : "off"}" style="font-size:12px;letter-spacing:.12em">${fr.on ? "Achats activés" : "Observation seulement"}</div><div class="l2">${head ? esc(head) : "premier passage dans les 5 minutes"}</div>${refus ? `<div class="l2 mut" style="font-size:12px">${esc(refus)}</div>` : ""}</div></div>
       <p class="sub" style="margin:10px 0 0">Tokens lancés depuis 30 min à 24 h, gardés seulement s'ils passent les garde-fous (émission et gel coupés, RugCheck, liquidité ≥ 50 k$, gros portefeuilles ≤ 30 %…). Mise 2 à 5 $, stop −20 %, objectif +40 %, 4 h max, 3 par jour.</p>
       <div class="warnbox" style="margin:10px 0 0;padding:8px 12px;font-size:13px">⚠ Terrain le plus risqué : ne mets que ce que tu acceptes de perdre.</div>
-      ${fr.tokens.length ? `<div class="k" style="margin-top:12px">Retenus (${fr.tokens.length}) · liquidité · 1 h · gros portefeuilles</div>${fr.tokens.slice(0, 3).map(tok).join("")}${fr.tokens.length > 3 ? `<details><summary class="l2" style="cursor:pointer;margin-top:6px">+ ${fr.tokens.length - 3} autre(s)</summary>${fr.tokens.slice(3).map(tok).join("")}</details>` : ""}` : ""}
+      ${fr.tokens.length ? fold("fresh", `Retenus (${fr.tokens.length})`, `<div class="l2 mut" style="font-size:12px">liquidité · variation 1 h · gros portefeuilles · âge</div>` + fr.tokens.map(tok).join("")) : ""}
       <label style="display:flex;gap:8px;align-items:center;margin-top:12px;font-size:14px"><input type="checkbox" id="freshOn" ${fr.on ? "checked" : ""} style="width:22px;height:22px">Acheter les tokens retenus</label>`; })()}</div>
     <div class="eyebrow">Agent arbitrage · éclaireur</div><div class="card">
       <div class="agh">${avatar("arb", true)}<div><div class="v txt" style="font-weight:600">${arb.measures} mesure(s) · ${arb.positives} positive(s) après frais</div><div class="l2">sans argent, depuis ${arb.since ? ago(arb.since) : "—"}</div></div></div>
       <p class="sub" style="margin:10px 0 0">Il compare les prix d'un même token entre les DEX et teste des allers-retours USDC → token → USDC, frais déduits. Il n'engage aucun argent : on ne passera au réel que si des gains se répètent.</p>
-      ${arb.best.length ? `<div class="sep"></div>${arb.best.map(o => `<div class="row"><div><div class="l1">${esc(o.token)} <span class="mut" style="font-weight:400">${esc(o.kind)}</span></div><div class="l2">${esc(o.detail)} · ${ago(o.created_at)}</div></div><div class="r ${cl(o.net_pct)}">${sg(o.net_pct)} %</div></div>`).join("")}` : ""}</div>
+      ${arb.best.length ? fold("arb", `Meilleures mesures (${arb.best.length})`, arb.best.map(o => `<div class="row" style="padding:7px 0"><div class="l1" style="font-size:15px">${esc(o.token)} <span class="mut" style="font-weight:400;font-size:13px">${esc(o.kind)} · ${ago(o.created_at)}</span></div><div class="r ${cl(o.net_pct)}">${sg(o.net_pct)} %</div></div>`).join("")) : ""}</div>
     <div class="eyebrow">Chien de garde</div><div class="card">
       <div class="agh">${avatar("guard")}<div><div class="v txt" style="font-weight:600">${wd.last.length ? "Dernière alerte il y a " + ago(wd.last[0].created_at) : "Rien à signaler"}</div><div class="l2">Alerte si un bot en mission ne se contrôle plus depuis 5 min, ou si une panne se répète</div></div></div>
       ${wd.last.map(x => `<p class="sub" style="margin:8px 0 0">${esc(x.detail)}</p>`).join("")}</div>`;
