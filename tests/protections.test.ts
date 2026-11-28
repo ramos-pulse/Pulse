@@ -62,3 +62,12 @@ test("spot : ordre minimum de 2 $ atteint si le risque reste sous 1,5 % (extra s
   // cas normal : taille voulue
   assert.ok(Math.abs((spotOrderSize(20, 20, 0.03, 0.015, 0.03, 10) as { size: number }).size - 10) < 1e-9);
 });
+
+test("dépôt : le plus haut du cerveau se décale (un dépôt n'est pas un nouveau record)", async () => {
+  const { applyTransfer } = await import("../supabase/functions/pulse/engine/strategy.ts");
+  const mem = { curve: [{ t: 1, v: 11.6 }], dayStartValue: 9.9, brain: { equityHigh: 11.67 } } as never as Parameters<typeof applyTransfer>[0];
+  applyTransfer(mem, 10.68);
+  assert.ok(Math.abs((mem as never as { brain: { equityHigh: number } }).brain.equityHigh - 22.35) < 1e-9);
+  applyTransfer(mem, -5);
+  assert.ok(Math.abs((mem as never as { brain: { equityHigh: number } }).brain.equityHigh - 17.35) < 1e-9);
+});

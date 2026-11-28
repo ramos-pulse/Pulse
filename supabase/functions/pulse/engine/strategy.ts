@@ -586,6 +586,8 @@ export function detectTransfer(mem: Memory, usdc: number, sol: number, solPrice:
 export function applyTransfer(mem: Memory, d: number) {
   if (mem.dayStartValue) mem.dayStartValue = Math.max(0.01, mem.dayStartValue + d);
   for (const pt of mem.curve ?? []) pt.v = Math.round((pt.v + d) * 100) / 100;
+  // 28/11 : le « plus haut » du cerveau se décale aussi, sinon un dépôt passe pour un nouveau record (risque augmenté à tort)
+  if (mem.brain && mem.brain.equityHigh > 0) mem.brain.equityHigh = Math.max(0.01, mem.brain.equityHigh + d);
 }
 
 /** Ajoute un point à la courbe du capital (au plus un par heure, 30 jours gardés). */
