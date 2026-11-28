@@ -548,7 +548,7 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
   if (spotCfg.autopilot) {
     const spotRows = good.filter((r) => r.kind === "spot");
     // garde les plans actuels encore qualifiés (évite de changer d'avis toutes les 5 minutes), complète avec les meilleurs, 3 tokens max
-    const keep = fresh ? [] : spotRows.slice(0, 10).filter((r) => spotCfg.plans.some((p) => p.source === `chercheur #${r.id} · ${r.market}`) && !outclassed(r, spotRows)).map(toSpotPlan);
+    const keep = fresh ? [] : spotRows.filter( /* 28/11 : toute la liste qualifiée (avant : les 10 premières, trop peu pour 10 plans) */(r) => spotCfg.plans.some((p) => p.source === `chercheur #${r.id} · ${r.market}`) && !outclassed(r, spotRows)).map(toSpotPlan);
     const plans = [...keep];
     // 28/11 : jusqu'à 6 stratégies surveillées (2 positions au plus, une par token) ; au plus 2 sur les tokens de la sélection,
     // dont l'historique vient de GeckoTerminal (limité à ~30 appels par minute)
@@ -566,7 +566,7 @@ async function autopilot(fresh = false): Promise<string> { // fresh : refaire le
   if (perpsCfg.autopilot) {
     // une stratégie par marché (SOL, ETH, BTC) : garde celles encore qualifiées, complète avec les meilleures
     const perpsRows = good.filter((r) => r.kind === "perps");
-    const plans: PerpsPlan[] = fresh ? [] : perpsRows.slice(0, 20).filter((r) => perpsCfg.plans.some((p) => p.source === `chercheur #${r.id} · ${r.market}`) && !outclassed(r, perpsRows)).map(toPerpsPlan);
+    const plans: PerpsPlan[] = fresh ? [] : perpsRows.filter( /* 28/11 : toute la liste qualifiée */(r) => perpsCfg.plans.some((p) => p.source === `chercheur #${r.id} · ${r.market}`) && !outclassed(r, perpsRows)).map(toPerpsPlan);
     for (const r of perpsRows) { if (plans.length >= (onHl() ? PERPS_PLANS_MAX : perpsCfg.maxPositions)) break; /* Hyperliquid : plus de marchés surveillés que de positions possibles */ const pl = toPerpsPlan(r); if (!plans.some((x) => x.asset === pl.asset)) plans.push(pl); }
     const sig = (l: PerpsPlan[]) => l.map((p) => `${p.source}:${p.confidence}`).join("|");
     if (sig(plans) !== sig(perpsCfg.plans)) {
