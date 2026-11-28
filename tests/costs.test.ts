@@ -26,10 +26,10 @@ test("frais réels : utilisés par le chercheur seulement s'ils sont récents", 
   setSpotCosts({});
 });
 
-test("frais réels : jamais mesurés d'abord, puis les plus anciens, 3 par cycle", () => {
+test("frais réels : jamais mesurés d'abord, puis les plus anciens, 1 par cycle", () => {
   const now = Date.now(), old = now - 2 * 86_400_000;
   const due = dueForMeasure(["SOL", "JUP", "BONK", "WIF", "JTO", "PYTH", "RAY", "ORCA"], { SOL: { side: 0.002, roundTrip: 0, tx: 0, at: now }, JUP: { side: 0.002, roundTrip: 0, tx: 0, at: old } }, now);
-  assert.equal(due.length, 3);
+  assert.equal(due.length, 1);
   assert.ok(!due.includes("SOL"), "mesure du jour : pas re-mesuré");
   assert.equal(due[0] === "JUP", false, "les jamais mesurés passent avant");
   assert.ok(costChanged(undefined, 0.003, { side: 0.0015, roundTrip: 0, tx: 0, at: 0 }));
