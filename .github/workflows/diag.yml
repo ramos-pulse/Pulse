@@ -40,6 +40,7 @@ jobs:
           q "select symbol, kind, active, seen_at, left(why,60) from token_universe where kind='nouveau' order by added_at desc limit 8"
           q "select kind, status, last_tick_at, left(last_message, 200), config->>'researchPerps' as perps, config->>'extraSoft' as soft, config->>'autopilot' as pilot, jsonb_array_length(coalesce(config->'plans','[]'::jsonb)) as plans from bot_state"
           q "select kind, config->>'maxPositions' mp, config->>'aggr' aggr, config->>'maxLev' lev, config->>'pilotAggressive' pa, config->>'extraSoft' soft, config->>'researchAggressive' ra from bot_state"
+          q "select b.kind, p->>'source' src, r.id, r.verdict, r.created_at from bot_state b cross join jsonb_array_elements(b.config->'plans') p left join research r on r.id = substring(p->>'source' from '#([0-9]+)')::bigint where b.kind='spot'"
           q "select kind, interval, verdict, count(*), max(created_at) from research where kind='spot' and created_at > now() - interval '7 days' group by 1,2,3 order by 1,2,3"
           q "select id, market, family, verdict, round(score::numeric,2) sc, test->>'trades' tt, round((test->>'profitFactor')::numeric,2) tpf, round((test->>'returnPct')::numeric,1) tret, train->>'trades' trt, round((train->>'profitFactor')::numeric,2) trpf, left(why,50), coalesce(validated_at, created_at) from research where kind='spot' and verdict <> 'rejetée' order by score desc limit 15"
           q "select left(why,60), count(*) from research where kind='spot' and created_at > now() - interval '2 days' group by 1 order by 2 desc limit 8"
