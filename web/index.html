@@ -144,6 +144,10 @@ nav{background:color-mix(in srgb,var(--bg) 94%,transparent) !important}
 .seg span.bars{display:flex;gap:3px}.seg i{display:block;width:16px;height:8px;border-radius:3px;cursor:pointer}
 .seg i.on{background:var(--lime)}.seg i.on.hot{background:var(--amber)}.seg i.on.red{background:var(--red)}
 .qs .tg{font:600 10px var(--mono);padding:5px 8px;border-radius:8px;background:var(--card2);color:var(--muted);border:1px solid var(--line)}.qs .tg.on{background:var(--amber);color:#1a1205;border-color:var(--amber)}
+/* ---- bulle flottante du capital ---- */
+#fsum{position:fixed;z-index:60;display:none;padding:7px 12px;border-radius:16px;background:color-mix(in srgb,var(--card) 82%,transparent);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid var(--line);box-shadow:0 6px 20px rgba(0,0,0,.35);font:12px var(--mono);color:var(--text);touch-action:none;user-select:none;-webkit-user-select:none;cursor:grab;opacity:.94}
+#fsum .ft{display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:13px}#fsum .fl{display:flex;align-items:center;gap:5px;white-space:nowrap;margin-top:4px;font-size:11.5px;color:var(--muted)}#fsum .fl b{color:var(--text);font-weight:600}
+#fsum .dot{width:7px;height:7px}
 /* ---- barre stop → objectif ---- */
 .pbar{position:relative;height:34px;margin:14px 2px 0}
 .pbar .t{position:absolute;top:13px;left:0;right:0;height:8px;border-radius:8px;background:linear-gradient(90deg,rgba(239,83,80,.55),var(--track) 45%,rgba(74,222,128,.55))}
@@ -255,7 +259,7 @@ $("#loginBtn").onclick = () => { BASE = serverUrl($("#srv").value); TOKEN = $("#
 
 $("#nav").onclick = e => { const b = e.target.closest("button"); if (b) go(b.dataset.p); };
 function go(p) { PAGE = p; if (p === "set") $("#p-set").innerHTML = ""; if (p === "ag") loadAg(); if (p === "hist") loadReport(); if (p === "home") loadCurve(); document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
-  document.querySelectorAll(".page").forEach(x => x.classList.toggle("on", x.id === "p-" + p)); render(); scrollTo(0, 0); }
+  document.querySelectorAll(".page").forEach(x => x.classList.toggle("on", x.id === "p-" + p)); render(); updateFloat(); scrollTo(0, 0); }
 
 async function refresh() {
   try { S = await api("/api/state"); lastOk = Date.now(); $("#login").style.display = "none"; $("#app").style.display = "block"; $("#mic").style.display = "grid"; notifyNew(); if (!CURVE) loadCurve(); if (!SCRUB) render(); else fresh(); }
@@ -394,6 +398,7 @@ function missionCard(kind, title) {
 
 function render() {
   fresh(); if (!S) return;
+  queueMicrotask(updateFloat); // bulle flottante du capital (hors page Missions)
   let a = "";
   if (!S.secrets.customRpc) a += `<div class="warnbox">RPC Solana public utilisé : ajoute le secret SOLANA_RPC_URL (ton lien Helius) dans Supabase.</div>`;
   $("#alerts").innerHTML = a;
@@ -836,6 +841,35 @@ function totalCurve() {
   return out;
 }
 const PERIODS = {"24h": 864e5, "7j": 6048e5, "30j": 2592e6, "tout": Infinity};
+/**
+ * BULLE FLOTTANTE (28/11) : le capital total et les deux bots, compacts, sur toutes les pages sauf Missions.
+ * Déplaçable au doigt (position gardée), touche = afficher / masquer le détail des bots.
+ */
+let FS_OPEN = false, FS_POS = null; try { FS_POS = JSON.parse(localStorage.getItem("pulse_fsum") || "null"); FS_OPEN = localStorage.getItem("pulse_fsum_open") === "1"; } catch (e) {}
+function updateFloat() {
+  let el = $("#fsum");
+  if (!el) { el = document.createElement("div"); el.id = "fsum"; document.body.appendChild(el); dragFloat(el); }
+  if (!S || PAGE === "home") { el.style.display = "none"; return; }
+  const v = (S.bots.spot.last_value_usd ?? 0) + (S.bots.perps.last_value_usd ?? 0);
+  const c = totalCurve(), ref = c.filter(x => x.t <= Date.now() - 864e5).at(-1) ?? c[0], d = ref ? v - ref.v : null;
+  const bot = (k, n) => { const b = S.bots[k], val = b.last_value_usd, st = b.start_value_usd, g = val != null && st ? (val - st) / st * 100 : null;
+    return `<div class="fl"><span class="dot ${dotClass(k)}"></span>${n} <b>${nf(val)} $</b> <span class="${cl(g)}">${g == null ? "" : sg(g, 1) + " %"}</span></div>`; };
+  el.innerHTML = `<div class="ft"><span class="dot ${["spot", "perps"].map(dotClass).find(x => x.startsWith("alert")) || "ok"}"></span><b>${nf(v)} $</b>${d == null ? "" : ` <span class="${cl(d)}">${sg(ref.v ? d / ref.v * 100 : 0, 1)} %</span>`}</div>${FS_OPEN ? bot("spot", "B1") + bot("perps", "B2") : ""}`;
+  el.style.display = "block";
+  const W = innerWidth, H = innerHeight, w = el.offsetWidth || 150, h = el.offsetHeight || 40;
+  const x = Math.min(W - w - 6, Math.max(6, FS_POS?.x ?? W - w - 12)), y = Math.min(H - h - 90, Math.max(6, FS_POS?.y ?? 62));
+  el.style.left = x + "px"; el.style.top = y + "px";
+}
+function dragFloat(el) {
+  let sx = 0, sy = 0, ox = 0, oy = 0, moved = false, down = false;
+  el.addEventListener("pointerdown", e => { down = true; moved = false; sx = e.clientX; sy = e.clientY; ox = el.offsetLeft; oy = el.offsetTop; el.setPointerCapture(e.pointerId); });
+  el.addEventListener("pointermove", e => { if (!down) return; const dx = e.clientX - sx, dy = e.clientY - sy; if (Math.abs(dx) + Math.abs(dy) > 6) moved = true;
+    if (moved) { el.style.left = Math.min(innerWidth - el.offsetWidth - 6, Math.max(6, ox + dx)) + "px"; el.style.top = Math.min(innerHeight - el.offsetHeight - 90, Math.max(6, oy + dy)) + "px"; } });
+  el.addEventListener("pointerup", () => { if (!down) return; down = false;
+    if (moved) { FS_POS = {x: el.offsetLeft, y: el.offsetTop}; try { localStorage.setItem("pulse_fsum", JSON.stringify(FS_POS)); } catch (e) {} }
+    else { FS_OPEN = !FS_OPEN; try { localStorage.setItem("pulse_fsum_open", FS_OPEN ? "1" : "0"); } catch (e) {} updateFloat(); } });
+  addEventListener("resize", () => updateFloat());
+}
 function hero() {
   const v = (S.bots.spot.last_value_usd ?? 0) + (S.bots.perps.last_value_usd ?? 0);
   const c = totalCurve(), ref = c.filter(x => x.t <= Date.now() - 864e5).at(-1) ?? c[0];
