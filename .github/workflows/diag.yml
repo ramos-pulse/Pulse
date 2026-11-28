@@ -54,6 +54,7 @@ jobs:
           echo "=== HL perps ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"clearinghouseState\",\"user\":\"$A\"}" | head -c 600; echo
           echo "=== HL spot ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"spotClearinghouseState\",\"user\":\"$A\"}" | head -c 400; echo
           echo "=== HL agents ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"extraAgents\",\"user\":\"$A\"}" | head -c 600; echo
+          echo "=== HL abstraction ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"userAbstraction\",\"user\":\"$A\"}" | head -c 300; echo
           echo "=== HL role ==="; curl -s https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"userRole\",\"user\":\"$A\"}" | head -c 300; echo
           echo "=== HLCHECK ==="
           supabase functions deploy hlcheck --project-ref "$PROJECT_REF" --no-verify-jwt >/dev/null 2>&1 && sleep 5
