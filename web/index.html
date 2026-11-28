@@ -370,7 +370,7 @@ function missionCard(kind, title) {
     ${alerts(kind, b)}
     ${b.vault ? `<div class="l2" style="margin-top:8px" data-tip="Coffre à gains : une part de chaque gain est mise de côté et n'est plus jamais retradée. Elle reste dans le wallet du bot, tu peux la retirer quand tu veux.">🔐 Coffre : <b>${nf(b.vault)} $</b> mis de côté, jamais retradés</div>` : ""}
     <div class="sep"></div>
-    <div class="k">Dernière action</div><div class="v txt">${esc(b.last_message)}</div>
+    <div class="k">Dernière action</div>${lastAction(b.last_message)}
     ${pos}
     ${m.mindset || (!inPos && m.signal) ? `<details data-d="think-${kind}"><summary>▸ CE QUE PENSE LE BOT</summary>
       ${m.mindset ? `<div class="think">${esc(m.mindset)}</div>` : ""}
@@ -635,6 +635,22 @@ let FOLDS = new Set(); try { FOLDS = new Set(JSON.parse(localStorage.getItem("pu
 const fold = (id, title, body) => `<details data-fold="${id}" ${FOLDS.has(id) ? "open" : ""} style="margin-top:10px"><summary class="k" style="cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;padding:8px 0">${title}<span class="mut">${FOLDS.has(id) ? "▴" : "▾"}</span></summary>${body}</details>`;
 document.addEventListener("toggle", e => { const d = e.target; if (!d?.dataset?.fold) return; d.open ? FOLDS.add(d.dataset.fold) : FOLDS.delete(d.dataset.fold);
   const a = d.querySelector("summary .mut"); if (a) a.textContent = d.open ? "▴" : "▾"; try { localStorage.setItem("pulse_folds", JSON.stringify([...FOLDS])); } catch (x) {} }, true);
+/** « Dernière action » lisible (28/11) : une ligne par marché surveillé (ce que le bot attend), au lieu d'un seul bloc. */
+function lastAction(msg) {
+  const txt = String(msg || "");
+  const parts = txt.split(" · ").map(x => x.trim()).filter(Boolean);
+  const rows = [], other = [];
+  for (let p of parts) {
+    p = p.replace(/^(Pas d'entrée|Aucune entrée)\s*:\s*/i, "");
+    const m = p.match(/^([A-Z0-9][A-Z0-9.]{1,11}(?: 1 h| 15 min)?)\s*:\s*(.+)$/);
+    if (m) rows.push([m[1], m[2]]);
+    else if (/^(short|long) [A-Z0-9]+ [+-]/.test(p)) continue; // positions : affichées juste en dessous
+    else other.push(p);
+  }
+  if (rows.length < 2) return `<div class="v txt">${esc(txt)}</div>`;
+  return `${other.length ? `<div class="v txt">${esc(other.join(" · "))}</div>` : `<div class="l2" style="margin:2px 0 4px">En attente d'un signal sur ${rows.length} marché(s) :</div>`}
+    ${rows.map(([k, v]) => `<div style="display:flex;gap:10px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.05)"><b style="min-width:62px;font-family:var(--mono);font-size:14px">${esc(k)}</b><span class="l2" style="margin:0">${esc(v)}</span></div>`).join("")}`;
+}
 function swapCard() {
   const w = AGS?.swap; if (!w) return "";
   // compact (28/11) : une ligne d'état, réglage + bouton côte à côte, historique replié
