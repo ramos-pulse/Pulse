@@ -524,6 +524,8 @@ export interface Position {
   stopPx?: number;           // Hyperliquid : niveau de ce stop
   coinSize?: number;         // Hyperliquid : taille en unités du marché
   partialDone?: boolean;     // prise de bénéfices partielle déjà faite (ou stop remonté au prix d'entrée)
+  partialPnl?: number;      // 28/11 : gain déjà encaissé par la vente partielle (pour juger la position entière à la fermeture)
+  partialCost?: number;
   missing?: number;          // nombre de ticks où la position n'a pas été vue (on attend 2 ticks avant de la croire fermée)
   why?: string;              // raison de l'entrée (affichée dans « Pourquoi ce trade ? »)
   live?: { price: number; pnlPct: number; at: number };

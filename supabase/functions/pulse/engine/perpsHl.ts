@@ -90,15 +90,26 @@ export async function currentHlValue() {
 }
 
 /** Résultat réel d'une fermeture : gains réalisés moins frais, d'après les exécutions Hyperliquid depuis l'ouverture. */
-export async function realizedPnl(account: string, coin: string, since: number): Promise<number | null> {
-  const fills = await hlFills(account, Math.max(0, since - 60_000)).catch(() => null);
-  if (!fills) return null;
-  // 28/11 (bug XMR) : on part de la PREMIÈRE exécution d'ouverture de cette position. Avant, tout ce qui précédait l'ouverture
-  // d'une minute était compté : la fermeture d'une position précédente sur le même marché était comptée une seconde fois.
-  const mine = fills.filter((f) => f.coin === coin).sort((a, b) => a.time - b.time);
-  const open = mine.find((f) => /^Open/.test(f.dir) && f.time >= since - 60_000);
-  if (!open) return null;
-  return mine.filter((f) => f.time >= open.time).reduce((s, f) => s + f.closedPnl - f.fee, 0); // frais d'ouverture inclus (closedPnl = 0 à l'ouverture)
+export async function realizedPnl(account: string, coin: string, since: number, opts: { tries?: number; waitMs?: number } = {}): Promise<number | null> {
+  const tries = opts.tries ?? 4, waitMs = opts.waitMs ?? 2_000;
+  for (let i = 0; i < tries; i++) {
+    if (i) await new Promise((r) => setTimeout(r, waitMs));
+    const fills = await hlFills(account, Math.max(0, since - 60_000)).catch(() => null);
+    if (!fills) continue;
+    // 28/11 (bug XMR) : on part de la PREMIÈRE exécution d'ouverture de cette position. Avant, tout ce qui précédait l'ouverture
+    // d'une minute était compté : la fermeture d'une position précédente sur le même marché était comptée une seconde fois.
+    const mine = fills.filter((f) => f.coin === coin).sort((a, b) => a.time - b.time);
+    const open = mine.find((f) => /^Open/.test(f.dir) && f.time >= since - 60_000);
+    if (!open) continue;
+    const after = mine.filter((f) => f.time >= open.time);
+    // 28/11 : les exécutions arrivent avec du retard chez Hyperliquid. Juste après notre ordre de fermeture, la fermeture peut
+    // manquer : le trade serait noté « −0,02 $ » (frais d'ouverture seuls). On attend que tout ce qui a été ouvert soit fermé.
+    const openSz = after.filter((f) => /^Open/.test(f.dir)).reduce((s, f) => s + f.sz, 0);
+    const closeSz = after.filter((f) => /^Close/.test(f.dir)).reduce((s, f) => s + f.sz, 0);
+    if (closeSz < openSz * 0.99) continue;
+    return after.reduce((s, f) => s + f.closedPnl - f.fee, 0); // frais d'ouverture inclus (closedPnl = 0 à l'ouverture)
+  }
+  return null; // illisible : résultat estimé à partir de la valeur de la position
 }
 
 /** Pose (ou déplace) le stop chez Hyperliquid : le nouveau d'abord, l'ancien annulé ensuite (jamais sans stop). */

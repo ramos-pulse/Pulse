@@ -70,3 +70,11 @@ test("résultat d'un trade (bug XMR du 28/11) : la fermeture du trade précéden
   const pnl = await realizedPnl("0x" + "ab".repeat(20), "XMR", t("2026-11-28T09:01:07Z"));
   assert.ok(Math.abs(pnl! - 0.034354) < 1e-6, `résultat ${pnl}`);
 });
+
+test("résultat d'un trade : si la fermeture n'est pas encore visible chez Hyperliquid, pas de faux « −frais » (estimation à la place)", async () => {
+  const { realizedPnl } = await import("../supabase/functions/pulse/engine/perpsHl.ts");
+  const t = (iso: string) => Date.parse(iso);
+  S.fills = [{ coin: "XMR", dir: "Open Long", px: "439.92", sz: "0.051", closedPnl: "0", fee: "0.010096", time: t("2026-11-28T09:01:06Z"), oid: 2, side: "B" }];
+  S.fillsLag = false;
+  assert.equal(await realizedPnl("0x" + "ab".repeat(20), "XMR", t("2026-11-28T09:01:07Z"), { tries: 2, waitMs: 0 }), null);
+});

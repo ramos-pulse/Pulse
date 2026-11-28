@@ -525,7 +525,7 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, a
     const cost = (pos?.costUsd ?? proceeds) * soldFrac;
     const pnl = proceeds - cost;
     mem.vault = addToVault(mem.vault, pnl, cfg.vaultPct);
-    if (pos) { pos.costUsd = (pos.costUsd ?? cost) - cost; pos.partialDone = true; if (pos.entry) pos.stop = Math.max(pos.stop ?? 0, pos.entry); }
+    if (pos) { pos.costUsd = (pos.costUsd ?? cost) - cost; pos.partialDone = true; pos.partialPnl = (pos.partialPnl ?? 0) + pnl; pos.partialCost = (pos.partialCost ?? 0) + cost; if (pos.entry) pos.stop = Math.max(pos.stop ?? 0, pos.entry); }
     admin.addTrade("spot", { side: "sell", symbol: sym, mint, amount_usd: proceeds, price: pos?.live?.price ?? 0, pnl_usd: pnl, reason: "prise de bénéfices partielle", signature: p.sig, source: pos?.source,
       detail: { pourquoi: `le prix a atteint +${String(PARTIAL.atR).replace(".", ",")} fois le risque initial : la moitié est vendue, le stop du reste remonte au prix d'entrée`, entree: pos?.entry, duree_h: pos?.openedAt ? Math.round((Date.now() - pos.openedAt) / 360_000) / 10 : null, coffre: mem.vault } });
     return `Prise de bénéfices partielle ${sym} : ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ sécurisés, le reste ne peut plus perdre (stop au prix d'entrée).`;
@@ -544,8 +544,12 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, a
       ...(pos?.regimeFit ? { regime: pos.regime, regime_accord: pos.regimeFit } : {}) },
   });
   const brain = mem.brain ?? newBrain(valueBefore);
-  learn(brain, sym, pnlPct, valueBefore + pnl, Date.now(), stopProtects(pos) && /stop/.test(String(p.reason ?? "")));
-  if (lossPause(pnl, stopProtects(pos) && /stop/.test(String(p.reason ?? "")))) mem.cooldownUntil = Date.now() + cooldownMs(pos?.posInterval, "spot"); // sortie à l'équilibre par le stop : pas de pause
+  // 28/11 : la mémoire du bot juge la position entière (vente partielle + vente finale) : une position qui a encaissé
+  // +1,5 R sur la moitié puis est sortie à l'entrée est une victoire, pas une petite perte qui pousse le token vers le banc
+  const wholePnl = pnl + (pos?.partialPnl ?? 0), wholeCost = cost + (pos?.partialCost ?? 0);
+  const wholePct = wholeCost > 0 ? (wholePnl / wholeCost) * 100 : pnlPct;
+  learn(brain, sym, wholePct, valueBefore + pnl, Date.now(), stopProtects(pos) && /stop/.test(String(p.reason ?? "")));
+  if (lossPause(wholePnl, stopProtects(pos) && /stop/.test(String(p.reason ?? "")))) mem.cooldownUntil = Date.now() + cooldownMs(pos?.posInterval, "spot"); // sortie à l'équilibre par le stop : pas de pause
   delete positions[mint];
   if (mem.signal?.startsWith(`${sym} `)) mem.signal = undefined; // analyse liée à la position vendue : périmée
   return `Vente ${sym} confirmée (${label(p.reason)}) : ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ (${pnlPct.toFixed(1)} %), frais inclus.${pnl > 0 && cfg.vaultPct ? ` ${cfg.vaultPct} % du gain mis au coffre.` : ""}`;
