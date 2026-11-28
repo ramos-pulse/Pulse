@@ -11,13 +11,15 @@ import { currentPerpsValue, getPerpsWalletAddress, liquidatePerps, runPerpsTick 
 import { currentHlValue, getHlAddress, liquidateHl, runHlTick } from "./engine/perpsHl.ts";
 import { hlMarkets } from "./engine/hyperliquid.ts";
 import { currentValue, getWalletAddress, liquidate, runTick } from "./engine/spot.ts";
-import { AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, perpsMarkets, setPerpsMarkets, PERPS_PLANS_MAX, type PerpsMarket, type TokenInfo, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
+import { SOL_MINT, USDC_MINT, AGGR_LEVELS, AGGRESSIVE, BREAKER_STEPS, dayKey, effectiveAggr, LEVERAGES, marketFilter, type Candle, migratePositions, NERVE_LEVELS, PARTIAL, VAULT_STEPS, backtest, backtestRsi, loadConfig, loadMemory, loadPerpsConfig, PERPS_ASSETS, PERPS_RULES, PRESETS, RISK, RULES, sanitizeRsi, sanitizeTrend, STRATEGY, TOKENS, researchSide, EXTRA_SOFT, allTokens, setExtraTokens, perpsMarkets, setPerpsMarkets, PERPS_PLANS_MAX, type PerpsMarket, type TokenInfo, type Interval, type Params, type PerpsPlan, type RsiParams, type SpotPlan } from "./engine/strategy.ts";
 import { candidateKey, describe, evaluate, mutate, randomCandidate, seeded, simulate, tempo, type Candidate, type Market } from "./engine/research.ts";
 import { DbStore, notify, pushHook, type BotKind, type BotState } from "./store.ts";
 import { arbScan, bestPools, FRESH, freshCandidates, freshRefusal, impersonates, rankSelection, SELECT, selectionCandidates } from "./engine/agents.ts";
 import { newVapid, sendPush, type Subscription, type Vapid } from "./engine/webpush.ts";
 import { cleanWallet, CLEANER } from "./engine/cleaner.ts";
 import { analyze, LUCK, luckProbability, propose } from "./engine/math.ts";
+import { costChanged, costFromRoundTrip, COSTS, dueForMeasure, setSpotCosts, spotCosts, spotFee, type SpotCosts } from "./engine/costs.ts";
+import { getPrices, getQuote } from "./engine/jupiter.ts";
 import { FAMILY_NAMES, isSetup, PERPS_ONLY, sanitizeSetup, type Extra, type SetupParams } from "./engine/setups.ts";
 import { fundingHistory } from "./engine/funding.ts";
 
@@ -283,8 +285,9 @@ async function learnFromBots(): Promise<string[]> {
 }
 const INTERVALS: Interval[] = ["1h", "15m"];
 /** Marchés étudiés : liste fixe + tokens choisis par le sélectionneur (historique on-chain). */
-const researchMarkets = (): Market[] => [...RESEARCH_MARKETS, ...perpsResearchMarkets(), ...INTERVALS.flatMap((interval) => allTokens().filter((t) => t.extra === "selection" && t.active !== false).map((t) => ({
-  name: `Spot ${t.symbol}${interval === "15m" ? " · 15 min" : ""}`, product: t.candles, symbol: t.symbol, kind: "spot" as const, interval, feePct: 0.004, hourlyCost: 0, cap: RISK.maxSpotFraction })))];
+/** Spot : coût par côté MESURÉ pour chaque token (cotation Jupiter aller-retour), l'ancien coût fixe en attendant la mesure. */
+const researchMarkets = (): Market[] => [...RESEARCH_MARKETS.map((m) => ({ ...m, feePct: spotFee(m.symbol, m.feePct) })), ...perpsResearchMarkets(), ...INTERVALS.flatMap((interval) => allTokens().filter((t) => t.extra === "selection" && t.active !== false).map((t) => ({
+  name: `Spot ${t.symbol}${interval === "15m" ? " · 15 min" : ""}`, product: t.candles, symbol: t.symbol, kind: "spot" as const, interval, feePct: spotFee(t.symbol, COSTS.defaultSelected), hourlyCost: 0, cap: RISK.maxSpotFraction })))];
 const RESEARCH_MARKETS: Market[] = INTERVALS.flatMap((interval) => [
   ...TOKENS.filter((t) => t.symbol !== "JUP").map((t) => ({ name: `Spot ${t.symbol}${interval === "15m" ? " · 15 min" : ""}`, product: t.candles, symbol: t.symbol,
     kind: "spot" as const, interval, feePct: 0.003, hourlyCost: 0, cap: RISK.maxSpotFraction })),
@@ -694,8 +697,45 @@ async function runHlSelector(force = false): Promise<string> {
   return `${markets.length} marchés Hyperliquid : ${names.join(", ")}`;
 }
 
+/** Frais réels du spot : mesurés chaque jour par cotation Jupiter aller-retour, gardés dans app_kv. */
+async function loadSpotCosts() {
+  const { data } = await db.from("app_kv").select("value").eq("key", "spot_costs").limit(1);
+  setSpotCosts(((data?.[0]?.value as { costs?: SpotCosts } | undefined)?.costs) ?? {});
+}
+async function runCostScout(): Promise<string> {
+  const tokens = [...TOKENS, ...allTokens().filter((t) => t.extra === "selection" && t.active !== false)];
+  const costs: SpotCosts = { ...spotCosts() };
+  const due = dueForMeasure(tokens.map((t) => t.symbol), costs);
+  if (!due.length) return "à jour";
+  const sol = (await getPrices([SOL_MINT]))[SOL_MINT];
+  if (!sol) return "prix du SOL indisponible";
+  const done: string[] = [], failed: string[] = [];
+  for (const sym of due) {
+    const t = tokens.find((x) => x.symbol.toUpperCase() === sym)!;
+    try {
+      const usdIn = BigInt(COSTS.quoteUsd * 1e6);
+      const buy = await getQuote(USDC_MINT, t.mint, usdIn, 100);
+      const sell = await getQuote(t.mint, USDC_MINT, BigInt(buy.outAmount), 100);
+      const c = costFromRoundTrip(COSTS.quoteUsd, Number(sell.outAmount) / 1e6, sol);
+      if (!c) { failed.push(sym); continue; }
+      const fixed = TOKENS.some((x) => x.symbol.toUpperCase() === sym) ? COSTS.defaultFixed : COSTS.defaultSelected;
+      if (costChanged(costs[sym], fixed, c)) // coût très différent : les stratégies rejetées de ce token seront re-testées avec le vrai coût
+        await db.from("research").delete().eq("kind", "spot").eq("product", t.candles).eq("verdict", "rejetée");
+      costs[sym] = { ...c, at: Date.now() };
+      done.push(`${sym} ${(c.side * 100).toFixed(2).replace(".", ",")} %`);
+    } catch { failed.push(sym); }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  await db.from("app_kv").upsert({ key: "spot_costs", value: { costs }, updated_at: new Date().toISOString() }, { onConflict: "key" });
+  setSpotCosts(costs);
+  const text = `Frais réels par côté (cotation Jupiter aller-retour ×${COSTS.margin} + frais Solana) : ${done.join(", ") || "aucun"}${failed.length ? ` · non mesurés : ${failed.join(", ")}` : ""}`;
+  if (done.length) await db.from("agent_log").insert({ agent: "frais", wallet: "spot", action: "mesure", detail: text, usd: done.length });
+  return text;
+}
+
 async function loadUniverse() {
   await loadHlMarkets().catch(() => null); // marchés perps de la plateforme active (avant toute lecture des plans perps)
+  await loadSpotCosts().catch(() => null); // frais réels mesurés des tokens spot (pour le chercheur)
   // tokens actifs + tokens retirés depuis peu (ils peuvent encore être en portefeuille : le bot doit pouvoir les revendre)
   const since = Date.now() - 30 * 86_400_000;
   const { data } = await db.from("token_universe").select("*").limit(500);
@@ -987,7 +1027,8 @@ Deno.serve(async (req) => {
       const fresh = await runFreshScout().catch(err);
       const arb = await runArbScout().catch(err);
       const hl = onHl() ? await runHlSelector().catch(err) : undefined;
-      return json({ watchdog, research, swap, bilan, selector, fresh, arb, ...(hl ? { hl } : {}) });
+      const costs = await runCostScout().catch(err);
+      return json({ watchdog, research, swap, bilan, selector, fresh, arb, costs, ...(hl ? { hl } : {}) });
     }
     if (route === "/tick" && req.method === "POST") {
       if (!TOKEN || !safeEqual(req.headers.get("x-cron-secret") ?? "", await cronSecret())) return json({ error: "interdit" }, 403);
