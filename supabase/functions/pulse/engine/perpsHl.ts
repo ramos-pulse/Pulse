@@ -326,7 +326,8 @@ export async function runHlTick(admin: Admin): Promise<string> {
       const price = mids[plan.asset] ?? 0;
       if (!(price > 0)) { notes.push(`${plan.asset} : prix indisponible`); continue; }
       // 28/11 : rebond — l'objectif doit valoir 4 fois l'aller-retour Hyperliquid (même règle que le chercheur)
-      if (setup === "rebond" && expectedMove(sig) < EDGE.mult * 2 * HL_RESEARCH_FEE) { notes.push(`${plan.asset} : rebond ignoré, objectif à ${(expectedMove(sig) * 100).toFixed(2)} % < ${(EDGE.mult * 2 * HL_RESEARCH_FEE * 100).toFixed(2)} % (4 × les frais)`); continue; }
+      const fee = M.feePct ?? HL_RESEARCH_FEE; // même coût que le chercheur pour ce marché
+      if (setup === "rebond" && expectedMove(sig) < EDGE.mult * 2 * fee) { notes.push(`${plan.asset} : rebond ignoré, objectif à ${(expectedMove(sig) * 100).toFixed(2)} % < ${(EDGE.mult * 2 * fee * 100).toFixed(2)} % (4 × les frais)`); continue; }
       const asset = await hlAsset(plan.asset);
       const dist = Math.abs(sig.price - sig.stop);
       const stop = sig.side === "long" ? price - dist : price + dist;

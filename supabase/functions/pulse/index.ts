@@ -298,7 +298,7 @@ const RESEARCH_MARKETS: Market[] = INTERVALS.flatMap((interval) => [
 /** Marchés perps étudiés : ceux de la plateforme active (Jupiter : SOL, ETH, BTC ; Hyperliquid : les plus échangés du jour). */
 const PERPS_COSTS = { jupiter: { feePct: 0.0012, hourlyCost: 0.00008 }, hyperliquid: { feePct: HL_RESEARCH_FEE, hourlyCost: 0.00002 } }; // HL : 0,045 % + glissement ; funding moyen
 const perpsResearchMarkets = (): Market[] => INTERVALS.flatMap((interval) => perpsMarkets().map((a) => ({ name: `Perps ${a.asset}${interval === "15m" ? " · 15 min" : ""}`, product: a.candles, symbol: a.asset,
-  kind: "perps" as const, interval, ...PERPS_COSTS[onHl() ? "hyperliquid" : "jupiter"], cap: PERPS_RULES.maxLeverage })));
+  kind: "perps" as const, interval, ...PERPS_COSTS[onHl() ? "hyperliquid" : "jupiter"], ...(onHl() && a.feePct ? { feePct: a.feePct } : {}), cap: PERPS_RULES.maxLeverage })));
 /** Historique utilisé : 90 jours en 1 h, 60 jours en 15 min (2/3 pour régler, 1/3 jamais vu pour valider : 20 jours en 15 min). */
 const HISTORY: Record<Interval, number> = { "1h": 2160, "15m": 5760 };
 /** Re-validation : chaque stratégie retenue est rejouée sur les données récentes au moins une fois par semaine. */
@@ -809,7 +809,8 @@ type UniverseRow = { mint: string; kind: "selection" | "nouveau"; symbol: string
 /** Source d'historique d'un token on-chain : Birdeye si la clé existe (GeckoTerminal en secours), sinon GeckoTerminal. */
 const candleSource = (r: Pick<UniverseRow, "mint" | "pool">) => (env("BIRDEYE_API_KEY") ? `be:${r.mint}|${r.pool ?? ""}` : `gt:${r.pool}`);
 /** Marchés Hyperliquid tradés : choisis une fois par jour (les plus échangés), gardés dans app_kv. */
-const HL_SELECT = { keep: 20, minDayVolume: 5_000_000, minMaxLeverage: 3, always: ["BTC", "ETH", "SOL"] }; // 28/11 : 20 marchés (12 avant) pour plus d'occasions
+// 28/11 : 20 marchés (12 avant) dès 2 M$ échangés par jour ; sous 5 M$, le chercheur compte un glissement plus fort (0,1 % par côté au lieu de 0,07 %)
+const HL_SELECT = { keep: 20, minDayVolume: 2_000_000, thinBelow: 5_000_000, thinFeePct: 0.001, minMaxLeverage: 3, always: ["BTC", "ETH", "SOL"] };
 async function loadHlMarkets() {
   if (!onHl()) { setPerpsMarkets(PERPS_ASSETS.map((a) => ({ ...a }))); return; }
   const { data } = await db.from("app_kv").select("value").eq("key", "hl_markets").limit(1);
@@ -841,7 +842,8 @@ async function runHlSelector(force = false): Promise<string> {
   const all = (await hlMarkets()).filter((m) => !m.isDelisted && m.maxLeverage >= HL_SELECT.minMaxLeverage);
   const ranked = all.filter((m) => m.dayVolume >= HL_SELECT.minDayVolume).sort((a, b) => b.dayVolume - a.dayVolume);
   const names = [...new Set([...HL_SELECT.always.filter((c) => all.some((m) => m.name === c)), ...ranked.map((m) => m.name)])].slice(0, HL_SELECT.keep);
-  const markets: PerpsMarket[] = names.map((n) => ({ asset: n, candles: `hl:${n}`, maxLeverage: all.find((m) => m.name === n)?.maxLeverage }));
+  const markets: PerpsMarket[] = names.map((n) => { const m = all.find((x) => x.name === n);
+    return { asset: n, candles: `hl:${n}`, maxLeverage: m?.maxLeverage, ...(m && m.dayVolume < HL_SELECT.thinBelow && !HL_SELECT.always.includes(n) ? { feePct: HL_SELECT.thinFeePct } : {}) }; });
   if (!markets.length) throw new Error("aucun marché Hyperliquid");
   await db.from("app_kv").upsert({ key: "hl_markets", value: { markets }, updated_at: new Date().toISOString() }, { onConflict: "key" });
   setPerpsMarkets(markets);

@@ -130,7 +130,7 @@ export const PERPS_ASSETS = [
 ] as const;
 export type PerpsAsset = (typeof PERPS_ASSETS)[number]["asset"];
 /** Marchés perps tradés : Jupiter = SOL, ETH, BTC ; Hyperliquid = les marchés choisis chaque jour (bougies « hl:<marché> »). */
-export interface PerpsMarket { asset: string; candles: string; mint?: string; maxLeverage?: number }
+export interface PerpsMarket { asset: string; candles: string; mint?: string; maxLeverage?: number; feePct?: number } // feePct : coût par côté compté pour ce marché (28/11 : un peu plus sur les marchés moins échangés)
 let PERPS_MARKETS: PerpsMarket[] = PERPS_ASSETS.map((a) => ({ ...a }));
 export const perpsMarkets = (): readonly PerpsMarket[] => PERPS_MARKETS;
 export function setPerpsMarkets(list: PerpsMarket[]) { if (list.length) PERPS_MARKETS = list.filter((m, i, a) => a.findIndex((x) => x.asset === m.asset) === i); }
