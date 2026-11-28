@@ -249,10 +249,10 @@ export async function runTick(admin: Admin): Promise<string> {
       p.live = { price: livePrice, pnlPct, at: now };
       // Sortie d'urgence : la liquidité du token s'effondre (souvent le début d'une arnaque) — vérifiée toutes les 10 minutes
       let liqOut: string | null = null;
-      if (p.liqAtEntry && now - (p.liqCheckedAt ?? 0) >= (isFresh ? 2 * 60_000 : LIQUIDITY.checkMs)) {
+      if (p.liqAtEntry && now - (p.liqCheckedAt ?? 0) >= (isFresh ? 55_000 : LIQUIDITY.checkMs)) { // nouveaux tokens : à chaque minute
         p.liqCheckedAt = now;
         const liq = (await tokenLiquidity([p.key]).catch(() => ({} as Record<string, number>)))[p.key];
-        if (liq != null && liq < p.liqAtEntry * LIQUIDITY.collapse) liqOut = "liquidite_effondree";
+        if (liq != null && liq < p.liqAtEntry * (isFresh ? FRESH.liqCollapse : LIQUIDITY.collapse)) liqOut = "liquidite_effondree";
       }
       const exit = liqOut ?? (isFresh
         ? (livePrice <= stop ? "stop_loss" : p.target != null && livePrice >= p.target ? "objectif" : now - (p.openedAt ?? now) >= FRESH.maxHoldMs ? "nouveau_temps" : null)
@@ -454,6 +454,11 @@ async function freshEntry(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfi
   if (!quote) return `Nouveau token ${pick.symbol} : pas de cotation Jupiter, ignoré.`;
   const impact = Number(quote.priceImpactPct) * 100;
   if (impact > 1) return `Nouveau token ${pick.symbol} ignoré : impact de prix ${impact.toFixed(2)} % (trop peu liquide pour ${stake.toFixed(2)} $).`;
+  // 28/11 : test de revente AVANT d'acheter (cotation seulement) : pas de route ou aller-retour trop cher = piège possible
+  const back = await getQuote(pick.mint, USDC_MINT, BigInt(quote.outAmount), 300).catch(() => null);
+  const roundTrip = back ? (1 - Number(back.outAmount) / 1e6 / stake) * 100 : null;
+  if (roundTrip == null) return `Nouveau token ${pick.symbol} ignoré : impossible de coter la revente (piège à acheteurs possible).`;
+  if (roundTrip > FRESH.maxRoundTripPct) return `Nouveau token ${pick.symbol} ignoré : revendre aussitôt coûterait ${roundTrip.toFixed(1)} % (max ${FRESH.maxRoundTripPct} %).`;
   const fillPrice = stake / (Number(quote.outAmount) / 10 ** pick.decimals);
   const liqAtEntry = (await tokenLiquidity([pick.mint]).catch(() => ({} as Record<string, number>)))[pick.mint];
   const sig = await executeSwap(quote, address, keyPair, { protect: protectNow(mem, now) });

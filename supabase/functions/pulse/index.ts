@@ -20,6 +20,7 @@ import { cleanWallet, CLEANER } from "./engine/cleaner.ts";
 import { analyze, LUCK, luckProbability, propose } from "./engine/math.ts";
 import { costChanged, costFromRoundTrip, COSTS, dueForMeasure, setSpotCosts, spotCosts, spotFee, type SpotCosts } from "./engine/costs.ts";
 import { getPrices, getQuote } from "./engine/jupiter.ts";
+import { dexPrices } from "./engine/dex.ts";
 import { FAMILY_NAMES, isSetup, PERPS_ONLY, sanitizeSetup, type Extra, type SetupParams } from "./engine/setups.ts";
 import { fundingHistory } from "./engine/funding.ts";
 
@@ -868,8 +869,39 @@ async function runSelector(force = false): Promise<string> {
 }
 
 /** NOUVEAUX TOKENS : repère les lancements récents qui passent les garde-fous (achat seulement si l'agent est activé). */
+/**
+ * SUIVI À BLANC (28/11) : pour chaque token retenu (acheté ou non), variation du prix 1 h et 4 h après, sans argent engagé.
+ * Dit avec des chiffres si les choix de l'agent gagnent, avant d'y risquer de l'argent.
+ */
+async function trackFreshPaper(rows: { mint: string; data?: Record<string, unknown> | null }[]) {
+  const now = Date.now();
+  const due = rows.filter((r) => { const d = r.data ?? {}, t0 = Number(d.t0); return d.p0 != null && t0 > now - 7 * 86_400_000 && ((d.r1h == null && now - t0 >= 3_600_000) || (d.r4h == null && now - t0 >= 4 * 3_600_000)); }).slice(0, 30);
+  if (!due.length) return;
+  const px = await dexPrices(due.map((r) => r.mint));
+  for (const r of due) {
+    const d = { ...(r.data ?? {}) }, p = px[r.mint], t0 = Number(d.t0);
+    if (!(p > 0)) continue; // prix introuvable : on réessaie au cycle suivant
+    const ret = Math.round((p / Number(d.p0) - 1) * 1000) / 10;
+    if (d.r1h == null && now - t0 >= 3_600_000) d.r1h = ret;
+    if (d.r4h == null && now - t0 >= 4 * 3_600_000) d.r4h = ret;
+    await db.from("token_universe").update({ data: d }).eq("mint", r.mint);
+    r.data = d; // la suite du cycle repart de la version à jour
+  }
+}
+/** Bilan du suivi à blanc sur 7 jours : moyenne et part en hausse, à 1 h et à 4 h. */
+function freshPaperStats(rows: { kind: string; data?: Record<string, unknown> | null }[]) {
+  const since = Date.now() - 7 * 86_400_000;
+  const tracked = rows.filter((r) => r.kind === "nouveau" && Number(r.data?.t0) > since);
+  const stat = (k: "r1h" | "r4h") => { const v = tracked.map((r) => r.data?.[k]).filter((x): x is number => typeof x === "number");
+    return v.length ? { n: v.length, avg: Math.round((v.reduce((a, b) => a + b, 0) / v.length) * 10) / 10, up: Math.round((v.filter((x) => x > 0).length / v.length) * 100), worst: Math.min(...v) } : null; };
+  return { retained: tracked.length, h1: stat("r1h"), h4: stat("r4h") };
+}
+
 async function runFreshScout(): Promise<string> {
-  const { data: cur } = await db.from("token_universe").select("mint, kind, active, added_at, symbol").limit(1000);
+  const { data: cur } = await db.from("token_universe").select("mint, kind, active, added_at, symbol, data").limit(1000);
+  const fresh0 = ((cur ?? []) as { mint: string; kind: string; data?: Record<string, unknown> | null }[]).filter((r) => r.kind === "nouveau");
+  await trackFreshPaper(fresh0).catch(() => null); // d'abord la mesure (elle met à jour r.data), ensuite seulement on lit les données
+  const prevData = new Map(fresh0.map((r) => [r.mint, r.data ?? {}]));
   const known = new Set<string>([...TOKENS.map((t) => t.mint), ...((cur ?? []) as UniverseRow[]).map((r) => r.mint)]);
   // les « nouveaux » de plus de 24 h ne sont plus des nouveaux
   const old = new Date(Date.now() - FRESH.maxAgeH * 3_600_000).toISOString();
@@ -886,9 +918,15 @@ async function runFreshScout(): Promise<string> {
     if (why) { const k = why.split(" (")[0]!.split(" :")[0]!; refusals[k] = (refusals[k] ?? 0) + 1; continue; }
     if (!f.decimals) continue;
     ok.push(f);
+  }
+  // suivi à blanc : prix au moment où le token est retenu (gardé si le token est revu plus tard)
+  const p0 = ok.some((f) => prevData.get(f.mint)?.p0 == null) ? await dexPrices(ok.filter((f) => prevData.get(f.mint)?.p0 == null).map((f) => f.mint)).catch(() => ({} as Record<string, number>)) : {};
+  for (const f of ok) {
+    const prev = prevData.get(f.mint) ?? {};
+    const paper = prev.p0 != null ? { p0: prev.p0, t0: prev.t0, r1h: prev.r1h, r4h: prev.r4h } : p0[f.mint] ? { p0: p0[f.mint], t0: Date.now() } : {};
     const now = new Date().toISOString();
     await db.from("token_universe").upsert({ mint: f.mint, kind: "nouveau", symbol: f.symbol, decimals: f.decimals, pool: f.pool, liquidity: f.liquidity, volume_24h: f.volume1h * 24, age_days: f.ageMin / 1440,
-      score: f.change1h, active: true, why: "garde-fous passés", data: { change1h: f.change1h, buys1h: f.buys1h, sells1h: f.sells1h, topHolders: f.topHolders, ...(f.program ? { program: f.program } : {}) }, added_at: now, updated_at: now, seen_at: now }, { onConflict: "mint" });
+      score: f.change1h, active: true, why: "garde-fous passés", data: { change1h: f.change1h, buys1h: f.buys1h, sells1h: f.sells1h, topHolders: f.topHolders, ...(f.program ? { program: f.program } : {}), ...paper }, added_at: now, updated_at: now, seen_at: now }, { onConflict: "mint" });
   }
   const top = Object.entries(refusals).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${k} (${n})`).join(", ");
   // achats activés mais capital du bot 1 trop petit : le dire clairement (sinon « Achats activés » sans jamais rien acheter)
@@ -945,7 +983,8 @@ async function lot2Board() {
   const pos = A.filter((x) => x.net_pct > 0);
   return {
     selector: { tokens: U.filter((r) => r.kind === "selection" && r.active), removed: U.filter((r) => r.kind === "selection" && !r.active).slice(0, 10), last: L.find((x) => x.agent === "selecteur") ?? null, rules: SELECT },
-    fresh: { on: loadConfig(bots.spot.config).newTokens, tokens: U.filter((r) => r.kind === "nouveau" && r.active), last: L.filter((x) => x.agent === "nouveaux").slice(0, 5), rules: FRESH },
+    fresh: { on: loadConfig(bots.spot.config).newTokens, tokens: U.filter((r) => r.kind === "nouveau" && r.active), last: L.filter((x) => x.agent === "nouveaux").slice(0, 5), rules: FRESH,
+      paper: freshPaperStats(U as { kind: string; data?: Record<string, unknown> | null }[]) },
     arb: { measures: A.length, positives: pos.length, best: [...A].sort((a, b) => b.net_pct - a.net_pct).slice(0, 5), since: A.at(-1)?.created_at ?? null },
     watchdog: { last: L.filter((x) => x.agent === "garde").slice(0, 5) },
     push: { subscribers: subs ?? 0 },

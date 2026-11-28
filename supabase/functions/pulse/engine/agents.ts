@@ -136,6 +136,9 @@ export const FRESH = {
   minLiquidity: 50_000, minVolume1h: 20_000, minSells1h: 20, // il faut pouvoir REVENDRE : des ventes réelles doivent passer
   maxTopHolders: 30,                    // les 10 plus gros portefeuilles ≤ 30 % du total
   maxDevPct: 10,                        // le créateur ne garde pas plus de 10 % (sinon il peut tout vider d'un coup)
+  minLockedPct: 70,                     // 28/11 : au moins 70 % de la liquidité brûlée ou verrouillée (sinon elle peut être retirée d'un coup)
+  maxRoundTripPct: 5,                   // 28/11 : test de revente avant l'achat : un aller-retour ne doit pas coûter plus de 5 %
+  liqCollapse: 0.7,                     // 28/11 : sortie immédiate si la liquidité perd 30 % (contrôle chaque minute)
   minChange1h: 5, maxChange1h: 60,      // élan, mais pas une fusée déjà partie
   // gestion d'une position : toute petite mise, sortie rapide
   stakePct: 0.05, minStakeUsd: 2, maxStakeUsd: 5, maxShareOfEquity: 0.2, stopPct: 0.2, targetPct: 0.4, maxHoldMs: 4 * 3_600_000, maxPerDay: 3,
@@ -161,7 +164,8 @@ export function impersonates(symbol: string, name = ""): boolean {
 // ---------------------------------------------------------------------------------------------------
 // RugCheck (api.rugcheck.xyz, gratuit, sans clé) : créateur, sa part, alertes de risque
 // ---------------------------------------------------------------------------------------------------
-export interface RugReport { devPct: number | null; rugged: boolean; dangers: string[]; score: number | null }
+export interface RugReport { devPct: number | null; rugged: boolean; dangers: string[]; score: number | null;
+  lockedPct?: number | null } // part de la liquidité brûlée ou verrouillée (le reste peut être retiré d'un coup : le scénario NINE)
 export const RUGCHECK = { perCycle: 6 };
 export async function rugcheck(mint: string): Promise<RugReport | null> {
   const r = await fetchRetry(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { signal: AbortSignal.timeout(8_000) });
@@ -170,10 +174,13 @@ export async function rugcheck(mint: string): Promise<RugReport | null> {
 }
 /** Lecture d'un rapport RugCheck (testée sur le vrai rapport de NINE du 27/11). */
 export function parseRugcheck(x: unknown): RugReport | null {
-  const o = x as { creatorBalance?: number; token?: { supply?: number }; rugged?: boolean; score_normalised?: number; risks?: { name?: string; level?: string; value?: string }[] } | null;
+  const o = x as { creatorBalance?: number; token?: { supply?: number }; rugged?: boolean; score_normalised?: number; risks?: { name?: string; level?: string; value?: string }[];
+    totalMarketLiquidity?: number; markets?: { lp?: { lpLockedUSD?: number } }[] } | null;
   if (!o || typeof o !== "object") return null;
   const supply = Number(o.token?.supply), bal = Number(o.creatorBalance);
+  const total = Number(o.totalMarketLiquidity), locked = (o.markets ?? []).reduce((s, m) => s + (Number(m.lp?.lpLockedUSD) || 0), 0);
   return {
+    lockedPct: total > 0 ? Math.min(100, Math.round((locked / total) * 1000) / 10) : null,
     devPct: supply > 0 && Number.isFinite(bal) ? Math.round((bal / supply) * 10000) / 100 : null,
     rugged: o.rugged === true,
     dangers: (o.risks ?? []).filter((r) => r.level === "danger" && r.name).map((r) => `${r.name}${r.value ? ` (${r.value})` : ""}`),
@@ -203,8 +210,15 @@ export function freshRefusal(f: Fresh, j: JupToken | undefined, soft = false): s
   if (f.sells1h < F.minSells1h) return "presque aucune vente réussie (risque de piège à acheteurs)";
   if (f.change1h < F.minChange1h || f.change1h > F.maxChange1h) return `variation 1 h ${Math.round(f.change1h)} % hors de la zone ${F.minChange1h}-${F.maxChange1h} %`;
   if (!soft && f.buys1h <= f.sells1h) return "plus de vendeurs que d'acheteurs";
+  // en dernier : le rapport RugCheck (demandé seulement pour les candidats qui passent tout le reste)
+  if (!j.rug) return RC_NEEDED;
+  if (j.rug.lockedPct == null) return "liquidité verrouillée inconnue";
+  if (j.rug.lockedPct < FRESH.minLockedPct) return `liquidité retirable (${Math.round(j.rug.lockedPct)} % verrouillée seulement)`;
   return null;
 }
+/** Raisons qui déclenchent la demande de rapport RugCheck (le reste du filtre est déjà passé). */
+export const RC_NEEDED = "vérification RugCheck manquante";
+const NEEDS_RC = new Set(["part du créateur inconnue", RC_NEEDED]);
 
 export async function freshCandidates(exclude: Set<string>, soft = false): Promise<{ list: Fresh[]; info: Map<string, JupToken> }> {
   // « new_pools » ne contient que les toutes dernières minutes (toujours trop jeunes) : on y ajoute les pools
@@ -231,7 +245,7 @@ export async function freshCandidates(exclude: Set<string>, soft = false): Promi
   let asked = 0;
   for (const f of pre) {
     const j = info.get(f.mint), why = j ? freshRefusal(f, j, soft) : "x";
-    if (!j || (why && why !== "part du créateur inconnue") || asked >= RUGCHECK.perCycle) continue;
+    if (!j || !why || !NEEDS_RC.has(why) || asked >= RUGCHECK.perCycle) continue;
     asked++;
     const rc = await rugcheck(f.mint).catch(() => null);
     if (!rc) continue;

@@ -1,10 +1,10 @@
 // Agents on-chain : filtres du sélectionneur, garde-fous de l'agent nouveaux tokens, mise, arbitrage éclaireur.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dexSpread, freshRefusal, freshStake, rankSelection, selectionRefusal, type JupToken, freshAffordable, impersonates } from "../supabase/functions/pulse/engine/agents.ts";
+import { dexSpread, freshRefusal, freshStake, rankSelection, selectionRefusal, type JupToken, freshAffordable, impersonates, parseRugcheck, RC_NEEDED } from "../supabase/functions/pulse/engine/agents.ts";
 
 const TP = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-const safe = (x: Partial<JupToken> = {}): JupToken => ({ id: "M", symbol: "OK", decimals: 6, tokenProgram: TP, isVerified: true, audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: true, topHoldersPercentage: 10, devBalancePercentage: 2 }, ...x });
+const safe = (x: Partial<JupToken> = {}): JupToken => ({ id: "M", symbol: "OK", decimals: 6, tokenProgram: TP, isVerified: true, audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: true, topHoldersPercentage: 10, devBalancePercentage: 2 }, rug: { devPct: 2, rugged: false, dangers: [], score: 1, lockedPct: 100 }, ...x });
 const cand = { mint: "M", symbol: "OK", decimals: 6, pool: "P", liquidity: 2e6, volume24h: 3e6, ageDays: 90 };
 
 test("sélectionneur : filtres stricts (liquidité, volume, vérifié, âge, émission et gel désactivés)", () => {
@@ -97,4 +97,15 @@ test("nouveaux tokens : pas d'achat sous 10 $ de capital (mise ≤ 20 %, perte a
   assert.equal(freshAffordable(9.86), false); // le bot 1 le 28/11
   assert.equal(freshAffordable(10), true);
   assert.equal(freshAffordable(11.65), true); // quand NINE a été acheté
+});
+
+test("nouveaux tokens : liquidité verrouillée exigée (≥ 70 %), rapport RugCheck obligatoire", () => {
+  const f = { mint: "M", symbol: "OK", decimals: 6, pool: "P", liquidity: 80_000, volume1h: 30_000, change1h: 20, buys1h: 60, sells1h: 40, ageMin: 120 };
+  assert.equal(freshRefusal(f, safe()), null);
+  assert.equal(freshRefusal(f, safe({ rug: undefined })), RC_NEEDED, "sans rapport RugCheck : jamais retenu");
+  assert.match(freshRefusal(f, safe({ rug: { devPct: 2, rugged: false, dangers: [], score: 1, lockedPct: 55 } }))!, /liquidité retirable \(55 %/);
+  assert.equal(freshRefusal(f, safe({ rug: { devPct: 2, rugged: false, dangers: [], score: 1, lockedPct: null } })), "liquidité verrouillée inconnue");
+  // vrai rapport du 28/11 : pool pump.fun brûlé (83 k$) + pools Meteora DLMM non verrouillés (63 k$) sur 150 k$ → 55,4 %
+  const r = parseRugcheck({ token: { supply: 1e9 }, creatorBalance: 0, totalMarketLiquidity: 150148.14, markets: [{ lp: { lpLockedUSD: 83178.48 } }, { lp: { lpLockedUSD: 0 } }, { lp: { lpLockedUSD: 0 } }] })!;
+  assert.equal(r.lockedPct, 55.4);
 });
