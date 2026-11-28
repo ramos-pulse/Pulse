@@ -343,7 +343,10 @@ function missionCard(kind, title) {
         <div><div class="k">Position</div><div class="v">${kind === "perps" ? (side === "short" ? "SHORT ▼ " : "LONG ▲ ") : ""}${esc(p.symbol)}${p.interval === "15m" ? ' <span class="mut" style="font-weight:400">15m</span>' : ""}${(() => { // 28/11 : levier de la position (taille / marge)
           if (kind !== "perps") return ""; const L = p.lev ?? (p.collateralUsd > 0 && p.sizeUsd > 0 ? p.sizeUsd / p.collateralUsd : null);
           return L ? ` <span class="pill ${L >= 10 ? "mid" : ""}" style="font-size:12px;padding:2px 8px;vertical-align:middle" data-tip="Levier x${Math.round(L)} en marge isolée : choisi automatiquement selon la distance du stop (la liquidation reste au moins 3 fois plus loin). La perte au stop ne dépend pas du levier.">x${Math.round(L)}</span>` : ""; })()}</div></div>
-        <div><div class="k">Résultat${kind === "perps" ? " (cours)" : ""}</div><div class="v ${cl(p.live?.pnlPct)}">${sg(p.live?.pnlPct)} %</div></div>
+        ${(() => { // 28/11 : perps — gain ou perte en dollars en direct (valeur de la position − collatéral), le % du cours en dessous
+          const usd = kind === "perps" && p.lastValueUsd != null && p.collateralUsd != null ? p.lastValueUsd - p.collateralUsd : null;
+          if (usd == null) return `<div><div class="k">Résultat${kind === "perps" ? " (cours)" : ""}</div><div class="v ${cl(p.live?.pnlPct)}">${sg(p.live?.pnlPct)} %</div></div>`;
+          return `<div data-tip="Gain ou perte de la position en ce moment, en dollars (avant frais de sortie). En dessous : le mouvement du cours depuis l'entrée ; avec le levier, le résultat sur ta mise est bien plus grand."><div class="k">Résultat</div><div class="v ${cl(usd)}">${sg(usd)} $</div><div class="l2 ${cl(p.live?.pnlPct)}" style="font-size:12px">${sg(p.live?.pnlPct)} % cours</div></div>`; })()}
         <div><div class="k">Depuis</div><div class="v">${p.openedAt ? ago(new Date(p.openedAt).toISOString()) : "—"}</div></div>
         <div><div class="k">Entrée</div><div class="v">${px(entry)} $</div></div>
         <div><div class="k">Cours</div><div class="v">${px(cur)} $</div></div>
