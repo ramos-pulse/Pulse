@@ -340,7 +340,9 @@ function missionCard(kind, title) {
     const cur = p.live?.price, entry = p.entry, stop = p.stop, side = p.side;
     return `<div class="sep"></div>
       <div class="grid g3" style="margin-top:0">
-        <div><div class="k">Position</div><div class="v">${kind === "perps" ? (side === "short" ? "SHORT ▼ " : "LONG ▲ ") : ""}${esc(p.symbol)}${p.interval === "15m" ? ' <span class="mut" style="font-weight:400">15m</span>' : ""}</div></div>
+        <div><div class="k">Position</div><div class="v">${kind === "perps" ? (side === "short" ? "SHORT ▼ " : "LONG ▲ ") : ""}${esc(p.symbol)}${p.interval === "15m" ? ' <span class="mut" style="font-weight:400">15m</span>' : ""}${(() => { // 28/11 : levier de la position (taille / marge)
+          if (kind !== "perps") return ""; const L = p.lev ?? (p.collateralUsd > 0 && p.sizeUsd > 0 ? p.sizeUsd / p.collateralUsd : null);
+          return L ? ` <span class="pill ${L >= 10 ? "mid" : ""}" style="font-size:12px;padding:2px 8px;vertical-align:middle" data-tip="Levier x${Math.round(L)} en marge isolée : choisi automatiquement selon la distance du stop (la liquidation reste au moins 3 fois plus loin). La perte au stop ne dépend pas du levier.">x${Math.round(L)}</span>` : ""; })()}</div></div>
         <div><div class="k">Résultat${kind === "perps" ? " (cours)" : ""}</div><div class="v ${cl(p.live?.pnlPct)}">${sg(p.live?.pnlPct)} %</div></div>
         <div><div class="k">Depuis</div><div class="v">${p.openedAt ? ago(new Date(p.openedAt).toISOString()) : "—"}</div></div>
         <div><div class="k">Entrée</div><div class="v">${px(entry)} $</div></div>
