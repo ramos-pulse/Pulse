@@ -311,6 +311,22 @@ function btcFilterSeries(btc: Candle[]): (t: number) => boolean {
 const RESEARCH_BUDGET_MS = 1100; // calcul total d'un cycle (mathématicien + re-validation + chercheur), sous la limite de 2 s de Supabase
 const RESEARCH_MAX = 40;
 
+/**
+ * Stratégies tradées en ce moment par les bots (n° du chercheur dans leurs plans) : jamais effacées par le ménage.
+ * En extra souple, le pilote peut choisir une stratégie « rejetée » : l'effacer ferait perdre son suivi en réel et son backtest.
+ */
+async function planIds(): Promise<number[]> {
+  const bots = await readBots();
+  const plans = [...(loadConfig(bots.spot.config).plans ?? []), ...(loadPerpsConfig(bots.perps.config).plans ?? [])];
+  return [...new Set(plans.map((p) => Number(/#(\d+)/.exec(p.source ?? "")?.[1])).filter((n) => Number.isFinite(n) && n > 0))];
+}
+// deno-lint-ignore no-explicit-any
+async function keepPlans(q: any) {
+  const ids = await planIds().catch(() => null);
+  if (ids === null) return; // plans illisibles : on n'efface rien plutôt que de risquer d'effacer une stratégie en cours
+  return ids.length ? await q.not("id", "in", `(${ids.join(",")})`) : await q;
+}
+
 async function runResearch() {
   const cycle = Math.floor(Date.now() / 300_000);
   const A = agentSettings((await readBots()).spot.config);
@@ -379,8 +395,8 @@ async function runResearch() {
     const { error } = await db.from("research").upsert(rows, { onConflict: "key", ignoreDuplicates: true });
     if (error) throw new Error(`recherche : ${error.message}`);
   }
-  // ménage : les stratégies rejetées depuis plus de 3 jours sont oubliées
-  await db.from("research").delete().eq("verdict", "rejetée").lt("created_at", new Date(Date.now() - 3 * 86_400_000).toISOString());
+  // ménage : les stratégies rejetées depuis plus de 3 jours sont oubliées, SAUF celles qu'un bot trade encore (extra souple)
+  await keepPlans(db.from("research").delete().eq("verdict", "rejetée").lt("created_at", new Date(Date.now() - 3 * 86_400_000).toISOString()));
   const learned = await learnFromBots().catch(() => [] as string[]);
   const pilot = await autopilot().catch((e) => `pilote : ${(e as Error).message}`);
   const math = rows.filter((r) => r.origin === "mathématicien");
@@ -776,7 +792,7 @@ async function runCostScout(): Promise<string> {
       if (!c) { failed.push(`${sym} (cotation incohérente)`); continue; }
       const fixed = TOKENS.some((x) => x.symbol.toUpperCase() === sym) ? COSTS.defaultFixed : COSTS.defaultSelected;
       if (costChanged(costs[sym], fixed, c)) // coût très différent : les stratégies rejetées de ce token seront re-testées avec le vrai coût
-        await db.from("research").delete().eq("kind", "spot").eq("product", t.candles).eq("verdict", "rejetée");
+        await keepPlans(db.from("research").delete().eq("kind", "spot").eq("product", t.candles).eq("verdict", "rejetée"));
       costs[sym] = { ...c, at: Date.now() };
       done.push(`${sym} ${(c.side * 100).toFixed(2).replace(".", ",")} %`);
     } catch (e) { failed.push(`${sym} (${(e as Error).message.slice(0, 60)})`); }
