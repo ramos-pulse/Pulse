@@ -345,7 +345,8 @@ export async function runTick(admin: Admin): Promise<string> {
       const done = () => { mem.seen![key] = closedP; };
       if ((brain.benched[token!.symbol] ?? 0) > now) { notes.push(`${token!.symbol} : sur le banc après des pertes`); done(); continue; }
       const check = await verifyToken(token!);
-      if (!check.ok) { notes.push(`${token!.symbol} : refusé (${check.why})`); done(); continue; }
+      // 28/11 : panne de l'API Jupiter = pas un refus : la bougie n'est pas marquée jugée, nouvel essai à la minute suivante
+      if (!check.ok) { notes.push(`${token!.symbol} : ${check.why === "contrôle Jupiter indisponible" ? "contrôle Jupiter indisponible, nouvel essai dans 1 min" : `refusé (${check.why})`}`); if (check.why !== "contrôle Jupiter indisponible") done(); continue; }
       try {
         const rsi = plan.family === "rsi";
         const setup = isSetup(plan.family) ? plan.family : null;
