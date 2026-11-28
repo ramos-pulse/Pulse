@@ -49,3 +49,16 @@ test("protections : réglages bornés et valeurs par défaut", () => {
   const many = loadPerpsConfig({ plans: ["SOL", "ETH", "SOL", "BTC", "ETH"].map((asset) => ({ asset, params: { breakout: 24, trailAtr: 3, minTrend: 1 }, interval: "1h", source: asset })) });
   assert.deepEqual(many.plans.map((x) => x.asset), ["SOL", "ETH", "BTC"], "une stratégie par marché, 3 au maximum");
 });
+
+test("spot : ordre minimum de 2 $ atteint si le risque reste sous 1,5 % (extra souple sur petit capital)", async () => {
+  const { spotOrderSize } = await import("../supabase/functions/pulse/engine/strategy.ts");
+  // 20,5 $, risque voulu 0,56 %, stop à 6 % : 1,91 $ voulus → monté à 2,02 $ (risque 0,6 %)
+  const a = spotOrderSize(20.5, 17.9, 0.06, 0.0056, 0.03, 10.25) as { size: number };
+  assert.ok(a.size >= 2 && a.size < 2.1);
+  // petit capital et stop très loin : même 2 $ risqueraient trop → refus « risque » (et non « pas assez d'USDC »)
+  assert.deepEqual(spotOrderSize(5, 5, 0.2, 0.005, 0.03, 5), { refus: "risque" });
+  // vraiment pas assez d'USDC
+  assert.deepEqual(spotOrderSize(20, 1.5, 0.03, 0.01, 0.03, 10), { refus: "usdc" });
+  // cas normal : taille voulue
+  assert.ok(Math.abs((spotOrderSize(20, 20, 0.03, 0.015, 0.03, 10) as { size: number }).size - 10) < 1e-9);
+});

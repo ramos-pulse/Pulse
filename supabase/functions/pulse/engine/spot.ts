@@ -10,7 +10,7 @@ import { getBalances, loadKeyPairFrom, txStatus, waitForTx, type Balances } from
 import { dexPrices, tokenLiquidity } from "./dex.ts";
 import { FRESH, freshAffordable, freshStake } from "./agents.ts";
 import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type SetupParams } from "./setups.ts";
-import { addToVault, applyTransfer, conviction, pruneSignal, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate, EXTRA_SOFT, cooldownMs, exitSlippageBps, floorOf, solReserveAlert, volScale, groupOf, LIQUIDITY, type SpotFamily, rsiExitSignal, rsiSignal, RULES, sampleCurve, SOL_MINT, TOKENS, allTokens, type TokenInfo, TOTAL_RISK, tradable, trailStop, trendSignal, USDC_MINT, type Interval, type Memory, type Params, type Position, type RsiParams, type Signal, type SpotConfig, type SpotStrategy, lossPause, stopProtects } from "./strategy.ts";
+import { addToVault, applyTransfer, conviction, pruneSignal, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate, EXTRA_SOFT, cooldownMs, exitSlippageBps, floorOf, solReserveAlert, volScale, groupOf, LIQUIDITY, type SpotFamily, rsiExitSignal, rsiSignal, RULES, sampleCurve, SOL_MINT, TOKENS, allTokens, type TokenInfo, TOTAL_RISK, tradable, trailStop, trendSignal, USDC_MINT, type Interval, type Memory, type Params, type Position, type RsiParams, type Signal, type SpotConfig, type SpotStrategy, lossPause, stopProtects, spotOrderSize } from "./strategy.ts";
 
 type Admin = Store;
 type BotRow = BotState;
@@ -400,9 +400,12 @@ export async function runTick(admin: Admin): Promise<string> {
     if (risk < 0.002) return await hold(`Signal ${pick.token.symbol} ignoré : risque total des positions ouvertes déjà au plafond (${(TOTAL_RISK.spot * 100).toFixed(0)} %).`);
     const perPositionCap = T.equity * Math.min(RISK.maxSpotFraction, 1 / cfg.maxPositions); // part égale : de la place pour chaque position
     const dist = (pick.sig.price - pick.sig.stop) / pick.sig.price;
-    const sizeUsd = dist > 0 ? Math.min((T.equity * risk) / dist, perPositionCap, T.usdc) : 0;
-    if (sizeUsd < RISK.minOrderUsd) { for (const c of choices) mem.seen[c.seenKey] = c.closed; }
-    if (sizeUsd < RISK.minOrderUsd) return await hold(`Signal ${pick.token.symbol} mais pas assez d'USDC disponible (hors coffre) pour un ordre (min ${RISK.minOrderUsd} $).`);
+    const sized = spotOrderSize(T.equity, T.usdc, dist, risk, room, perPositionCap);
+    if ("refus" in sized) { for (const c of choices) mem.seen[c.seenKey] = c.closed; }
+    if ("refus" in sized) return await hold(sized.refus === "usdc"
+      ? `Signal ${pick.token.symbol} mais pas assez d'USDC disponible (hors coffre) pour un ordre (min ${RISK.minOrderUsd} $).`
+      : `Signal ${pick.token.symbol} ignoré : stop trop loin (${(dist * 100).toFixed(1)} %), même l'ordre minimum de ${RISK.minOrderUsd} $ risquerait plus de ${(RISK.perTrade * 100).toFixed(1)} % du capital.`);
+    const sizeUsd = sized.size, realRisk = (sizeUsd * dist) / T.equity; // risque réel (peut dépasser le voulu si monté à l'ordre minimum)
     const closed = lastClosedCandle(now, pick.interval);
     mem.seen[pick.seenKey] = pick.closed; // signal pris (ou refusé ci-dessous) : bougie jugée
     const quote = await getQuote(USDC_MINT, pick.token.mint, BigInt(Math.floor(sizeUsd * 1e6)), RULES.spotSlippageBps);
@@ -416,7 +419,7 @@ export async function runTick(admin: Admin): Promise<string> {
       key: pick.token.mint, symbol: pick.token.symbol, side: "long", stop: pick.sig.stop, best: fillPrice, initialRisk: fillPrice - pick.sig.stop, openedAt: now,
       strategy: pick.strategy, posParams: pick.params, posInterval: pick.interval, source: pick.source, stopCandle: closed,
       ...(pick.sig.target != null ? { target: pick.sig.target * (fillPrice / pick.sig.price) } : {}), ...(liqAtEntry ? { liqAtEntry, liqCheckedAt: now } : {}),
-      why: `${pick.sig.reason} · stratégie : ${pick.source} · risque ${(risk * 100).toFixed(1)} % du capital tradable${sameGroup ? " (demi-risque : un token du même groupe est déjà en portefeuille)" : ""}${mem.vault ? ` (coffre de ${mem.vault.toFixed(2)} $ exclu)` : ""}`,
+      why: `${pick.sig.reason} · stratégie : ${pick.source} · risque ${(realRisk * 100).toFixed(1)} % du capital tradable${sameGroup ? " (demi-risque : un token du même groupe est déjà en portefeuille)" : ""}${mem.vault ? ` (coffre de ${mem.vault.toFixed(2)} $ exclu)` : ""}`,
     } };
     const r = (await waitForTx(sig)) === "pending" ? "pending" : await settle(admin, bot, mem, cfg, address, value);
     await save(admin, mem, { ...patch, ...mirror(positions), last_value_usd: value, last_message: r === "pending" ? `Achat ${pick.token.symbol} envoyé, confirmation en cours…` : r });

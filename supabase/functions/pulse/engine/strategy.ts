@@ -376,6 +376,20 @@ export function spotSizeUsd(equity: number, usdc: number, entry: number, stop: n
   return size >= RISK.minOrderUsd ? size : 0;
 }
 
+/**
+ * Spot (28/11) : taille d'un achat. Si la taille voulue tombe sous l'ordre minimum (2 $), on monte au minimum
+ * SEULEMENT si le risque reste sous le risque normal par trade (1,5 %) et sous la place restante — comme le bot perps.
+ * Renvoie la taille, ou la raison du refus (« usdc » : pas assez d'USDC ; « risque » : même 2 $ risqueraient trop).
+ */
+export function spotOrderSize(equity: number, usdc: number, dist: number, risk: number, room: number, cap: number): { size: number } | { refus: "usdc" | "risque" } {
+  if (!(dist > 0) || !(equity > 0)) return { refus: "risque" };
+  const size = Math.min((equity * risk) / dist, cap, usdc);
+  if (size >= RISK.minOrderUsd) return { size };
+  if (usdc < RISK.minOrderUsd * 1.01 || cap < RISK.minOrderUsd * 1.01) return { refus: "usdc" };
+  const minRisk = (RISK.minOrderUsd * 1.01 * dist) / equity;
+  return minRisk <= Math.min(RISK.perTrade, room) + 1e-9 ? { size: RISK.minOrderUsd * 1.01 } : { refus: "risque" };
+}
+
 /** Perps : collatéral et levier pour risquer `risk` du capital, levier plafonné à `maxLev`. */
 /**
  * Levier maximum que permet un stop : le stop doit TOUJOURS être touché bien avant la liquidation.
