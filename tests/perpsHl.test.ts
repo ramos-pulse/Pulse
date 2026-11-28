@@ -288,3 +288,12 @@ test("transfert Spot → Perps sur son propre compte : ni dépôt ni retrait (ca
   assert.equal(Number(b.start_value_usd), 50, "point de départ inchangé");
   assert.equal(trades.filter((t) => t.action === "deposit").length, 0);
 });
+
+test("pause après une perte : pas de pause quand le stop protégeait déjà l'entrée (sortie à l'équilibre, frais seulement)", async () => {
+  const { lossPause, stopProtects } = await import("../supabase/functions/pulse/engine/strategy.ts");
+  // l'ETH du 28/11 : short, stop remonté au prix d'entrée, −0,08 $ de frais
+  assert.equal(lossPause(-0.08, stopProtects({ side: "short", entry: 1657.2, stop: 1657.2 })), false);
+  assert.equal(lossPause(-0.5, stopProtects({ side: "short", entry: 1657.2, stop: 1664.47 })), true);  // vraie perte : pause
+  assert.equal(lossPause(-0.3, stopProtects({ side: "long", entry: 418.06, stop: 405.06 })), true);
+  assert.equal(lossPause(0.4, false), false);
+});

@@ -10,12 +10,7 @@ import { getBalances, loadKeyPairFrom, txStatus, waitForTx, type Balances } from
 import { dexPrices, tokenLiquidity } from "./dex.ts";
 import { FRESH, freshAffordable, freshStake } from "./agents.ts";
 import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type SetupParams } from "./setups.ts";
-import {
-  addToVault, applyTransfer, conviction, pruneSignal, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate,
-  EXTRA_SOFT, cooldownMs, exitSlippageBps, floorOf, solReserveAlert, volScale, groupOf, LIQUIDITY, type SpotFamily,
-  rsiExitSignal, rsiSignal, RULES, sampleCurve, SOL_MINT, TOKENS, allTokens, type TokenInfo, TOTAL_RISK, tradable, trailStop, trendSignal, USDC_MINT,
-  type Interval, type Memory, type Params, type Position, type RsiParams, type Signal, type SpotConfig, type SpotStrategy,
-} from "./strategy.ts";
+import { addToVault, applyTransfer, conviction, pruneSignal, atr, detectTransfer, DEFAULT_PARAMS, dayKey, exitCheck, loadConfig, loadMemory, marketFilter, migratePositions, missionEnd, PARTIAL, PRESETS, RISK, riskFactor, riskGate, EXTRA_SOFT, cooldownMs, exitSlippageBps, floorOf, solReserveAlert, volScale, groupOf, LIQUIDITY, type SpotFamily, rsiExitSignal, rsiSignal, RULES, sampleCurve, SOL_MINT, TOKENS, allTokens, type TokenInfo, TOTAL_RISK, tradable, trailStop, trendSignal, USDC_MINT, type Interval, type Memory, type Params, type Position, type RsiParams, type Signal, type SpotConfig, type SpotStrategy, lossPause, stopProtects } from "./strategy.ts";
 
 type Admin = Store;
 type BotRow = BotState;
@@ -532,7 +527,7 @@ async function settle(admin: Admin, bot: BotRow, mem: Memory, cfg: SpotConfig, a
   });
   const brain = mem.brain ?? newBrain(valueBefore);
   learn(brain, sym, pnlPct, valueBefore + pnl, Date.now());
-  if (pnl < 0) mem.cooldownUntil = Date.now() + cooldownMs(pos?.posInterval);
+  if (lossPause(pnl, stopProtects(pos) && /stop/.test(String(p.reason ?? "")))) mem.cooldownUntil = Date.now() + cooldownMs(pos?.posInterval); // sortie à l'équilibre par le stop : pas de pause
   delete positions[mint];
   if (mem.signal?.startsWith(`${sym} `)) mem.signal = undefined; // analyse liée à la position vendue : périmée
   return `Vente ${sym} confirmée (${label(p.reason)}) : ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ (${pnlPct.toFixed(1)} %), frais inclus.${pnl > 0 && cfg.vaultPct ? ` ${cfg.vaultPct} % du gain mis au coffre.` : ""}`;

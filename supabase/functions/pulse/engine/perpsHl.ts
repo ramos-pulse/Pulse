@@ -14,11 +14,7 @@ import {
   type HlAccount, type HlAsset, type HlPosition,
 } from "./hyperliquid.ts";
 import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type Extra, type SetupParams } from "./setups.ts";
-import {
-  addToVault, applyTransfer, AGGR_AGGRESSIVE, AGGR_LEVELS, atr, conviction, cooldownMs, DEFAULT_PARAMS, effectiveAggr, exitCheck, EXTRA_SOFT, floorOf, LIQ, loadMemory, loadPerpsConfig,
-  migratePositions, missionEnd, PARTIAL, pruneSignal, perpsChange, perpsMarkets, PRESETS, riskFactor, riskGate, RULES, sampleCurve, sideMult, TOTAL_RISK, tradable, trailStop, trendSignal, volScale,
-  type Interval, type Memory, type Params, type PerpsConfig, type PerpsPlan, type Position,
-} from "./strategy.ts";
+import { addToVault, applyTransfer, AGGR_AGGRESSIVE, AGGR_LEVELS, atr, conviction, cooldownMs, DEFAULT_PARAMS, effectiveAggr, exitCheck, EXTRA_SOFT, floorOf, LIQ, loadMemory, loadPerpsConfig, migratePositions, missionEnd, PARTIAL, pruneSignal, perpsChange, perpsMarkets, PRESETS, riskFactor, riskGate, RULES, sampleCurve, sideMult, TOTAL_RISK, tradable, trailStop, trendSignal, volScale, type Interval, type Memory, type Params, type PerpsConfig, type PerpsPlan, type Position, lossPause, stopProtects } from "./strategy.ts";
 
 type Admin = Store;
 type PerpsRow = BotState;
@@ -351,7 +347,7 @@ function recordClose(admin: Admin, mem: Memory, cfg: PerpsConfig, coin: string, 
     detail: { pourquoi: label(reason), entree: p?.entry, stop: p?.stop, strategie: p?.source, duree_h: p?.openedAt ? Math.round((Date.now() - p.openedAt) / 360_000) / 10 : null, entree_pourquoi: p?.why, coffre: mem.vault, plateforme: "Hyperliquid", note: "résultat hors financement horaire (funding), qui s'ajoute ou se retire du compte à part",
       ...(pnlUsd == null ? { estimation: "résultat estimé (exécutions Hyperliquid illisibles)" } : {}) } });
   learn(mem.brain ?? newBrain(value), coin, pnlPct, value, Date.now());
-  if (pnl < 0) mem.cooldownUntil = Date.now() + cooldownMs(p?.posInterval);
+  if (lossPause(pnl, stopProtects(p) && /stop/.test(String(reason ?? "")))) mem.cooldownUntil = Date.now() + cooldownMs(p?.posInterval); // sortie à l'équilibre par le stop : pas de pause
   if (mem.positions) delete mem.positions[coin];
   return `Position ${coin} fermée (${label(reason)}) : ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ (${pnlPct.toFixed(1)} % du capital).${pnl > 0 && cfg.vaultPct ? ` ${cfg.vaultPct} % du gain mis au coffre.` : ""}`;
 }

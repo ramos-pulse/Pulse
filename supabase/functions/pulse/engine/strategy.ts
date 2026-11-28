@@ -509,6 +509,14 @@ export interface Position {
   why?: string;              // raison de l'entrée (affichée dans « Pourquoi ce trade ? »)
   live?: { price: number; pnlPct: number; at: number };
 }
+/**
+ * Pause après une perte (28/11) : seulement après une VRAIE perte. Une sortie par un stop déjà remonté au prix d'entrée
+ * (ou mieux) qui ne coûte que les frais n'est pas une perte de trading : pas de pause. Identique en réel et en backtest.
+ */
+export const stopProtects = (p: { side?: Side; entry?: number; stop?: number } | undefined) =>
+  !!p && p.entry != null && p.stop != null && (p.side === "short" ? p.stop <= p.entry : p.stop >= p.entry);
+export const lossPause = (pnl: number, protectedStop: boolean) => pnl < 0 && !protectedStop;
+
 export interface Memory {
   v: 3;
   stop?: number;            // niveau de stop actuel
@@ -722,7 +730,7 @@ export function backtest(candles: Candle[], o: SimOpts & { params?: Params }): B
       }
       if (exit !== null) {
         const pnl = close(exit, reason, c.t);
-        if (pnl < 0 && !o.noCooldown) cooldownUntil = c.t + T.cooldownMs;
+        if (lossPause(pnl, reason === "trailing_stop") && !o.noCooldown) cooldownUntil = c.t + T.cooldownMs;
         pos = null;
       } else {
         // prise de bénéfices à +1,5 R pendant la bougie, comme le bot réel
@@ -981,7 +989,7 @@ export function backtestRsi(candles: Candle[], p: RsiParams, feePct: number, o: 
       else if (r[i]! > exitLevel) { exit = c.c; reason = "rsi_exit"; }
       if (exit !== null) {
         const pnl = close(exit, reason, c.t);
-        if (pnl < 0 && !o.noCooldown) cooldownUntil = c.t + T.cooldownMs;
+        if (lossPause(pnl, reason === "trailing_stop") && !o.noCooldown) cooldownUntil = c.t + T.cooldownMs;
         pos = null;
       } else if (o.partial && !pos.partial && c.h >= pos.entry + PARTIAL.atR * pos.risk) {
         pos.partial = true;

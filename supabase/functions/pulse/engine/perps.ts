@@ -7,11 +7,7 @@ import { perpsClose, perpsOpen, perpsPositions, perpsPrice, type PerpPosition } 
 import { getBalances, loadKeyPairFrom, type Balances } from "./solana.ts";
 import { fundingHistory } from "./funding.ts";
 import { isSetup, setupExit, setupSignal, trailParams, TRAILING, type Extra, type SetupParams } from "./setups.ts";
-import {
-  addToVault, applyTransfer, detectTransfer, AGGR_AGGRESSIVE, AGGR_LEVELS, effectiveAggr, atr, dayKey, exitCheck, loadMemory, loadPerpsConfig, migratePositions, missionEnd, PARTIAL, PERPS_ASSETS, PERPS_RULES,
-  perpsChange, perpsSizing, conviction, PRESETS, RISK, EXTRA_SOFT, riskFactor, cooldownMs, floorOf, solReserveAlert, volScale, sampleCurve, sideMult, riskGate, RULES, TOTAL_RISK, tradable, trailStop, trendSignal, DEFAULT_PARAMS,
-  type Interval, type Memory, type Params, type PerpsConfig, type PerpsPlan, type Position,
-} from "./strategy.ts";
+import { addToVault, applyTransfer, detectTransfer, AGGR_AGGRESSIVE, AGGR_LEVELS, effectiveAggr, atr, dayKey, exitCheck, loadMemory, loadPerpsConfig, migratePositions, missionEnd, PARTIAL, PERPS_ASSETS, PERPS_RULES, perpsChange, perpsSizing, conviction, PRESETS, RISK, EXTRA_SOFT, riskFactor, cooldownMs, floorOf, solReserveAlert, volScale, sampleCurve, sideMult, riskGate, RULES, TOTAL_RISK, tradable, trailStop, trendSignal, DEFAULT_PARAMS, type Interval, type Memory, type Params, type PerpsConfig, type PerpsPlan, type Position, lossPause, stopProtects } from "./strategy.ts";
 
 type Admin = Store;
 type PerpsRow = BotState;
@@ -300,7 +296,7 @@ function recordClose(admin: Admin, mem: Memory, cfg: PerpsConfig, asset: string,
   admin.addTrade("perps", { action: "close", asset, side: p?.side, collateral_usd: proceeds, price: p?.live?.price, pnl_usd: pnl, reason, signature: sig, source: p?.source,
     detail: { pourquoi: label(reason), entree: p?.entry, stop: p?.stop, strategie: p?.source, duree_h: p?.openedAt ? Math.round((Date.now() - p.openedAt) / 360_000) / 10 : null, entree_pourquoi: p?.why, coffre: mem.vault } });
   learn(mem.brain ?? newBrain(value), asset, pnlPct, value, Date.now());
-  if (pnl < 0) mem.cooldownUntil = Date.now() + cooldownMs(p?.posInterval);
+  if (lossPause(pnl, stopProtects(p) && /stop/.test(String(reason ?? "")))) mem.cooldownUntil = Date.now() + cooldownMs(p?.posInterval); // sortie à l'équilibre par le stop : pas de pause
   if (mem.positions) delete mem.positions[asset];
   return `Position ${asset} fermée (${label(reason)}) : ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ (${pnlPct.toFixed(1)} % du capital).${pnl > 0 && cfg.vaultPct ? ` ${cfg.vaultPct} % du gain mis au coffre.` : ""}`;
 }

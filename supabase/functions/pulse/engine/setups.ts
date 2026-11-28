@@ -10,10 +10,7 @@
 // Deux types de gestion :
 //  - « à objectif » (range, orb, vwap, funding) : stop fixe, sortie à l'objectif ou après un délai ;
 //  - « suiveuses » (squeeze, volume) : gérées comme la tendance (stop suiveur chandelier, prise partielle, sortie si ça stagne).
-import {
-  activeHour, atr, barMsOf, bollinger, ema, PARTIAL, perpsChange, rangeExit, rangeSignal, RISK, sanitizeRange, STRATEGY, summarize, tfOf, trailStop, volScale,
-  type BacktestResult, type Candle, type Params, type RangeParams, type Side, type Signal, type SimOpts,
-} from "./strategy.ts";
+import { activeHour, atr, barMsOf, bollinger, ema, PARTIAL, perpsChange, rangeExit, rangeSignal, RISK, sanitizeRange, STRATEGY, summarize, tfOf, trailStop, volScale, type BacktestResult, type Candle, type Params, type RangeParams, type Side, type Signal, type SimOpts, lossPause, stopProtects } from "./strategy.ts";
 
 export type SetupFamily = "range" | "orb" | "vwap" | "squeeze" | "volume" | "funding";
 export const SETUP_FAMILIES: readonly SetupFamily[] = ["range", "orb", "vwap", "squeeze", "volume", "funding"];
@@ -295,7 +292,7 @@ export function backtestSetup(family: SetupFamily, candles: Candle[], P: SetupPa
       }
       if (exit !== null) {
         const pnl = close(exit, reason, c.t);
-        if (pnl < 0 && !o.noCooldown) cooldownUntil = c.t + T.cooldownMs;
+        if (lossPause(pnl, reason === "trailing_stop") && !o.noCooldown) cooldownUntil = c.t + T.cooldownMs;
         pos = null;
       } else if (trailing) {
         const tgt = long ? pos.entry + PARTIAL.atR * pos.risk : pos.entry - PARTIAL.atR * pos.risk;
